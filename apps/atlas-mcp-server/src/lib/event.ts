@@ -7,12 +7,16 @@
  *   3. Spawns `atlas-signer` to produce a canonical-CBOR-signed AtlasEvent
  *   4. Appends the signed event to events.jsonl
  *
- * The pipeline is intentionally serial within a single MCP process. V1
- * does not multiplex writes; tools are expected to be called sequentially
- * by the host (Claude/Cursor) which already serialises tool dispatch.
+ * Writes are serialised per-workspace via an in-process mutex. Two
+ * concurrent tool calls into the same workspace previously raced — they
+ * both computed identical parents from a stale snapshot, both signed,
+ * both appended — producing a *fork* in the DAG rather than a chain.
+ * The verifier accepts forks (it's a DAG, not a chain) but the agent's
+ * mental model "I wrote A then B builds on A" silently broke.
  *
- * Wall-clock and ULID generation happen here, not inside the signer.
- * That keeps the signer side-effect-free: same inputs → same signature.
+ * The mutex is in-process. V2 multi-process MCP deployments need an
+ * external lock service (file lock, advisory DB lock, etc.); the seam
+ * is `withWorkspaceLock` and is the only place to change.
  */
 
 import { identityForKid } from "./keys.js";
@@ -36,13 +40,35 @@ export type WriteEventResult = {
   parentsUsed: string[];
 };
 
+const workspaceLocks = new Map<string, Promise<unknown>>();
+
+/**
+ * Run `fn` while holding the per-workspace lock. Subsequent writes to
+ * the same workspace queue behind this one. Different workspaces run
+ * concurrently.
+ */
+async function withWorkspaceLock<T>(workspaceId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = workspaceLocks.get(workspaceId) ?? Promise.resolve();
+  let release!: () => void;
+  const next = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  workspaceLocks.set(workspaceId, prev.then(() => next));
+  try {
+    await prev;
+    return await fn();
+  } finally {
+    release();
+    if (workspaceLocks.get(workspaceId) === prev.then(() => next)) {
+      // best-effort cleanup; if a newer waiter has already replaced the
+      // entry we leave it alone.
+      workspaceLocks.delete(workspaceId);
+    }
+  }
+}
+
 /**
  * Common write path used by every signed-event MCP tool.
- *
- * Throws on:
- *   - unknown kid (no matching dev identity)
- *   - signer binary missing or non-zero exit
- *   - storage append failure
  */
 export async function writeSignedEvent(args: WriteEventArgs): Promise<WriteEventResult> {
   const identity = identityForKid(args.kid);
@@ -52,28 +78,30 @@ export async function writeSignedEvent(args: WriteEventArgs): Promise<WriteEvent
     );
   }
 
-  const parents = args.parents ?? computeTips(await readAllEvents(args.workspaceId));
-  const ts = args.ts ?? nowIso();
-  const eventId = ulid();
+  return withWorkspaceLock(args.workspaceId, async () => {
+    const parents = args.parents ?? computeTips(await readAllEvents(args.workspaceId));
+    const ts = args.ts ?? nowIso();
+    const eventId = ulid();
 
-  let event: AtlasEvent;
-  try {
-    event = await signEvent({
-      workspace: args.workspaceId,
-      eventId,
-      ts,
-      kid: args.kid,
-      parents,
-      payload: args.payload,
-      secretHex: identity.secretHex,
-    });
-  } catch (e) {
-    if (e instanceof SignerError) throw e;
-    throw new Error(`signer failed: ${(e as Error).message}`);
-  }
+    let event: AtlasEvent;
+    try {
+      event = await signEvent({
+        workspace: args.workspaceId,
+        eventId,
+        ts,
+        kid: args.kid,
+        parents,
+        payload: args.payload,
+        secretHex: identity.secretHex,
+      });
+    } catch (e) {
+      if (e instanceof SignerError) throw e;
+      throw new Error(`signer failed: ${(e as Error).message}`);
+    }
 
-  await appendEvent(args.workspaceId, event);
-  return { event, parentsUsed: parents };
+    await appendEvent(args.workspaceId, event);
+    return { event, parentsUsed: parents };
+  });
 }
 
 /** UTC ISO-8601 with second-level resolution (matches signer's expected format). */

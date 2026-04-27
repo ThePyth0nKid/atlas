@@ -19,11 +19,12 @@ import { z } from "zod";
 import { exportWorkspaceBundle } from "../lib/bundle.js";
 import { workspaceDir } from "../lib/paths.js";
 import { DEFAULT_WORKSPACE } from "../lib/types.js";
+import { optionalWorkspaceIdSchema } from "./schema.js";
 import type { ToolDefinition } from "./types.js";
 
 export const exportBundleInputSchema = {
-  workspace_id: z.string().min(1).optional()
-    .describe(`Workspace id; defaults to "${DEFAULT_WORKSPACE}".`),
+  workspace_id: optionalWorkspaceIdSchema
+    .describe(`Workspace id; defaults to "${DEFAULT_WORKSPACE}". [a-zA-Z0-9_-]{1,128}.`),
   /**
    * If true, write trace.json + bundle.json into the workspace dir on
    * disk in addition to returning them inline. Useful for handing off
@@ -57,8 +58,18 @@ export const exportBundleTool: ToolDefinition<typeof exportBundleInputSchema> = 
       await fs.mkdir(dir, { recursive: true });
       const tracePath = join(dir, "trace.json");
       const bundlePath = join(dir, "bundle.json");
-      await fs.writeFile(tracePath, traceJson, "utf8");
-      await fs.writeFile(bundlePath, bundleJson, "utf8");
+      // Write to a per-process temp suffix then rename. rename(2) is
+      // atomic on the same filesystem, so a concurrent reader sees
+      // either the old or the new file — never a half-written one.
+      // Auditor reading trace.json mid-export must not see a trace that
+      // doesn't match the bundle.json next to it.
+      const suffix = `.tmp-${process.pid}-${Date.now().toString(36)}`;
+      const traceTmp = tracePath + suffix;
+      const bundleTmp = bundlePath + suffix;
+      await fs.writeFile(traceTmp, traceJson, "utf8");
+      await fs.writeFile(bundleTmp, bundleJson, "utf8");
+      await fs.rename(traceTmp, tracePath);
+      await fs.rename(bundleTmp, bundlePath);
       writtenPaths = { trace_path: tracePath, bundle_path: bundlePath };
     }
 

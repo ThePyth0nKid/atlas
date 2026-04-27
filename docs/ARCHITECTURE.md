@@ -264,29 +264,43 @@ error rather than silently misverifying.
 
 ```text
 1. Agent calls MCP tool atlas.write_node(payload)
-2. MCP server reads current DAG tips for the workspace from events.jsonl
-3. MCP server spawns atlas-signer with:
+2. MCP server acquires the per-workspace write lock (in-process mutex)
+3. MCP server reads current DAG tips for the workspace from events.jsonl
+4. MCP server spawns `atlas-signer sign` with:
      --workspace, --event-id (ULID), --ts, --kid (agent SPIFFE-ID),
-     --parents=<current tips>, --payload=<JSON>, --secret-hex=<sealed>
-4. atlas-signer:
+     --parents=<current tips>, --payload=<JSON>, --secret-stdin
+   The secret is written to the child's stdin and is never visible in
+   the OS process listing or shell history.
+5. atlas-signer:
      a. builds canonical signing-input via build_signing_input(...)
      b. computes event_hash = blake3(signing_input)
      c. signs signing_input with Ed25519
      d. emits AtlasEvent JSON
-5. MCP server appends the event to data/{workspace}/events.jsonl
-6. MCP server returns event_hash to agent
+6. MCP server validates the signer's stdout against AtlasEventSchema
+   (Zod runtime check), then appends the event to events.jsonl
+7. MCP server releases the per-workspace lock
+8. MCP server returns event_hash to agent
 ```
 
-Two properties this preserves:
+Three properties this preserves:
 
-- **Single canonicalisation path.** The MCP server in TypeScript never
-  re-implements CBOR canonicalisation. It always shells out to the same
-  Rust crate that the verifier uses. There is no second signing-input
-  format that can drift independently.
-- **Sealed signing key.** In V1 the key is passed via `--secret-hex` for
-  development. In production this binary runs in a TPM/HSM-backed
-  enclave and the `--secret-hex` flag is removed; the key never leaves
-  the seal.
+- **Single canonicalisation path.** The MCP server in TypeScript owns
+  *zero* canonical-bytes formatting — neither for signing-input nor for
+  the pubkey-bundle hash. Both are produced by `atlas-signer` (`sign`
+  and `bundle-hash` subcommands) which uses the same Rust functions the
+  verifier later runs. Drift between TS and Rust is structurally
+  impossible because TS never has a code path to drift.
+- **Sealed signing key, never on argv.** Secret material is delivered
+  to the signer over stdin (`--secret-stdin`). Argv values appear in
+  `/proc/<pid>/cmdline`, `ps aux`, and shell history; stdin does not.
+  In V1 the key still originates from `keys.ts` for the bank-demo
+  story; in V2 the signer runs in a TPM/HSM-backed enclave and accepts
+  no secret input at all — the key never leaves the seal.
+- **Per-workspace serialisation.** Concurrent tool calls into the same
+  workspace queue behind one another, so the read-tips → sign → append
+  sequence is atomic from the agent's perspective. Different workspaces
+  run concurrently. Multi-process deployments (V2) replace the
+  in-process mutex with an external lock service at `withWorkspaceLock`.
 
 ---
 
@@ -444,10 +458,12 @@ What this V1 is **not** suitable for, and where the limits sit:
 - **Not a Sigstore client yet.** V1.5 ships Rekor anchoring. Until
   then, anchoring is end-to-end-tested out-of-band but not part of the
   verifier's `valid: true` guarantee.
-- **Single-tenant key sealing in V1.** The `--secret-hex` flag on
-  `atlas-signer` is a development convenience. Production deployment
-  uses a TPM/HSM-backed enclave; the flag is removed at the build-flag
-  level.
+- **Single-tenant key sealing in V1.** Secret material is delivered to
+  `atlas-signer` over stdin (`--secret-stdin`). The legacy `--secret-hex`
+  argv flag remains for backwards compatibility with the bank-demo
+  example only and emits a stderr deprecation warning. Production
+  deployment uses a TPM/HSM-backed enclave; both flags are removed at
+  the build level.
 
 ---
 

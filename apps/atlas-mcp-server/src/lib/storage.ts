@@ -11,8 +11,9 @@
  */
 
 import { promises as fs } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
 import { eventsLogPath, workspaceDir } from "./paths.js";
+import { AtlasEventSchema } from "./schema.js";
 import type { AtlasEvent } from "./types.js";
 
 export class StorageError extends Error {
@@ -52,17 +53,34 @@ export async function readAllEvents(workspaceId: string): Promise<AtlasEvent[]> 
     raw = await fs.readFile(path, "utf8");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw new StorageError(`failed to read ${path}: ${(e as Error).message}`);
+    // Strip absolute path from user-visible error to avoid disclosing the
+    // server's filesystem layout to MCP clients. Server-side logs still
+    // carry the full path via the original exception.
+    throw new StorageError(
+      `failed to read ${basename(path)}: ${sanitiseFsError(e as Error)}`,
+    );
   }
   const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
   return lines.map((line, i) => {
+    let parsed: unknown;
     try {
-      return JSON.parse(line) as AtlasEvent;
+      parsed = JSON.parse(line);
     } catch (e) {
       throw new StorageError(
         `events.jsonl line ${i + 1} is not valid JSON: ${(e as Error).message}`,
       );
     }
+    // Runtime schema check — the on-disk log is a trust boundary because
+    // a partial write or external editor can produce JSON that is
+    // syntactically valid but structurally wrong. Without this, downstream
+    // computeTips() would dereference fields that may not exist.
+    const validated = AtlasEventSchema.safeParse(parsed);
+    if (!validated.success) {
+      throw new StorageError(
+        `events.jsonl line ${i + 1} failed AtlasEvent schema: ${validated.error.message}`,
+      );
+    }
+    return validated.data as AtlasEvent;
   });
 }
 
@@ -95,4 +113,14 @@ export function computeTips(events: AtlasEvent[]): string[] {
 
 export async function ensureWorkspaceDir(workspaceId: string): Promise<void> {
   await fs.mkdir(workspaceDir(workspaceId), { recursive: true });
+}
+
+/**
+ * Strip absolute filesystem paths from a Node fs error message before
+ * surfacing it to an MCP client. Keeps the diagnostic useful while
+ * preventing layout disclosure.
+ */
+function sanitiseFsError(e: Error): string {
+  return e.message.replace(/['"]?[A-Za-z]:[\\/][^\s'"]+['"]?/g, "<path>")
+    .replace(/['"]?\/[^\s'"]+['"]?/g, "<path>");
 }

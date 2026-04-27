@@ -14,11 +14,12 @@
 import { z } from "zod";
 import { writeSignedEvent } from "../lib/event.js";
 import { DEFAULT_WORKSPACE } from "../lib/types.js";
+import { optionalWorkspaceIdSchema } from "./schema.js";
 import type { ToolDefinition } from "./types.js";
 
 export const writeAnnotationInputSchema = {
-  workspace_id: z.string().min(1).optional()
-    .describe(`Workspace id; defaults to "${DEFAULT_WORKSPACE}".`),
+  workspace_id: optionalWorkspaceIdSchema
+    .describe(`Workspace id; defaults to "${DEFAULT_WORKSPACE}". [a-zA-Z0-9_-]{1,128}.`),
   kid: z.string().min(1)
     .describe("Signer key-id of the asserting human. MUST be a `human/*` SPIFFE-id."),
   subject: z.string().min(1)
@@ -41,10 +42,8 @@ export const writeAnnotationTool: ToolDefinition<typeof writeAnnotationInputSche
   handler: async (raw) => {
     const args = inputZ.parse(raw);
     const workspaceId = args.workspace_id ?? DEFAULT_WORKSPACE;
-    if (!args.kid.includes("/human/")) {
-      // Soft warning, not a refusal: V1 dev keys may use other shapes.
-      // V2 will pull role from the cosigned identity bundle.
-    }
+    // V1 does NOT enforce kid role; V2 will pull role from the cosigned
+    // identity bundle and refuse non-human kids here.
     const payload = {
       type: "annotation.add",
       subject: args.subject,

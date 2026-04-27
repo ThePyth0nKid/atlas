@@ -29,12 +29,23 @@ Workspaces are isolated on disk under `data/{workspace}/events.jsonl`.
 
 ## Trust property preserved
 
-The single non-negotiable: the canonical signing-input that `atlas-mcp-server`
-produces must be **bit-identical** to what `atlas-trust-core` recomputes
-during verification. We preserve this structurally — not by re-implementing
-CBOR canonicalisation in TypeScript, but by spawning the Rust `atlas-signer`
-binary for every signed write. There is no second canonicalisation path
-that can drift independently.
+The single non-negotiable: the canonical bytes the MCP server emits
+(both signing-input and pubkey-bundle hash) must be **bit-identical**
+to what `atlas-trust-core` recomputes during verification.
+
+The MCP server in TypeScript owns *zero* canonical-bytes formatting:
+
+- Event signing → spawns `atlas-signer sign` (canonical CBOR signing-input
+  + Ed25519 + emit `AtlasEvent` JSON).
+- Pubkey-bundle hash → spawns `atlas-signer bundle-hash` (canonical
+  JSON over the bundle + blake3 + emit hex).
+
+Both subcommands use the same Rust functions the verifier later runs.
+A drift between TS and Rust is structurally impossible because TS has
+no canonicalisation code path to drift.
+
+Secret material is delivered to the signer via stdin (`--secret-stdin`),
+not argv — argv values appear in OS process listings and shell history.
 
 If the smoke test (`pnpm smoke`) ever fails to verify ✓ VALID, the bug is
 real, not cosmetic.
@@ -96,9 +107,11 @@ workspace's `events.jsonl`.
 ## V1 boundaries
 
 - **Signing keys are deterministic test keys** (matching the bank-demo
-  keys in `crates/atlas-signer/examples/seed_bank_demo.rs`). V2 ships
-  TPM/HSM-sealed keys; the `--secret-hex` flag is removed at the build
-  level.
+  keys in `crates/atlas-signer/examples/seed_bank_demo.rs`). The MCP
+  server passes them to the signer via stdin (`--secret-stdin`); the
+  legacy `--secret-hex` argv flag remains in the binary for the
+  bank-demo example only and emits a deprecation warning. V2 ships
+  TPM/HSM-sealed keys; both flags are removed at the build level.
 - **Persistence is JSONL on local disk.** V2 ships pluggable storage
   (Postgres, S3, FalkorDB).
 - **No multi-tenant key isolation in V1.** V2 ships per-tenant key

@@ -10,11 +10,12 @@
 import { z } from "zod";
 import { computeTips, readAllEvents } from "../lib/storage.js";
 import { DEFAULT_WORKSPACE } from "../lib/types.js";
+import { optionalWorkspaceIdSchema } from "./schema.js";
 import type { ToolDefinition } from "./types.js";
 
 export const workspaceStateInputSchema = {
-  workspace_id: z.string().min(1).optional()
-    .describe(`Workspace id; defaults to "${DEFAULT_WORKSPACE}".`),
+  workspace_id: optionalWorkspaceIdSchema
+    .describe(`Workspace id; defaults to "${DEFAULT_WORKSPACE}". [a-zA-Z0-9_-]{1,128}.`),
   limit: z.number().int().min(1).max(200).default(20)
     .describe("Maximum number of recent events to summarise."),
 };

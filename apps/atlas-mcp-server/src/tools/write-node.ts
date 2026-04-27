@@ -16,13 +16,14 @@
 import { z } from "zod";
 import { writeSignedEvent } from "../lib/event.js";
 import { DEFAULT_WORKSPACE } from "../lib/types.js";
+import { optionalWorkspaceIdSchema } from "./schema.js";
 import type { ToolDefinition } from "./types.js";
 
 const NodeKind = z.enum(["dataset", "model", "inference", "document", "other"]);
 
 export const writeNodeInputSchema = {
-  workspace_id: z.string().min(1).optional()
-    .describe(`Workspace id; defaults to "${DEFAULT_WORKSPACE}".`),
+  workspace_id: optionalWorkspaceIdSchema
+    .describe(`Workspace id; defaults to "${DEFAULT_WORKSPACE}". [a-zA-Z0-9_-]{1,128}.`),
   kid: z.string().min(1)
     .describe("Signer key-id (SPIFFE-style). Must exist in the dev pubkey-bundle."),
   kind: NodeKind.describe("Node kind — drives compliance classification."),
@@ -43,12 +44,15 @@ export const writeNodeTool: ToolDefinition<typeof writeNodeInputSchema> = {
   handler: async (raw) => {
     const args = inputZ.parse(raw);
     const workspaceId = args.workspace_id ?? DEFAULT_WORKSPACE;
+    // Spread attributes FIRST so the validated kind/id win on key collision —
+    // never let a caller-supplied `attributes` object overwrite the schema-checked
+    // node identity. Silent override of these fields would corrupt the signed payload.
     const payload = {
       type: "node.create",
       node: {
+        ...args.attributes,
         kind: args.kind,
         id: args.id,
-        ...args.attributes,
       },
     };
     const { event, parentsUsed } = await writeSignedEvent({

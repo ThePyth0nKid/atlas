@@ -1,22 +1,26 @@
 /**
- * Spawn `atlas-signer` to build the canonical signing-input and produce
- * a fully signed `AtlasEvent`.
+ * Spawn `atlas-signer` to perform every operation that requires the
+ * canonical signing-input format or the canonical bundle-hash format.
  *
- * Why a child-process boundary here, instead of re-implementing the
- * canonicalisation in TypeScript? Because the trust property is
- * "bit-identical signing-input across signer and verifier". The Rust
- * crate is the single source of canonicalisation. If we ship a TS
- * canonicaliser in parallel, we add a second drift surface that the
- * pinned goldens cannot police. So: shell out.
+ * Why a child-process boundary? The trust property is "bit-identical
+ * canonical bytes between signer and verifier". The Rust crate is the
+ * single source of canonicalisation. If we ship a TS canonicaliser in
+ * parallel, we add a second drift surface that the pinned goldens
+ * cannot police. So: shell out, both for event signing AND for the
+ * pubkey-bundle hash.
  *
- * This is a child-process boundary that takes ~10 ms warm. At MCP-write
- * frequencies (one tool call per agent action) that is fine. V2 will
- * replace the boundary with an in-process FFI binding and *retain* the
- * single-source rule by linking against the same Rust crate.
+ * Each subprocess invocation costs ~10 ms warm. At MCP-write frequencies
+ * that is fine. V2 will replace the boundary with an in-process FFI
+ * binding and *retain* the single-source rule by linking against the
+ * same Rust crate.
+ *
+ * Secret material is passed via stdin, never via argv. argv values are
+ * world-readable in `/proc/<pid>/cmdline` and `ps aux`.
  */
 
 import { spawn } from "node:child_process";
 import { resolveSignerBinary } from "./paths.js";
+import { AtlasEventSchema } from "./schema.js";
 import type { AtlasEvent } from "./types.js";
 
 export type SignArgs = {
@@ -26,6 +30,7 @@ export type SignArgs = {
   kid: string;
   parents: string[];
   payload: unknown;
+  /** 32-byte secret as 64-char hex. Passed to the child via stdin. */
   secretHex: string;
 };
 
@@ -37,29 +42,24 @@ export class SignerError extends Error {
 }
 
 export async function signEvent(args: SignArgs): Promise<AtlasEvent> {
-  const bin = resolveSignerBinary();
-  if (!bin) {
-    throw new SignerError(
-      "atlas-signer binary not found. Run `cargo build --release -p atlas-signer` " +
-        "or set ATLAS_SIGNER_PATH.",
-    );
-  }
+  const bin = resolveOrThrow();
 
   const argv = [
+    "sign",
     "--workspace", args.workspace,
     "--event-id", args.eventId,
     "--ts", args.ts,
     "--kid", args.kid,
     "--parents", args.parents.join(","),
     "--payload", JSON.stringify(args.payload),
-    "--secret-hex", args.secretHex,
+    "--secret-stdin",
   ];
 
-  const { stdout, stderr, code } = await runProcess(bin, argv);
+  const { stdout, stderr, code } = await runProcess(bin, argv, args.secretHex);
 
   if (code !== 0) {
     throw new SignerError(
-      `atlas-signer exited with code ${code}: ${stderr.trim() || "(no stderr)"}`,
+      `atlas-signer sign exited with code ${code}: ${stderr.trim() || "(no stderr)"}`,
       stderr,
     );
   }
@@ -74,14 +74,65 @@ export async function signEvent(args: SignArgs): Promise<AtlasEvent> {
     );
   }
 
-  return parsed as AtlasEvent;
+  // Runtime validation, not a type assertion. If the signer ever drifts
+  // (a Rust struct rename, a shape change), we fail at this boundary
+  // with a descriptive Zod error rather than silently writing a
+  // malformed event into events.jsonl.
+  const validated = AtlasEventSchema.safeParse(parsed);
+  if (!validated.success) {
+    throw new SignerError(
+      `atlas-signer output failed schema validation: ${validated.error.message}`,
+      stdout,
+    );
+  }
+  return validated.data as AtlasEvent;
+}
+
+/**
+ * Compute the deterministic hash of a `PubkeyBundle` by shelling out to
+ * the Rust signer's `bundle-hash` subcommand. The bundle is serialised
+ * here as JSON and handed to the child on stdin; the child re-parses it
+ * via the same `PubkeyBundle::from_json` the verifier uses, then runs
+ * the same `deterministic_hash` the verifier runs at compare-time.
+ *
+ * That keeps the hash rule single-sourced. The MCP server never owns
+ * canonical-JSON formatting.
+ */
+export async function bundleHashViaSigner(bundleJson: string): Promise<string> {
+  const bin = resolveOrThrow();
+  const { stdout, stderr, code } = await runProcess(bin, ["bundle-hash"], bundleJson);
+  if (code !== 0) {
+    throw new SignerError(
+      `atlas-signer bundle-hash exited with code ${code}: ${stderr.trim() || "(no stderr)"}`,
+      stderr,
+    );
+  }
+  const hex = stdout.trim();
+  if (!/^[0-9a-f]{64}$/.test(hex)) {
+    throw new SignerError(
+      `atlas-signer bundle-hash returned non-hex output: ${hex.slice(0, 80)}`,
+      stdout,
+    );
+  }
+  return hex;
+}
+
+function resolveOrThrow(): string {
+  const bin = resolveSignerBinary();
+  if (!bin) {
+    throw new SignerError(
+      "atlas-signer binary not found. Run `cargo build --release -p atlas-signer` " +
+        "or set ATLAS_SIGNER_PATH.",
+    );
+  }
+  return bin;
 }
 
 type ProcResult = { stdout: string; stderr: string; code: number };
 
-function runProcess(bin: string, argv: string[]): Promise<ProcResult> {
+function runProcess(bin: string, argv: string[], stdin?: string): Promise<ProcResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(bin, argv, { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(bin, argv, { stdio: ["pipe", "pipe", "pipe"] });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     child.stdout.on("data", (b: Buffer) => out.push(b));
@@ -94,5 +145,10 @@ function runProcess(bin: string, argv: string[]): Promise<ProcResult> {
         code: code ?? -1,
       });
     });
+    if (stdin !== undefined) {
+      child.stdin.end(stdin, "utf8");
+    } else {
+      child.stdin.end();
+    }
   });
 }
