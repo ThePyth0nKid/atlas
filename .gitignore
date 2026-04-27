@@ -43,3 +43,6 @@ pnpm-debug.log*
 # Coverage
 coverage/
 *.lcov
+
+# MCP server runtime data (signed events; per-developer-machine state)
+apps/atlas-mcp-server/data/

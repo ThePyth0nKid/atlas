@@ -33,11 +33,15 @@ Trust-core crate ships first. Current state:
 - Bank demo bundle verifies `✓ VALID` end-to-end through both the native
   CLI and the in-browser WASM verifier
 
-Frontend, MCP server, graph-database, and policy-engine follow.
-See [docs/SECURITY-NOTES.md](docs/SECURITY-NOTES.md) for the full
-defended attack surface. The system-design doc
-(`docs/ARCHITECTURE.md`) and the regulator-mapping
-(`docs/COMPLIANCE-MAPPING.md`) ship with V1.
+Graph-database integration and policy-engine follow.
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
+  trust property, write/export flows, V1/V1.5/V2 boundaries.
+- [docs/SECURITY-NOTES.md](docs/SECURITY-NOTES.md) — defended attack
+  surface, per-test mapping for auditors.
+- [docs/COMPLIANCE-MAPPING.md](docs/COMPLIANCE-MAPPING.md) —
+  clause-by-clause regulatory mapping (EU AI Act, GAMP 5, ICH E6(R3),
+  DORA, GDPR).
 
 ## Try it offline (when V1 ships)
 
@@ -82,7 +86,8 @@ for the pubkey-bundle hash that binds a trace to a keyset.
 - DORA Art. 11–14 — operational resilience event logging
 - GDPR Art. 22 — automated-decision traceability
 
-A clause-by-clause mapping ships with V1 as `docs/COMPLIANCE-MAPPING.md`.
+A clause-by-clause mapping with inspectable-evidence pointers lives at
+[docs/COMPLIANCE-MAPPING.md](docs/COMPLIANCE-MAPPING.md).
 
 ## Build
 
