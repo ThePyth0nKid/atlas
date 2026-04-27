@@ -1,0 +1,22 @@
+[package]
+name = "atlas-signer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Server-side signer that produces Atlas events that atlas-trust-core can verify."
+
+[[bin]]
+name = "atlas-signer"
+path = "src/main.rs"
+
+[dependencies]
+atlas-trust-core = { path = "../atlas-trust-core" }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }

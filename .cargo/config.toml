@@ -1,0 +1,5 @@
+# Target-specific rustflags.
+# wasm32 targets need an explicit `getrandom_backend="wasm_js"` cfg,
+# otherwise getrandom 0.3+ refuses to compile.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

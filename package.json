@@ -1,0 +1,19 @@
+{
+  "name": "atlas-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "license": "SEE LICENSE FILES",
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "dev": "pnpm --filter atlas-web dev",
+    "build:web": "pnpm --filter atlas-web build",
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "build:rust": "cargo build --release",
+    "build:all": "pnpm build:rust && pnpm build:wasm && pnpm build:web",
+    "test:rust": "cargo test --workspace",
+    "seed:bank": "cargo run --example seed_bank_demo -p atlas-signer --release"
+  }
+}

@@ -1,0 +1,19 @@
+[package]
+name = "atlas-verify-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Standalone CLI verifier for Atlas trace bundles. Apache-2.0."
+
+[[bin]]
+name = "atlas-verify-cli"
+path = "src/main.rs"
+
+[dependencies]
+atlas-trust-core = { path = "../atlas-trust-core" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

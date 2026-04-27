@@ -1,0 +1,123 @@
+{
+  "schema_version": "atlas-trace-v1",
+  "generated_at": "2026-04-27T10:30:00Z",
+  "workspace_id": "ws-bankhaus-hagedorn",
+  "pubkey_bundle_hash": "8a6f96e961d02141aae6ec9b3a799e16903e5fdb38e43ee3e50e0fb9d7d41b77",
+  "events": [
+    {
+      "event_id": "01HRQ001IMPORT",
+      "event_hash": "dd445ca46fc163907949c29e226eceb35a5d217c736fbb080e14620d2b863d73",
+      "parent_hashes": [],
+      "payload": {
+        "node": {
+          "id": "credit_history_q1_2026",
+          "kind": "dataset",
+          "rows": 47291,
+          "schema_hash": "blake3:abcd...",
+          "source": "s3://bankhaus-hagedorn-data/credit/q1-2026.parquet"
+        },
+        "type": "node.create"
+      },
+      "signature": {
+        "alg": "EdDSA",
+        "kid": "spiffe://atlas/agent/cursor-001",
+        "sig": "d-AH2W0IJQTDxqu2ryD51OQUsk-SAxnAzxxhUdcSDdLIQTZeHo6oYYmKg-w0ODImDSbtmn7N-TfgTYK1bSMODw"
+      },
+      "ts": "2026-01-15T09:12:00Z"
+    },
+    {
+      "event_id": "01HRQ002TRAIN",
+      "event_hash": "3dfb5d976998b2bfe8f5b1804f14d35e3a7b4cacd5b360fa05e9ef35b1a8dda1",
+      "parent_hashes": [
+        "dd445ca46fc163907949c29e226eceb35a5d217c736fbb080e14620d2b863d73"
+      ],
+      "payload": {
+        "node": {
+          "id": "CreditScoreV3.ckpt",
+          "kind": "model",
+          "params": 12400000,
+          "trained_on": "credit_history_q1_2026",
+          "training_loss_bps": 814
+        },
+        "type": "node.create"
+      },
+      "signature": {
+        "alg": "EdDSA",
+        "kid": "spiffe://atlas/agent/cursor-001",
+        "sig": "2l_NPsUmU66ChHxo_2pNQ6EpGshq8mY5uoge2lQr4OQuhgDNY_PDeE_5qyzdSKr6GWplHYp72dN-YNArP6kNBg"
+      },
+      "ts": "2026-01-15T11:33:00Z"
+    },
+    {
+      "event_id": "01HRQ003VERIFY",
+      "event_hash": "04ddc5e0e30916ce8aec290c0bd4b0a2a09d5763548c5c3b90e23689b2ebc250",
+      "parent_hashes": [
+        "3dfb5d976998b2bfe8f5b1804f14d35e3a7b4cacd5b360fa05e9ef35b1a8dda1"
+      ],
+      "payload": {
+        "object": {
+          "decision": "approved",
+          "evidence": "Validation set AUC 0.91; bias check passed",
+          "verifier": "Dr. Sebastian Meinhardt"
+        },
+        "predicate": "verified_by_human",
+        "subject": "CreditScoreV3.ckpt",
+        "type": "annotation.add"
+      },
+      "signature": {
+        "alg": "EdDSA",
+        "kid": "spiffe://atlas/human/sebastian.meinhardt@bankhaus-hagedorn.de",
+        "sig": "iayd1DTXjRrAgUIS2WdwZ6Cpjln_9n3h9UMhikB7FuopHH8Nl_eACfkH23EuwjZSom4up61NqVEg6cYUBsl9AQ"
+      },
+      "ts": "2026-01-15T14:02:00Z"
+    },
+    {
+      "event_id": "01HRQ004PREDICT",
+      "event_hash": "00217e5b2a297e62c3660f67009ea3de0f218578a5e0f624ad2519b7947f1731",
+      "parent_hashes": [
+        "04ddc5e0e30916ce8aec290c0bd4b0a2a09d5763548c5c3b90e23689b2ebc250"
+      ],
+      "payload": {
+        "node": {
+          "decision": "approved",
+          "id": "loan_decision_4711",
+          "input_subject": "applicant-anon-4711",
+          "kind": "inference",
+          "model": "CreditScoreV3.ckpt",
+          "score_bps": 7800
+        },
+        "type": "node.create"
+      },
+      "signature": {
+        "alg": "EdDSA",
+        "kid": "spiffe://atlas/agent/cursor-001",
+        "sig": "TittAPci8DKzoyZooCemDBypXMSkRYZ9_dNJ_tpfWCVy4mbJmKmJhS8_q2GrA0Qh_gWnmOWwEuhIGS4gI9bfAw"
+      },
+      "ts": "2026-01-16T08:15:00Z"
+    },
+    {
+      "event_id": "01HRQ005ANCHOR",
+      "event_hash": "68ebf5edc9e7e578469cdb4ec7fa080ff244d484d6814bee2d9f492493db0108",
+      "parent_hashes": [
+        "00217e5b2a297e62c3660f67009ea3de0f218578a5e0f624ad2519b7947f1731"
+      ],
+      "payload": {
+        "rekor_proof": "<base64-omitted-for-V1-stub>",
+        "rekor_uuid": "24296fb24b8ad77a3b14fb71e8a1e7c45c4b76e1d3e8a7c1b4e6f9a2",
+        "type": "anchor.created"
+      },
+      "signature": {
+        "alg": "EdDSA",
+        "kid": "spiffe://atlas/system/anchor-worker",
+        "sig": "iMZpSqbajV2dhYW1taltly7Bsie21aqs-f5nEWlXXHZY9T16qudpAnDPv2GH8r8_1DyWA25_0-rHqfXSbeJ3CQ"
+      },
+      "ts": "2026-01-16T09:00:00Z"
+    }
+  ],
+  "dag_tips": [
+    "68ebf5edc9e7e578469cdb4ec7fa080ff244d484d6814bee2d9f492493db0108"
+  ],
+  "anchors": [],
+  "policies": [],
+  "filters": null
+}

@@ -1,0 +1,63 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/atlas-trust-core",
+    "crates/atlas-verify-cli",
+    "crates/atlas-verify-wasm",
+    "crates/atlas-signer",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Nelson Mehlis <nelson@ultranova.io>"]
+license = "Apache-2.0"
+repository = "https://github.com/ultranova/atlas"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# Crypto
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "rand_core"] }
+coset = "0.3"
+ciborium = "0.2"
+blake3 = "1.5"
+
+# Serde
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# IDs
+ulid = { version = "1.1", features = ["serde"] }
+
+# Errors
+thiserror = "1.0"
+
+# Encoding
+base64 = "0.22"
+hex = "0.4"
+
+# Constant-time compare (defence against timing side-channels on hash equality)
+subtle = "2.5"
+
+# WASM (only used by wasm crate)
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+
+# CLI (only used by cli crate)
+clap = { version = "4.5", features = ["derive"] }
+
+# Policy (only used in server-side later)
+# cedar-policy = "4.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.release-wasm]
+inherits = "release"
+opt-level = "z"  # Size-optimized for browser bundle

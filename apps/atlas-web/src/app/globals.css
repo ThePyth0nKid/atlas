@@ -1,0 +1,83 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --bg-subtle: #f8fafc;          /* slate-50 */
+  --bg-muted: #f1f5f9;            /* slate-100 */
+  --border: #e2e8f0;              /* slate-200 */
+  --foreground: #0f172a;          /* slate-900 */
+  --foreground-muted: #64748b;    /* slate-500 */
+  --accent-trust: #3fbc78;        /* sigstore-green */
+  --accent-warn: #f59e0b;         /* amber-500 */
+  --accent-danger: #ef4444;       /* red-500 */
+  --accent-info: #3b82f6;         /* blue-500 */
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-bg-subtle: var(--bg-subtle);
+  --color-bg-muted: var(--bg-muted);
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-foreground-muted: var(--foreground-muted);
+  --color-trust: var(--accent-trust);
+  --color-warn: var(--accent-warn);
+  --color-danger: var(--accent-danger);
+  --color-info: var(--accent-info);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, "Inter", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.font-mono {
+  font-family: ui-monospace, "JetBrains Mono", SFMono-Regular, Menlo, monospace;
+}
+
+/* Linear-clean utility: hash/id-display */
+.hash-chip {
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: var(--foreground-muted);
+  background: var(--bg-muted);
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: -0.01em;
+}
+
+/* Trust-as-UI: every datapoint shows its trust state */
+.trust-tick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  font-size: 9px;
+  line-height: 1;
+}
+
+.trust-tick--ok {
+  background: color-mix(in srgb, var(--accent-trust) 15%, transparent);
+  color: var(--accent-trust);
+}
+
+.trust-tick--fail {
+  background: color-mix(in srgb, var(--accent-danger) 15%, transparent);
+  color: var(--accent-danger);
+}

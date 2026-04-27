@@ -1,0 +1,9 @@
+{
+  "schema": "atlas-pubkey-bundle-v1",
+  "generated_at": "2026-01-01T00:00:00Z",
+  "keys": {
+    "spiffe://atlas/agent/cursor-001": "5zTqbCtiV95yNV5HKqBaTEh-a0Y8Ap7TBt8vAbVja1g",
+    "spiffe://atlas/human/sebastian.meinhardt@bankhaus-hagedorn.de": "fVnFYj3UCnSqTVoyrGRdOz-V2urkwiviVHbdakhvc4I",
+    "spiffe://atlas/system/anchor-worker": "ylfu0w5KcnTvTGSPVvWPiAsg0solcl2eXBPIPAjAmus"
+  }
+}

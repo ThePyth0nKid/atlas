@@ -1,0 +1,105 @@
+Atlas Sustainable Use License v1.0
+
+Copyright (C) 2026 Nelson Mehlis / IGOULTRA UG. All rights reserved.
+
+This license governs the components in `apps/` (including atlas-mcp-server,
+atlas-web, and any other software in this repository under `apps/` unless that
+component carries its own license header). The verifier crates under `crates/`
+are licensed separately under the Apache License, Version 2.0
+(see LICENSE-APACHE-2.0).
+
+You may use, copy, modify, and distribute this software, subject to the
+restrictions below.
+
+
+1. PERMITTED USE
+
+  (a) Internal Business Use. You may run this software for your own internal
+      business operations, including for-profit operations, on infrastructure
+      you own or control, for the benefit of your own organisation.
+
+  (b) Personal Use. You may run this software for any personal, educational,
+      or non-commercial research purpose.
+
+  (c) Modification. You may modify the source code for any permitted use,
+      subject to the restrictions in section 2.
+
+  (d) Distribution. You may distribute the unmodified or modified source
+      code, provided that all copyright and license notices are preserved
+      and that recipients are informed that this software is governed by
+      the Atlas Sustainable Use License.
+
+
+2. RESTRICTIONS
+
+  (a) No Service Offering. You may not offer this software, or any
+      modification or derivative of it, as a hosted, managed, or
+      "as-a-service" product to third parties. "As-a-service" means any
+      arrangement in which third parties access the functionality of this
+      software over a network, whether for a fee or free of charge, and
+      whether or not those third parties are aware that this software is
+      involved.
+
+      Internal use within a single organisation is permitted; offering
+      Atlas-derived functionality to anyone outside your organisation
+      requires a commercial license.
+
+  (b) No Removal of Notices. You may not remove or alter copyright,
+      trademark, license, or attribution notices.
+
+  (c) No Trademark Use. The names "Atlas", "Atlas Trust Core", "IGOULTRA",
+      and any associated logos remain trademarks of IGOULTRA UG. This
+      license grants no trademark rights. You may use the marks only for
+      truthful, descriptive reference (e.g., "compatible with Atlas").
+
+  (d) No Resale of Compliance Reports. You may not generate audit reports,
+      compliance bundles, or PDF/A exports using this software for paid
+      resale to third parties without a commercial license.
+
+
+3. COMMERCIAL LICENSE
+
+If your intended use does not fit within section 1 — for example, if you wish
+to host Atlas as a service for third parties, to remove the attribution
+notices, or to resell compliance bundles — a commercial license is available.
+
+Contact: nelson@ultranova.io
+
+
+4. VERIFIER EXCEPTION
+
+Nothing in this license limits the rights granted by the Apache License, 2.0,
+to the verifier crates under `crates/`. An auditor or regulator who receives
+an Atlas trace bundle is free to fork, build, and run the verifier crates
+under Apache-2.0, with no obligation under this license.
+
+The trust-property of Atlas must be structurally verifiable by any auditor,
+end-to-end, without a license from us. This carve-out is deliberate.
+
+
+5. WARRANTY DISCLAIMER
+
+This software is provided "AS IS", without warranty of any kind, express or
+implied, including but not limited to the warranties of merchantability,
+fitness for a particular purpose, and non-infringement.
+
+
+6. LIMITATION OF LIABILITY
+
+In no event shall the authors or copyright holders be liable for any claim,
+damages, or other liability, whether in an action of contract, tort, or
+otherwise, arising from, out of, or in connection with this software or the
+use or other dealings in this software.
+
+
+7. TERMINATION
+
+If you violate any term of this license, your rights under section 1
+terminate automatically. If you cure the violation within 30 days of
+becoming aware of it, your rights are reinstated. Repeated violations are
+not curable.
+
+
+END OF TERMS
+
+For licensing inquiries: nelson@ultranova.io

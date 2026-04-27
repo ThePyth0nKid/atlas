@@ -1,0 +1,26 @@
+[package]
+name = "atlas-verify-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "WASM build of atlas-trust-core for use in the browser. Apache-2.0."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.wasm-pack.profile.release]
+# Bundled wasm-opt 0.116 cannot handle bulk-memory ops produced by recent rustc.
+# Skip post-processing — output is already optimised by rustc with opt-level=z.
+wasm-opt = false
+
+[dependencies]
+atlas-trust-core = { path = "../atlas-trust-core" }
+wasm-bindgen = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde-wasm-bindgen = { workspace = true }
+# Force wasm_js backend for getrandom on wasm32 (transitive dep via ed25519-dalek).
+getrandom = { version = "0.3", features = ["wasm_js"] }
