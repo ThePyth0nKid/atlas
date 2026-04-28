@@ -139,23 +139,48 @@ export type AnchorBatchInput = {
 };
 
 /**
- * Issue mock-Rekor anchor entries for a batch of hashes by shelling out
- * to the Rust signer's `anchor` subcommand. The signer builds the Merkle
- * tree, signs the checkpoint with the dev mock-Rekor key, and emits one
- * `AnchorEntry` per request.
+ * Optional issuer-side switches for `anchorViaSigner`.
  *
- * Same single-canonicalisation discipline as `bundleHashViaSigner`: the
- * MCP server never owns Merkle-tree construction or canonical-checkpoint
- * formatting. V1.6 swaps the issuer for a real Sigstore POST without
- * touching this boundary.
+ * `rekorUrl`: when set, the Rust signer POSTs each batch item to
+ * `<rekorUrl>/api/v1/log/entries` and emits Sigstore-format
+ * `AnchorEntry` rows. When unset, the in-process mock-Rekor issuer
+ * runs unchanged. The verifier dispatches by `log_id` regardless,
+ * so both shapes flow through the same trust path.
+ *
+ * The Rust side validates the URL: only `https://` is accepted for
+ * non-loopback hosts. Plaintext `http://` is gated to localhost so
+ * an operator typo cannot silently submit anchoring signatures over
+ * an unencrypted wire. The TS side does NOT duplicate that check —
+ * the policy lives in one place, in the signer.
+ */
+export type AnchorOptions = {
+  rekorUrl?: string;
+};
+
+/**
+ * Issue anchor entries for a batch of hashes by shelling out to the
+ * Rust signer's `anchor` subcommand. The signer either builds an
+ * in-process mock-Rekor checkpoint (default) or POSTs to a live
+ * Sigstore Rekor v1 instance (when `options.rekorUrl` is set). It
+ * emits one `AnchorEntry` per request in either case.
+ *
+ * Same single-canonicalisation discipline as `bundleHashViaSigner`:
+ * the MCP server never owns Merkle-tree construction or canonical-
+ * checkpoint formatting, and the live-vs-mock dispatch happens
+ * inside the Rust binary so the TS boundary stays narrow.
  */
 export async function anchorViaSigner(
   batch: AnchorBatchInput,
+  options: AnchorOptions = {},
 ): Promise<AnchorEntry[]> {
   const bin = resolveOrThrow();
+  const argv = ["anchor"];
+  if (options.rekorUrl !== undefined) {
+    argv.push("--rekor-url", options.rekorUrl);
+  }
   const { stdout, stderr, code } = await runProcess(
     bin,
-    ["anchor"],
+    argv,
     JSON.stringify(batch),
   );
   if (code !== 0) {

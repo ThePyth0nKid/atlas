@@ -44,6 +44,24 @@ export const anchorBundleInputSchema = {
    */
   integrated_time: z.number().int().nonnegative().optional()
     .describe("Unix seconds for the anchor's integrated_time. Defaults to now."),
+  /**
+   * Optional live-Rekor base URL. When set, anchors are issued via a
+   * real Sigstore Rekor v1 instance (e.g. `https://rekor.sigstore.dev`)
+   * and the resulting `AnchorEntry` rows carry the Sigstore log_id +
+   * tree_id + canonical entry body. When unset, the in-process mock
+   * issuer runs (default for smoke tests and offline demos). Falls
+   * back to the `ATLAS_REKOR_URL` environment variable if neither
+   * field nor argv supplies a value.
+   *
+   * Validation lives in the Rust signer: `https://` is required for
+   * non-loopback hosts; plaintext `http://` is gated to localhost.
+   */
+  rekor_url: z.string().url().optional()
+    .describe(
+      "Optional Rekor URL (e.g. https://rekor.sigstore.dev). Falls back " +
+        "to ATLAS_REKOR_URL env var; if neither is set, the in-process " +
+        "mock issuer runs.",
+    ),
 };
 
 const inputZ = z.object(anchorBundleInputSchema);
@@ -74,10 +92,12 @@ export const anchorBundleTool: ToolDefinition<typeof anchorBundleInputSchema> = 
       ),
     ];
 
-    const entries = await anchorViaSigner({
-      items,
-      integrated_time: integratedTime,
-    });
+    // Live-Rekor opt-in: explicit field beats env, env beats mock.
+    const rekorUrl = args.rekor_url ?? process.env.ATLAS_REKOR_URL;
+    const entries = await anchorViaSigner(
+      { items, integrated_time: integratedTime },
+      { rekorUrl },
+    );
 
     await ensureWorkspaceDir(workspaceId);
     const target = anchorsPath(workspaceId);
