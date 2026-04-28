@@ -153,19 +153,30 @@ pub struct AnchorEntry {
 ///
 /// The proof binds a single leaf hash (derived from `anchored_hash`) to
 /// `root_hash` via `hashes` (RFC 6962 §2.1.1 sibling ordering, deepest
-/// sibling first). `checkpoint_sig` is the log's Ed25519 signature over
-/// the canonical checkpoint bytes built from `tree_size` + `root_hash`.
+/// sibling first). `checkpoint_sig` is the log's signature over the
+/// canonical checkpoint bytes; the encoding and signature scheme depend
+/// on the parent `AnchorEntry`'s log format.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InclusionProof {
     /// Tree size at which inclusion was witnessed.
     pub tree_size: u64,
-    /// Hex root hash of the tree at `tree_size`.
+    /// Hex root hash of the tree at `tree_size`. For Sigstore Rekor v1
+    /// this is the hex of the 32-byte SHA-256 root; for atlas-mock-v1
+    /// the hex of the 32-byte blake3 root.
     pub root_hash: String,
     /// Hex sibling hashes from leaf to root (RFC 6962 ordering).
     pub hashes: Vec<String>,
-    /// Base64-no-pad Ed25519 signature over canonical checkpoint bytes.
-    /// Canonical bytes: see `atlas_trust_core::anchor::canonical_checkpoint_bytes`.
+    /// Base64-encoded log signature over the canonical checkpoint bytes.
+    ///
+    /// Format depends on `AnchorEntry`'s log:
+    /// - `atlas-mock-rekor-v1` (V1.5): URL-safe base64 (no padding) of a
+    ///   raw 64-byte Ed25519 signature. Canonical bytes:
+    ///   `atlas_trust_core::anchor::canonical_checkpoint_bytes`.
+    /// - `sigstore-rekor-v1` (V1.6): RFC 4648 §4 standard base64 (with
+    ///   `=` padding) of `4-byte BE keyID || DER ECDSA P-256 signature`,
+    ///   per the C2SP signed-note spec. Canonical bytes:
+    ///   `atlas_trust_core::anchor::canonical_checkpoint_bytes_sigstore`.
     pub checkpoint_sig: String,
 }
 

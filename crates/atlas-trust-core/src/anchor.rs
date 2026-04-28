@@ -80,9 +80,14 @@ pub const SIGSTORE_REKOR_V1_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZ
 ///
 /// Used to reconstruct the C2SP signed-note origin line
 /// `"rekor.sigstore.dev - {tree_id}"`. Inactive shards have different
-/// tree-IDs (and different origin lines); V1.6 only supports the active
-/// shard. An anchor whose `tree_id` does not match here is treated as
-/// "not in this log" — we do not gatekeep cross-shard.
+/// tree-IDs (and therefore different origin lines, since the tree-ID is
+/// part of the signed body); V1.6 only supports the active shard.
+///
+/// Enforced in `verify_sigstore_rekor_v1`: an anchor whose `tree_id`
+/// does not equal this constant is rejected with a clear error before
+/// signature verification (which would otherwise fail with the opaque
+/// "ECDSA P-256 verify: signature error"). V1.7 adds the historical
+/// shards by extending the trusted-log roster with their origins.
 pub const SIGSTORE_REKOR_V1_ACTIVE_TREE_ID: i64 = 1_193_050_959_916_656_506;
 
 /// Origin label used in the active Sigstore Rekor v1 log's checkpoints.
@@ -442,13 +447,25 @@ fn verify_sigstore_rekor_v1(
         );
     };
 
+    // V1.6 only trusts the active Sigstore Rekor v1 shard. Reject other
+    // shards explicitly so the auditor sees a precise reason (rather
+    // than a generic "ECDSA P-256 verify" failure later in the path).
+    if tree_id != SIGSTORE_REKOR_V1_ACTIVE_TREE_ID {
+        return mk(format!(
+            "anchor tree_id {tree_id} is not the active Sigstore Rekor v1 shard \
+             ({}); historical shards land in V1.7",
+            SIGSTORE_REKOR_V1_ACTIVE_TREE_ID,
+        ));
+    }
+
+    // Sigstore returns the entry body as RFC 4648 §4 STANDARD base64
+    // (with `=` padding). Strict-only — a deviation here means we are
+    // looking at non-Sigstore data and should refuse, not paper over.
     let entry_body = match base64::engine::general_purpose::STANDARD
         .decode(entry_body_b64.as_bytes())
-        .or_else(|_| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(entry_body_b64.as_bytes())
-        }) {
+    {
         Ok(b) => b,
-        Err(e) => return mk(format!("entry_body_b64 is not base64: {e}")),
+        Err(e) => return mk(format!("entry_body_b64 is not standard base64: {e}")),
     };
 
     let leaf_hash = leaf_hash_sha256_rfc6962(&entry_body);
@@ -506,6 +523,25 @@ pub fn canonical_checkpoint_bytes_sigstore(
     tree_size: u64,
     root_hash_hex: &str,
 ) -> Result<Vec<u8>, String> {
+    // Defensive: the C2SP signed-note format uses `\n` as the line
+    // separator and ` - ` as the origin/tree-id separator on line 1.
+    // An attacker-controlled origin containing either could splice a
+    // forged origin/tree-id pair into the signed body. Origin is a
+    // public function arg (not always a constant), so reject those
+    // characters explicitly. Empty origin is also nonsensical.
+    if origin.is_empty() {
+        return Err("origin must not be empty".to_string());
+    }
+    if origin.contains('\n') {
+        return Err("origin must not contain a newline".to_string());
+    }
+    if origin.contains(" - ") {
+        return Err(
+            "origin must not contain ' - ' (would collide with the tree-id separator)"
+                .to_string(),
+        );
+    }
+
     let raw = hex::decode(root_hash_hex)
         .map_err(|e| format!("root_hash is not hex: {e}"))?;
     if raw.len() != 32 {
@@ -567,13 +603,12 @@ fn verify_checkpoint_sig_sigstore(
 ) -> Result<(), String> {
     let bytes = canonical_checkpoint_bytes_sigstore(origin, tree_id, proof.tree_size, &proof.root_hash)?;
 
+    // C2SP signed-note signatures use RFC 4648 §4 STANDARD base64 with
+    // `=` padding. Reject anything else — the format is exact, not
+    // permissive, and a deviating encoding signals non-Sigstore data.
     let raw = base64::engine::general_purpose::STANDARD
         .decode(proof.checkpoint_sig.as_bytes())
-        .or_else(|_| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(proof.checkpoint_sig.as_bytes())
-        })
-        .map_err(|e| format!("checkpoint_sig is not base64: {e}"))?;
+        .map_err(|e| format!("checkpoint_sig is not standard base64: {e}"))?;
 
     if raw.len() < 4 + 8 {
         return Err(format!(
@@ -614,8 +649,15 @@ fn verify_checkpoint_sig_sigstore(
 /// not contain the trace's hash.
 ///
 /// We accept the hashedrekord v0.0.1 schema only:
-/// `data.hash.value` (lowercase hex) MUST equal `anchored_hash`. Other
-/// Rekor entry kinds are rejected — V1.6 only issues hashedrekord.
+///   - `kind` MUST equal `"hashedrekord"` (other Rekor types are not
+///     issued by Atlas in V1.6).
+///   - `spec.data.hash.algorithm` MUST equal `"sha256"`. The schema
+///     also accepts sha1/sha384/sha512, but Atlas only ever submits
+///     sha256-content via Phase 2's hashedrekord builder; pinning the
+///     algorithm rules out an attacker forging a hashedrekord whose
+///     `value` happens to collide with an `anchored_hash` interpreted
+///     under a weaker hash function.
+///   - `spec.data.hash.value` (lowercase hex) MUST equal `anchored_hash`.
 fn entry_body_binds_anchored_hash(entry_body: &[u8], anchored_hash: &str) -> Result<(), String> {
     let v: serde_json::Value = serde_json::from_slice(entry_body)
         .map_err(|e| format!("entry body is not JSON: {e}"))?;
@@ -630,11 +672,24 @@ fn entry_body_binds_anchored_hash(entry_body: &[u8], anchored_hash: &str) -> Res
         ));
     }
 
-    let body_hash = v
+    let hash_obj = v
         .get("spec")
         .and_then(|s| s.get("data"))
         .and_then(|d| d.get("hash"))
-        .and_then(|h| h.get("value"))
+        .ok_or_else(|| "entry body has no spec.data.hash object".to_string())?;
+
+    let algorithm = hash_obj
+        .get("algorithm")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "entry body has no spec.data.hash.algorithm field".to_string())?;
+    if algorithm != "sha256" {
+        return Err(format!(
+            "entry body hash algorithm {algorithm:?} is not supported (V1.6 pins sha256)"
+        ));
+    }
+
+    let body_hash = hash_obj
+        .get("value")
         .and_then(|x| x.as_str())
         .ok_or_else(|| "entry body has no spec.data.hash.value field".to_string())?;
 
@@ -894,6 +949,74 @@ mod tests {
         // back to the same prefix.
         let keyid_hex = hex::encode(*SIGSTORE_REKOR_V1_KEY_ID);
         assert_eq!(&log_id[..8], keyid_hex);
+    }
+
+    /// `entry_body_binds_anchored_hash` must reject a hashedrekord whose
+    /// hash algorithm is not sha256 (e.g. sha1 or sha512), even when the
+    /// `value` happens to equal `anchored_hash`. This rules out a forgery
+    /// where the attacker chooses a weaker algorithm and crafts a value
+    /// collision under that algorithm.
+    #[test]
+    fn entry_body_with_non_sha256_algorithm_is_rejected() {
+        let body = serde_json::json!({
+            "apiVersion": "0.0.1",
+            "kind": "hashedrekord",
+            "spec": {
+                "data": {
+                    "hash": {
+                        "algorithm": "sha512",
+                        "value": "deadbeef",
+                    }
+                }
+            }
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let err = entry_body_binds_anchored_hash(&body_bytes, "deadbeef")
+            .expect_err("non-sha256 hashedrekord must be rejected");
+        assert!(err.contains("sha256"), "error must mention sha256 pin: {err}");
+    }
+
+    /// `entry_body_binds_anchored_hash` must reject a hashedrekord with
+    /// no `algorithm` field — the hashedrekord schema requires it, and
+    /// silently skipping the algorithm check (treating "missing" as
+    /// "ok") would let a malformed body slip past.
+    #[test]
+    fn entry_body_with_missing_algorithm_is_rejected() {
+        let body = serde_json::json!({
+            "apiVersion": "0.0.1",
+            "kind": "hashedrekord",
+            "spec": {
+                "data": {
+                    "hash": {
+                        "value": "deadbeef",
+                    }
+                }
+            }
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let err = entry_body_binds_anchored_hash(&body_bytes, "deadbeef")
+            .expect_err("hashedrekord without algorithm must be rejected");
+        assert!(err.contains("algorithm"), "error must mention algorithm: {err}");
+    }
+
+    /// `canonical_checkpoint_bytes_sigstore` must reject origins that
+    /// contain the C2SP separators. An attacker-controlled origin
+    /// containing `\n` could splice an extra line into the signed body;
+    /// one containing ` - ` could pin a different tree-id than claimed.
+    #[test]
+    fn checkpoint_bytes_sigstore_rejects_injection_in_origin() {
+        let root_hex = "0000000000000000000000000000000000000000000000000000000000000000";
+        let err_nl = canonical_checkpoint_bytes_sigstore("rekor.sigstore.dev\n42", 1, 1, root_hex)
+            .expect_err("origin with newline must be rejected");
+        assert!(err_nl.contains("newline"), "got: {err_nl}");
+
+        let err_dash = canonical_checkpoint_bytes_sigstore("rekor.sigstore.dev - 42", 1, 1, root_hex)
+            .expect_err("origin with ' - ' must be rejected");
+        assert!(err_dash.contains("' - '"), "got: {err_dash}");
+
+        let err_empty = canonical_checkpoint_bytes_sigstore("", 1, 1, root_hex)
+            .expect_err("empty origin must be rejected");
+        assert!(err_empty.contains("empty"), "got: {err_empty}");
     }
 
     /// Default trusted roster carries exactly the two logs V1.6 ships

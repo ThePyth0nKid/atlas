@@ -158,6 +158,39 @@ fn tampered_entry_body_is_rejected() {
     assert!(!outcome.ok, "tampered entry body must be rejected");
 }
 
+/// V1.6 only trusts the active Sigstore Rekor v1 shard. An anchor whose
+/// `tree_id` is not the active one (e.g. a historical shard, or a
+/// crafted value) must be rejected at the dispatch layer with a clear
+/// "not the active shard" reason — not a downstream signature failure.
+#[test]
+fn wrong_tree_id_is_rejected() {
+    let fx = load_fixture();
+    let entry = AnchorEntry {
+        kind: AnchorKind::BundleHash,
+        anchored_hash: fx.anchored_hash.clone(),
+        log_id: fx.log_id.clone(),
+        log_index: fx.log_index,
+        integrated_time: fx.integrated_time,
+        inclusion_proof: InclusionProof {
+            tree_size: fx.tree_size,
+            root_hash: fx.root_hash.clone(),
+            hashes: fx.hashes.clone(),
+            checkpoint_sig: fx.checkpoint_sig.clone(),
+        },
+        entry_body_b64: Some(fx.body.clone()),
+        // Crafted historical-shard ID — must be rejected.
+        tree_id: Some(3_904_496_407_287_907_110),
+    };
+    let trusted = default_trusted_logs();
+    let outcome = verify_anchor_entry(&entry, &fx.anchored_hash, &trusted);
+    assert!(!outcome.ok, "wrong tree_id must be rejected");
+    assert!(
+        outcome.reason.contains("active") || outcome.reason.contains("shard"),
+        "rejection reason should name the active-shard policy, got: {}",
+        outcome.reason,
+    );
+}
+
 /// Forgery defence: a server submits one hash to Rekor, gets a valid
 /// proof for it, then claims that proof anchors a *different* Atlas
 /// hash. The leaf-hash check still passes (because the proof matches
