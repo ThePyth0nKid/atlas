@@ -1,4 +1,4 @@
-# Atlas — Regulatory Compliance Mapping (V1.6)
+# Atlas — Regulatory Compliance Mapping (V1.7)
 
 Atlas does not market compliance; it ships structural evidence. This
 document maps each obligation we claim to address to (a) the verbatim
@@ -6,8 +6,8 @@ clause, (b) the Atlas mechanism that delivers the evidence, and (c) the
 specific test or trace field a third party can inspect to confirm the
 mechanism works.
 
-If a row reads "V1.7" or "V2", that obligation is on the roadmap and is
-not yet load-bearing in V1.6. We mark it explicitly rather than implying
+If a row reads "V1.8" or "V2", that obligation is on the roadmap and is
+not yet load-bearing in V1.7. We mark it explicitly rather than implying
 coverage.
 
 The verifier is licensed Apache-2.0, so a regulator can rebuild the
@@ -34,7 +34,7 @@ specific reasons it matters per framework.
 | Automatic recording of events | MCP server signs every agent write before persistence; no path to write the graph that bypasses signing | `apps/atlas-mcp-server` source — only `write_node`/`write_annotation` tools, both shell out to `atlas-signer` |
 | Lifetime coverage | Append-only event log, DAG-linked, no in-place edits | `AtlasEvent` has no update path; `parent_hashes` links every change to its predecessor |
 | Independently verifiable traceability | Bundle export + offline verifier under Apache-2.0 | `atlas-verify-cli verify-trace bundle.json -k pubkey-bundle.json` returns ✓ VALID with per-check evidence |
-| Tamper-evidence | Constant-time hash + signature recompute on every event; V1.6 anchors of `bundle_hash` + `dag_tip` against pinned transparency-log pubkeys (mock-Rekor v1.5 or live Sigstore Rekor v1) defend against post-hoc bundle-swap and tail-truncation | `tampered_payload_detected` + `cross_workspace_replay_rejected` + `anchor_with_bogus_proof_is_rejected` integration tests + `verifies_real_sigstore_rekor_entry` golden-entry test |
+| Tamper-evidence | Constant-time hash + signature recompute on every event; V1.6 anchors of `bundle_hash` + `dag_tip` against pinned transparency-log pubkeys (mock-Rekor v1.5 or live Sigstore Rekor v1) defend against post-hoc bundle-swap and tail-truncation; V1.7 anchor-chain tip-rotation cross-links consecutive batches so past anchored state cannot be silently rewritten — chain head hash becomes the new load-bearing identity | `tampered_payload_detected` + `cross_workspace_replay_rejected` + `anchor_with_bogus_proof_is_rejected` integration tests + `verifies_real_sigstore_rekor_entry` golden-entry test + 15 adversary tests in `crates/atlas-trust-core/tests/anchor_chain_adversary.rs` (reorder, gap, head mismatch, previous_head break, coordinated rewrite) |
 
 ### Annex IV §1(e) — Technical documentation
 
@@ -75,7 +75,7 @@ GAMP 5 second-edition Appendix D11 frames ML system validation around
 | **A**ttributable | Every event signed by a `kid`; SPIFFE-ID identifies the actor | Every `EventSignature.kid` in any trace |
 | **L**egible | Trace bundle is JSON; verifier output is human-readable evidence list | `print_human()` in `atlas-verify-cli/src/main.rs` |
 | **C**ontemporaneous | `ts` field RFC 3339, validated at parse; V1.6 transparency-log anchor (mock or Sigstore) witnesses each `dag_tip` at issuance time | `non_rfc3339_timestamp_rejected` test + `anchor_with_bogus_proof_is_rejected` test + `verifies_real_sigstore_rekor_entry` test |
-| **O**riginal | Append-only; original event_hash preserved across DAG; V1.6 `bundle_hash` anchor (mock or Sigstore) binds the keyset-of-record at witness time | `AtlasEvent` has no mutation API; anchor entries with `kind: "bundle_hash"` in any V1.6 trace bundle |
+| **O**riginal | Append-only; original event_hash preserved across DAG; V1.6 `bundle_hash` anchor (mock or Sigstore) binds the keyset-of-record at witness time; V1.7 anchor-chain tip-rotation makes the chain head the load-bearing identity — any post-hoc rewrite of past batches breaks the chain, detectable offline | `AtlasEvent` has no mutation API; anchor entries with `kind: "bundle_hash"` in any V1.6+ trace bundle; `trace.anchor_chain.history` and `verify_anchor_chain` checks in V1.7 bundles |
 | **A**ccurate | blake3 hash of canonical signing-input recomputed on every verify; anchor inclusion proof recomputed against pinned log pubkey | `tampered_payload_detected` + `tampered_anchored_hash_fails` tests |
 | Complete (the +) | DAG `parent_hashes` enforces "no missing event" | `dag_tip_mismatch_rejected` + `check_parent_links` |
 | Consistent | Single canonicalisation crate used by signer + verifier | Architecture §3.1 (one Rust source-of-truth) |

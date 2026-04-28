@@ -26,7 +26,9 @@ multi-tenant service for third parties requires a commercial licence
 All tools take a `workspace` argument (default: `ws-mcp-default`).
 Workspaces are isolated on disk under `data/{workspace}/events.jsonl`;
 issued anchors are persisted alongside as `data/{workspace}/anchors.json`
-and folded into `trace.anchors` on export.
+(latest snapshot, unchanged) and `data/{workspace}/anchor-chain.jsonl` (V1.7,
+append-only log of all anchor batches, one batch per line as JSON). Both are
+folded into `trace.anchors` and `trace.anchor_chain` on export.
 
 ---
 
@@ -81,6 +83,7 @@ Expected smoke output ends with:
   ✓ parent-links
   ✓ dag-tips
   ✓ anchors
+  ✓ anchor-chain (V1.7: validates chain monotonicity)
 ```
 
 ---
@@ -107,7 +110,7 @@ workspace's `events.jsonl`.
 
 ---
 
-## V1.5 / V1.6 boundaries
+## V1.5 / V1.6 / V1.7 boundaries
 
 - **Signing keys are deterministic test keys** (matching the bank-demo
   keys in `crates/atlas-signer/examples/seed_bank_demo.rs`). The MCP
@@ -119,15 +122,29 @@ workspace's `events.jsonl`.
   (Postgres, S3, FalkorDB).
 - **No multi-tenant key isolation in V1.5.** V2 ships per-tenant key
   policies and bundle-rotation workers.
-- **Anchoring (V1.5 mock-Rekor, V1.6 live Sigstore).** `atlas_anchor_bundle`
-  issues anchors via the in-process mock-Rekor by default (V1.5, no
-  network call). Setting the `rekor_url` field or `ATLAS_REKOR_URL` env
-  (precedence: field > env > mock) opts into live Sigstore Rekor v1
-  submission against `https://rekor.sigstore.dev`. The verifier accepts
-  both formats by log_id dispatch and validates inclusion proofs +
-  checkpoint signatures against pinned log pubkeys (mock Ed25519 or
-  Sigstore ECDSA P-256). Verifier path unchanged — fully offline RFC 6962
+- **Anchoring (V1.5 mock-Rekor, V1.6 live Sigstore, V1.7 chain extension).**
+  `atlas_anchor_bundle` issues anchors via the in-process mock-Rekor by
+  default (V1.5, no network call). Setting the `rekor_url` field or
+  `ATLAS_REKOR_URL` env (precedence: field > env > mock) opts into live
+  Sigstore Rekor v1 submission against `https://rekor.sigstore.dev`. The
+  verifier accepts both formats by log_id dispatch and validates inclusion
+  proofs + checkpoint signatures against pinned log pubkeys (mock Ed25519
+  or Sigstore ECDSA P-256). Verifier path unchanged — fully offline RFC 6962
   proof recomputation in both cases.
+- **Anchor-chain tip-rotation (V1.7).** Each `atlas_anchor_bundle` call
+  appends a new `AnchorBatch` to `data/{workspace}/anchor-chain.jsonl`,
+  cross-linked to the previous batch via blake3 hash-chain (domain prefix
+  `atlas-anchor-chain-v1:`). The verifier walks the chain and validates
+  monotonic growth (no gaps, no reorder, chain continuity). Chain extension
+  is gated to the mock-issuer path only in V1.7 (V1.8 will lift the gate for
+  Sigstore path once a precision-preserving JSON parser is available). Old
+  bundles lacking the chain pass under lenient mode; strict mode
+  (`require_anchor_chain`) demands a present, valid chain.
+- **Sigstore shard roster (V1.7).** Verifier accepts the active production
+  Sigstore shard plus two historical shards, all signed by the pinned
+  ECDSA P-256 public key. Same single-key trust property; no cross-shard
+  replay (C2SP origin embeds tree_id). Issuer still posts only to active
+  shard.
 
 See [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the
 full system context.

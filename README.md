@@ -16,9 +16,9 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**V1.6 shipped — live Sigstore submission + offline-complete verification.**
+**V1.7 shipped — anchor-chain tip-rotation + Sigstore shard roster.**
 
-Trust-core crate + Rekor anchoring (V1.5 mock-issuer and V1.6 live Sigstore Rekor v1).
+Trust-core crate + Rekor anchoring (V1.5 mock-issuer, V1.6 live Sigstore Rekor v1, V1.7 anchor-chain + shard expansion).
 Current state:
 
 - 73 Rust tests green: 41 unit + 13 integration adversary tests + 5
@@ -44,9 +44,12 @@ Current state:
   `✓ anchors — N anchor(s) verified against pinned log keys`
 
 V1.6 ships live Sigstore submission: `atlas-signer anchor --rekor-url https://rekor.sigstore.dev`
-anchors events against the public Sigstore Rekor v1 log. The verifier accepts both V1.5
-mock-Rekor anchors (for offline demos) and V1.6 Sigstore anchors (for production audit
-trails). Graph-database integration and policy-engine follow in V2.
+anchors events against the public Sigstore Rekor v1 log. V1.7 adds anchor-chain tip-rotation
+(cross-linking consecutive anchor batches so past anchored state cannot be silently rewritten)
+and Sigstore shard roster expansion (accepting the active production shard plus two historical
+shards, all signed by the pinned key). The verifier accepts V1.5 mock-Rekor anchors (offline
+demos), V1.6 Sigstore anchors (production audit trails), and V1.7 anchor chains (monotonicity
+proof). Graph-database integration and policy-engine follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
   trust property, write/export flows, V1/V1.5/V1.6/V2 boundaries.

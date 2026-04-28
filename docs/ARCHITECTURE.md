@@ -1,11 +1,12 @@
-# Atlas — System Architecture (V1.6)
+# Atlas — System Architecture (V1.7)
 
 This document is the system-design reference for Atlas. It describes the
 trust property the system exists to enforce, the data model that carries
 it, the components that produce and consume that data, and the explicit
 boundaries between V1 (deterministic signing + verification), V1.5
 (offline-complete anchoring via mock-Rekor issuer + pinned log pubkey —
-shipped), V1.6 (live Sigstore Rekor v1 submission — shipped), and V2
+shipped), V1.6 (live Sigstore Rekor v1 submission — shipped), V1.7
+(anchor-chain tip-rotation + Sigstore shard roster — shipped), and V2
 (full COSE_Sign1, Cedar policy enforcement, SPIFFE attestation).
 
 It is written for three audiences:
@@ -477,12 +478,150 @@ from the anchor entry's tree_size/root_hash, and verifies the ECDSA or
 Ed25519 checkpoint signature against a pinned log pubkey. Full offline
 verification on any platform.
 
-### Anchor-chain tip-rotation (V2)
+### 8.3 Anchor-chain tip-rotation (V1.7 — shipped)
 
-Cross-anchor referencing — each new anchor pointing to the previous —
-forms a hash-chain *of* hash-chains. V2 ships this so that a server
-cannot rewrite past events without breaking either an event-hash check
-or an anchor-chain check.
+V1.7 ships anchor-chain tip-rotation: each new anchor batch is cross-linked
+to the previous batch via a hash-chain head, so a server cannot silently
+rewrite past anchored state without breaking the chain.
+
+#### What gets chained
+
+An anchor batch (one or more `AnchorEntry` objects, e.g. from a single
+`atlas_anchor_bundle` call) is wrapped in an `AnchorBatch` that includes:
+
+- **`batch_index`** — sequence number (0, 1, 2, ...), enforces monotonic growth.
+- **`integrated_time`** — Unix seconds when Rekor accepted the batch (V1.5 mock or
+  V1.6 Sigstore).
+- **`entries`** — the `AnchorEntry` array itself (for offline recomputation).
+- **`previous_head`** — 64-character hex string: the chain head of the
+  preceding batch. For the first batch, `previous_head = "00..."` (64 zeros).
+
+The chain head is computed over each batch:
+
+```text
+chain_head_n = blake3(
+    b"atlas-anchor-chain-v1:" ||
+    canonical_bytes_of(AnchorBatch[n]) ||
+    previous_head_{n-1}
+)
+```
+
+The domain prefix `atlas-anchor-chain-v1:` separates this hash from all other
+blake3 uses in Atlas (event hashes, bundle hashes, anchor derivation hashes).
+
+All `AnchorBatch` objects are collected in an `AnchorChain` with:
+
+- **`history`** — ordered list of all `AnchorBatch` objects, from batch 0 to present.
+- **`head`** — the blake3 of the last batch (fail-fast convenience, always recomputed
+  during verification).
+
+The chain is optional on `AtlasTrace` — old V1.5/V1.6 bundles lack it — but when
+present, the verifier walks every batch and validates:
+
+1. Each `batch_index == i` (no gaps, no reorder).
+2. Each `chain_head_i` recomputes from `(entries_i, previous_head_i)`.
+3. Each `history[i+1].previous_head == recomputed_chain_head_i` (continuity).
+4. Final head matches the claimed `trace.anchor_chain.head`.
+
+#### Storage and issuer flow
+
+- **`data/{workspace}/anchors.json`** — unchanged, holds the latest batch snapshot
+  for V1.5/V1.6 compatibility.
+- **`data/{workspace}/anchor-chain.jsonl`** — NEW, append-only log of every batch.
+  Each line is one `AnchorBatch` serialized as JSON. Atomic append via tmp-and-rename
+  + fsync.
+
+The issuer (`atlas-signer anchor --chain-path <file>`) reads the JSONL to find the
+next `batch_index` and the current `previous_head`, then appends the new batch
+atomically. Single writer enforcement: the MCP server passes the workspace path to
+the signer; the signer does the read-modify-append.
+
+#### Verification and lenient mode
+
+- `VerifyOptions::require_anchor_chain` (default `false`) — lenient by default.
+  Old bundles without a chain pass; `require_anchor_chain = true` strict mode
+  demands a present, valid, non-empty chain.
+- If chain is missing: pass under lenient mode, fail under strict mode.
+- If chain is present: walk history and validate as above. Any mismatch (gap,
+  reorder, head mismatch, previous_head break) → ✗ INVALID.
+
+#### Cross-check: anchor-chain-coverage
+
+The verifier also runs a consistency check (`anchor_chain_coverage` in `verify.rs`):
+every entry in `trace.anchors` (the current snapshot) must appear byte-identical in
+some batch of `trace.anchor_chain.history`. This catches mixed-mode workspaces
+(operator switches from mock to Sigstore without preserving chain continuity) because
+the Sigstore entries are absent from the mock-only history — the check fires loudly.
+
+#### Sigstore path constraint (V1.8 future)
+
+Currently, anchor-chain extension is gated to the mock-issuer path only. The reason:
+Sigstore Rekor tree_id values (e.g. `1_193_050_959_916_656_506`) exceed
+`Number.MAX_SAFE_INTEGER` (~2^53) in JavaScript. JSON round-trip through the MCP
+server would silently corrupt the tree_id (lose low digits). V1.8 will adopt a
+precision-preserving JSON parser (e.g. `lossless-json`) to lift this gate, and
+issuer-side chain extension for the Sigstore path will follow.
+
+#### Chain rotation ceremony
+
+Operators can rotate the chain (produce a new genesis batch that bridges continuity
+to the old chain) via `atlas-signer rotate-chain --confirm <workspace>`. The new
+genesis batch's `previous_head` equals the old chain's final head, so an auditor
+with both the old and new traces can verify continuity. The old chain file becomes
+read-only history.
+
+### 8.4 Sigstore Rekor v1 shard roster (V1.7 — shipped)
+
+V1.7 expands the Sigstore trust model from a single active tree-ID to a roster
+of three trusted shards (active + 2 historical), all signed by the same pinned
+public key.
+
+#### Current constraint (V1.6)
+
+V1.6 pins the active Sigstore Rekor v1 tree-ID: `SIGSTORE_REKOR_V1_ACTIVE_TREE_ID =
+1_193_050_959_916_656_506`. An anchor with any other tree-ID is rejected at
+verification time, before proof work.
+
+#### V1.7 roster expansion
+
+Sigstore maintains historical shards signed by the same pubkey but with different
+tree IDs. After a shard rotation event, V1.6 anchors would instantly become unverifiable
+against the new active shard.
+
+V1.7 introduces `SIGSTORE_REKOR_V1_TREE_IDS: &[i64]`, a 3-element list:
+
+- `1_193_050_959_916_656_506` — active shard (current production).
+- `3_904_496_407_287_907_110` — historical shard.
+- `2_605_736_670_972_794_746` — historical shard.
+
+The verifier's `is_known_sigstore_rekor_v1_tree_id(tree_id)` function replaces the
+strict equality check. An inbound anchor passes the tree-ID gate if its `tree_id` is
+a member of the roster.
+
+#### Same-key trust property
+
+The pinned ECDSA P-256 pubkey (`SIGSTORE_REKOR_V1_PEM`) remains unchanged across
+shards. Signature verification still depends only on this single key. An attacker
+cannot exploit different keys per shard because there is only one pinned key.
+
+The C2SP signed-note origin line embeds the tree-ID (rekor.sigstore.dev's origin
+line is reconstructed from caller-supplied `entry.tree_id`), so cross-shard replay
+is impossible: verifying a checkpoint signed for tree_id A against a submitted entry
+claiming tree_id B would fail at signature verify because the reconstructed origin
+differs.
+
+#### Roster update is a source change
+
+Adding new tree-IDs to the roster requires a crate version bump. Silent acceptance of
+unknown tree-IDs is forbidden. If a future shard rotation introduces a new tree-ID,
+that is a new source change requiring a published update to Atlas.
+
+#### Issuer asymmetry (intentional)
+
+The issuer (`atlas-signer anchor --rekor-url`) still posts only to the active shard.
+This asymmetry is deliberate: verifier accepts historical shards (backwards
+compatibility), issuer produces current (forward progress). The roster protects
+against shard rotation; operator who upgrades gets free backwards compatibility.
 
 ---
 
@@ -557,6 +696,34 @@ Headline:
   plaintext http:// gated to localhost only
 - Verifier path unchanged — no network call at verify time, fully offline
   RFC 6962 proof recomputation + ECDSA verify against pinned log pubkey
+
+### V1.7 — anchor-chain tip-rotation + shard roster (shipped)
+
+- **Anchor-chain tip-rotation:** Each `AnchorBatch` is cross-linked to
+  predecessors via blake3 hash-chain with domain prefix `atlas-anchor-chain-v1:`.
+  Verifier walks `trace.anchor_chain.history[]` and validates monotonic growth
+  (no gaps, no reorder, previous_head continuity). Optional on old bundles
+  (lenient by default); strict mode `require_anchor_chain` demands presence.
+  Storage: `data/{workspace}/anchor-chain.jsonl` append-only log, atomic append
+  via tmp-and-rename.
+- **Issuer:** `atlas-signer anchor --chain-path <file>` reads JSONL, appends new batch.
+  Sole writer of the chain file. `MCP` server passes workspace path; issuer handles
+  read-modify-append.
+- **Cross-check:** `anchor_chain_coverage` verification ensures every entry in
+  `trace.anchors` (latest snapshot) appears byte-identical in some chain batch.
+  Catches mixed-mode workspaces (mock→Sigstore transitions without chain
+  continuity preservation) because Sigstore entries are absent from mock-only chain.
+- **Sigstore path gated (V1.8 future):** Anchor-chain extension disabled on
+  Sigstore path due to JS `Number.MAX_SAFE_INTEGER` truncation risk to tree_id.
+  V1.8 will adopt precision-preserving JSON parser; chain extension follows.
+- **Chain rotation:** `atlas-signer rotate-chain --confirm <workspace>` produces
+  new genesis batch with `previous_head = old_chain.head`, bridging continuity.
+- **Sigstore Rekor v1 shard roster:** Replaces single-tree-id pin with
+  `SIGSTORE_REKOR_V1_TREE_IDS: &[i64]` roster of 3 shards (active +
+  2 historical): `1_193_050_959_916_656_506`,
+  `3_904_496_407_287_907_110`, `2_605_736_670_972_794_746`. Verifier accepts
+  membership; same pubkey across shards, no cross-shard replay (C2SP origin
+  embeds tree_id). Issuer still posts to active shard only.
 
 ### V2 — full COSE + policy + SPIFFE
 

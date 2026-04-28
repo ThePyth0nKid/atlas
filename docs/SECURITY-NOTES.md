@@ -1,6 +1,6 @@
-# Atlas Verifier — Defended Attack Surface (V1.6)
+# Atlas Verifier — Defended Attack Surface (V1.7)
 
-This document describes what the V1.5 verifier (`atlas-trust-core`, exposed as
+This document describes what the V1.7 verifier (`atlas-trust-core`, exposed as
 `atlas-verify-cli` and `atlas-verify-wasm`) actually defends against. It is
 written for auditors and security reviewers who want to know "what does this
 verifier protect, and where are the limits" without reading Rust.
@@ -185,24 +185,84 @@ by log_id dispatch:
   path reaches claimed root under SHA-256 RFC 6962, C2SP signed-note ECDSA
   verify succeeds against the pinned production key.
 
-The following are **not** defended in V1.6, and a `valid: true` outcome
+## Anchor-chain tip-rotation (V1.7 — in scope)
+
+V1.7 ships anchor-chain tip-rotation with the same offline-complete verification
+as V1.5/V1.6 anchoring. New threats and mitigations:
+
+- **Anti-rewrite property:** The chain head is the load-bearing hash. Any silent
+  mutation of a past `AnchorBatch` changes the head and breaks verification.
+  `verify_anchor_chain` refuses to walk past the first `previous_head` mismatch —
+  short-circuits on tampering rather than walking and lying. An auditor with the
+  chain can establish with certainty that no past batch has been silently rewritten.
+  Tested via 15 adversary tests in `crates/atlas-trust-core/tests/anchor_chain_adversary.rs`:
+  reorder, gap, head mismatch, coordinated rewrite, previous_head break, etc.
+- **Mixed-mode safety:** If an operator runs mock-issuer and then switches to
+  live Sigstore on the same workspace without proper continuity ceremony, the
+  bundle ships Sigstore `anchors` (latest snapshot) but mock-only `anchor_chain`
+  history. The verifier's `anchor_chain_coverage` check fires explicitly because
+  Sigstore entries are absent from mock chain batches — mixed-mode is loud at
+  audit time, not silently degraded. This coupling between `trace.anchors` (current
+  snapshot) and `trace.anchor_chain.history` (full history) is deliberate.
+- **Chain-file integrity:** The issuer is the sole writer of `anchor-chain.jsonl`
+  (append-only, atomic tmp-and-rename). Corruption is caught at parse time if the
+  file is modified out-of-band. Loss of the chain file breaks the trust property
+  for future anchors in that workspace (operator would need to run a rotation
+  ceremony to bridge to a new chain). Documented in `apps/atlas-mcp-server/README.md`.
+- **Lenient mode (backwards compatible):** Old V1.5/V1.6 bundles lack the chain.
+  The verifier's lenient default (`require_anchor_chain = false`) passes them;
+  strict mode (`require_anchor_chain = true`) demands a present, valid chain.
+  Existing golden traces and integration tests continue to pass without modification.
+- **Sigstore path constraint (V1.8 future):** Anchor-chain extension is gated to
+  the mock-issuer path only. The reason: Sigstore tree_id values (~2^60) exceed
+  `Number.MAX_SAFE_INTEGER` (~2^53) in JavaScript, and JSON round-trip would
+  silently corrupt the tree_id (lose low digits). Verifier-side chain validation
+  accepts Sigstore-path anchors that are part of a mock-built chain (via
+  `anchor_chain_coverage` check), but issuer-side chain extension for new Sigstore
+  anchors is deferred to V1.8. V1.8 will adopt a precision-preserving JSON parser
+  to lift this gate.
+
+## Sigstore shard roster (V1.7 — in scope)
+
+V1.7 expands the Sigstore verifier to accept multiple shards (active + historical)
+while maintaining the same single-key trust property:
+
+- **Roster membership check:** Replaces strict tree-ID equality (`SIGSTORE_REKOR_V1_ACTIVE_TREE_ID == entry.tree_id`)
+  with membership check (`is_known_sigstore_rekor_v1_tree_id(entry.tree_id)`). The roster
+  is a pinned constant `SIGSTORE_REKOR_V1_TREE_IDS: &[i64] = &[1_193_050_959_916_656_506, 3_904_496_407_287_907_110, 2_605_736_670_972_794_746]`.
+  Tested via `sigstore_tree_id_roster_is_pinned` and `known_sigstore_tree_id_membership` unit tests.
+- **Same-key trust property:** The pinned ECDSA P-256 pubkey (`SIGSTORE_REKOR_V1_PEM`)
+  is unchanged across all three shards. Signature verification depends only on this
+  single key. An attacker cannot exploit per-shard keys because there is only one
+  pinned key.
+- **No cross-shard replay:** The C2SP signed-note origin line embeds `tree_id`
+  (rekor.sigstore.dev origin is reconstructed from caller-supplied `entry.tree_id`).
+  Verifying a checkpoint signed for tree_id A against a submitted entry claiming
+  tree_id B fails at signature verify because the reconstructed origin differs.
+  Cross-shard replay is structurally impossible. Tested via `historical_shard_tree_id_passes_dispatch_gate`
+  and `unknown_tree_id_is_rejected` integration tests in `tests/sigstore_golden.rs`.
+- **Roster is a source change:** Adding new tree-IDs requires a crate version bump.
+  Silent acceptance of unknown tree-IDs is forbidden. If a future Sigstore shard
+  rotation introduces a new tree-ID, that is a published update to Atlas requiring
+  a source rebuild.
+- **Issuer asymmetry:** The issuer still posts only to the active shard. This is
+  intentional: verifier accepts historical (backwards compatibility), issuer
+  produces current (forward progress). Operator who upgrades gets free backwards
+  compatibility without operator action.
+
+The following are **not** defended in V1.7, and a `valid: true` outcome
 does NOT imply them:
 
-- **Anchor-chain tip-rotation.** V1.6 anchors the current `dag_tips` and
-  the current `pubkey_bundle_hash`, but consecutive anchors are not yet
-  linked into a hash-chain-of-hash-chains. V2 ships cross-anchor
-  referencing so a server cannot rewrite past anchored state without
-  breaking the chain.
 - **Timestamp monotonicity / drift bounds.** The verifier checks that `ts`
   parses as RFC 3339 and nothing more. Future-timestamps and out-of-order
-  events both pass V1.6.
-- **Cedar policy enforcement.** Trace bundles list `policies[]` but V1.6
+  events both pass V1.7.
+- **Cedar policy enforcement.** Trace bundles list `policies[]` but V1.7
   does not evaluate them.
 - **SPIFFE attestation.** `kid` strings of the form `spiffe://...` are
   treated as opaque keys-of-id. SVID validation against an in-domain
   trust bundle is not implemented.
 - **Per-tenant key isolation.** The Atlas anchoring key is derived from
-  a single deterministic seed. V1.7 will seal keys per-tenant in a
+  a single deterministic seed. V1.8 will seal keys per-tenant in a
   TPM/HSM-backed enclave.
 - **Side-channel attacks beyond hash equality.** Constant-time compare
   is wired on hash and bundle-hash equality. Other code paths (CBOR
