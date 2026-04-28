@@ -158,12 +158,15 @@ fn tampered_entry_body_is_rejected() {
     assert!(!outcome.ok, "tampered entry body must be rejected");
 }
 
-/// V1.6 only trusts the active Sigstore Rekor v1 shard. An anchor whose
-/// `tree_id` is not the active one (e.g. a historical shard, or a
-/// crafted value) must be rejected at the dispatch layer with a clear
-/// "not the active shard" reason — not a downstream signature failure.
+/// V1.7 trusts exactly three Sigstore Rekor v1 shards (active + 2
+/// historical, all sharing the same key). An anchor whose `tree_id`
+/// is outside that roster must be rejected at the dispatch layer with
+/// a clear "not in the trusted-shard roster" reason — not a downstream
+/// signature failure. We use a crafted small integer (well outside any
+/// real Sigstore shard ID range) so future roster expansion does not
+/// silently re-permit this test's value.
 #[test]
-fn wrong_tree_id_is_rejected() {
+fn unknown_tree_id_is_rejected() {
     let fx = load_fixture();
     let entry = AnchorEntry {
         kind: AnchorKind::BundleHash,
@@ -178,15 +181,72 @@ fn wrong_tree_id_is_rejected() {
             checkpoint_sig: fx.checkpoint_sig.clone(),
         },
         entry_body_b64: Some(fx.body.clone()),
-        // Crafted historical-shard ID — must be rejected.
+        // Bogus tree-ID — must remain outside the roster forever.
+        tree_id: Some(1_234_567_890),
+    };
+    let trusted = default_trusted_logs();
+    let outcome = verify_anchor_entry(&entry, &fx.anchored_hash, &trusted);
+    assert!(!outcome.ok, "unknown tree_id must be rejected");
+    assert!(
+        outcome.reason.contains("roster") || outcome.reason.contains("Sigstore Rekor v1"),
+        "rejection reason should name the roster policy, got: {}",
+        outcome.reason,
+    );
+}
+
+/// A historical-shard tree-ID is now in the roster, so the dispatch
+/// layer must NOT short-circuit on it. Verification proceeds to the
+/// signature/inclusion checks and fails *there* (because the captured
+/// fixture's signature commits to the active shard's origin line).
+/// This pins the behaviour change introduced by V1.7's roster
+/// expansion: historical shards are no longer rejected up-front.
+///
+/// MAINTENANCE NOTE: the load-bearing assertion is the three-clause
+/// reason check (`checkpoint`/`signature`/`origin`), not just `!ok`.
+/// If a future change adds a new pre-signature guard (e.g. a
+/// per-shard `log_index` range check) the dispatch layer might start
+/// rejecting before reaching the signature step, and that new
+/// rejection reason would have to be added here — otherwise this
+/// test would silently degrade into a generic `!ok` assertion that
+/// no longer pins where the failure must happen.
+#[test]
+fn historical_shard_tree_id_passes_dispatch_gate() {
+    let fx = load_fixture();
+    let entry = AnchorEntry {
+        kind: AnchorKind::BundleHash,
+        anchored_hash: fx.anchored_hash.clone(),
+        log_id: fx.log_id.clone(),
+        log_index: fx.log_index,
+        integrated_time: fx.integrated_time,
+        inclusion_proof: InclusionProof {
+            tree_size: fx.tree_size,
+            root_hash: fx.root_hash.clone(),
+            hashes: fx.hashes.clone(),
+            checkpoint_sig: fx.checkpoint_sig.clone(),
+        },
+        entry_body_b64: Some(fx.body.clone()),
+        // Historical shard — in the roster, so dispatch must accept it.
         tree_id: Some(3_904_496_407_287_907_110),
     };
     let trusted = default_trusted_logs();
     let outcome = verify_anchor_entry(&entry, &fx.anchored_hash, &trusted);
-    assert!(!outcome.ok, "wrong tree_id must be rejected");
     assert!(
-        outcome.reason.contains("active") || outcome.reason.contains("shard"),
-        "rejection reason should name the active-shard policy, got: {}",
+        !outcome.ok,
+        "the captured fixture is for the active shard, so a historical \
+         tree_id must still fail — but at the checkpoint stage, not \
+         at the roster gate",
+    );
+    assert!(
+        !outcome.reason.contains("roster"),
+        "historical shard must NOT be rejected by the roster gate — \
+         it is in the trusted set; got reason: {}",
+        outcome.reason,
+    );
+    assert!(
+        outcome.reason.contains("checkpoint")
+            || outcome.reason.contains("signature")
+            || outcome.reason.contains("origin"),
+        "expected failure at the signature/checkpoint stage, got: {}",
         outcome.reason,
     );
 }

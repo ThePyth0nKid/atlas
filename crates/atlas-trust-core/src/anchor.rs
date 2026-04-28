@@ -73,26 +73,88 @@ fn mock_log_pubkey_raw() -> [u8; 32] {
 /// auditor can re-fetch and `diff` to confirm. The value is never
 /// modified at runtime.
 ///
-/// V1.6 ships only the active production log. The two known historical
-/// shards (treeIDs `3904496407287907110` and `2605736670972794746`) sign
-/// with the same key, so this same pubkey will accept inclusion proofs
-/// against those shards once we add their origins to the trusted roster
-/// in V1.7.
+/// V1.7 trusts the active production log plus the two known historical
+/// Sigstore Rekor v1 shards (treeIDs `3904496407287907110` and
+/// `2605736670972794746`). All three shards sign with this same key —
+/// the only per-shard difference is the tree-ID embedded in the signed
+/// origin line — so adding shards is a roster widening, not a key
+/// rotation. See `SIGSTORE_REKOR_V1_TREE_IDS` for the enforced roster.
 pub const SIGSTORE_REKOR_V1_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwr\nkBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw==\n-----END PUBLIC KEY-----\n";
 
 /// Active Trillian tree-ID for the Sigstore Rekor v1 production log.
 ///
-/// Used to reconstruct the C2SP signed-note origin line
-/// `"rekor.sigstore.dev - {tree_id}"`. Inactive shards have different
-/// tree-IDs (and therefore different origin lines, since the tree-ID is
-/// part of the signed body); V1.6 only supports the active shard.
+/// Issuer-side constant: `atlas-signer anchor --rekor-url …` always
+/// posts to the active shard (Rekor's public API only accepts new
+/// entries on the active shard), so the value the issuer embeds in
+/// fresh `AnchorEntry.tree_id` rows is always this one.
 ///
-/// Enforced in `verify_sigstore_rekor_v1`: an anchor whose `tree_id`
-/// does not equal this constant is rejected with a clear error before
-/// signature verification (which would otherwise fail with the opaque
-/// "ECDSA P-256 verify: signature error"). V1.7 adds the historical
-/// shards by extending the trusted-log roster with their origins.
+/// Verifier-side acceptance is broader: see
+/// `SIGSTORE_REKOR_V1_TREE_IDS` for the roster of tree-IDs accepted by
+/// `verify_sigstore_rekor_v1`. Historical shards are accepted because
+/// their checkpoints — pre-existing on-disk anchors that an auditor
+/// may have captured years ago — were signed by this same key, just
+/// with a different `tree_id` baked into the C2SP origin line.
 pub const SIGSTORE_REKOR_V1_ACTIVE_TREE_ID: i64 = 1_193_050_959_916_656_506;
+
+/// Roster of Sigstore Rekor v1 Trillian tree-IDs accepted by the
+/// verifier.
+///
+/// Index 0 is load-bearing: it must remain `SIGSTORE_REKOR_V1_ACTIVE_TREE_ID`
+/// so the issuer (which posts to the active shard) and the verifier (which
+/// accepts the active shard plus historical reads) cannot drift apart
+/// silently. The remaining indices are unordered membership entries —
+/// `is_known_sigstore_rekor_v1_tree_id` does linear scan, and the
+/// `sigstore_tree_id_roster_is_pinned` test enforces both the index-0
+/// invariant and the exact set.
+///
+/// Members:
+///   * `1_193_050_959_916_656_506` — active production shard (post-2024).
+///   * `3_904_496_407_287_907_110` — historical shard.
+///   * `2_605_736_670_972_794_746` — earliest historical shard.
+///
+/// Provenance for the historical IDs: Sigstore's public shard rotation
+/// history is published in the `sigstore/root-signing` repository (the
+/// TUF trust root, GitHub: <https://github.com/sigstore/root-signing>)
+/// and announced in Sigstore release blog posts. An auditor can confirm
+/// the values by inspecting that repository's published `targets`
+/// metadata for Rekor public-log shards. The Atlas crate pins them in
+/// source so a silent registry change cannot retroactively widen what
+/// this verifier trusts.
+///
+/// All three shards sign with `SIGSTORE_REKOR_V1_PEM`. The tree-ID is
+/// part of the C2SP signed-note origin line
+/// `"rekor.sigstore.dev - {tree_id}\n"`, so a checkpoint signed for
+/// shard A will not verify under origin B even with the right key —
+/// the verifier therefore must know which tree-IDs are legitimately
+/// part of the Sigstore Rekor v1 deployment to decide which origin to
+/// reconstruct. This roster encodes that knowledge.
+///
+/// Adding a new shard is intentionally a source change requiring a
+/// crate-version bump. Silent acceptance of unknown tree-IDs is
+/// exactly what the trust property forbids — an attacker who could
+/// stand up a same-key shard with a tree-ID we trust by default would
+/// have a forgery primitive against pre-existing anchors.
+pub const SIGSTORE_REKOR_V1_TREE_IDS: &[i64] = &[
+    SIGSTORE_REKOR_V1_ACTIVE_TREE_ID,
+    3_904_496_407_287_907_110,
+    2_605_736_670_972_794_746,
+];
+
+/// Membership test for the Sigstore Rekor v1 tree-ID roster.
+///
+/// `pub(crate)` because the canonical public surface is the constant
+/// `SIGSTORE_REKOR_V1_TREE_IDS` itself; external callers either inspect
+/// the slice directly or do their own membership check. Keeping this
+/// helper crate-private avoids cementing an internal sugar function in
+/// the public API.
+///
+/// Constant-time is not required here: the roster is a public list and
+/// timing leaks reveal nothing the attacker does not already know.
+/// Linear scan over 3 elements is faster than any hash-set lookup at
+/// this size and keeps the binary smaller.
+pub(crate) fn is_known_sigstore_rekor_v1_tree_id(tree_id: i64) -> bool {
+    SIGSTORE_REKOR_V1_TREE_IDS.contains(&tree_id)
+}
 
 /// Origin label used in the active Sigstore Rekor v1 log's checkpoints.
 pub const SIGSTORE_REKOR_V1_ORIGIN: &str = "rekor.sigstore.dev";
@@ -639,14 +701,15 @@ fn verify_sigstore_rekor_v1(
         );
     };
 
-    // V1.6 only trusts the active Sigstore Rekor v1 shard. Reject other
-    // shards explicitly so the auditor sees a precise reason (rather
-    // than a generic "ECDSA P-256 verify" failure later in the path).
-    if tree_id != SIGSTORE_REKOR_V1_ACTIVE_TREE_ID {
+    // V1.7 trusts the active Sigstore Rekor v1 shard plus the two
+    // known historical shards. Reject any other tree_id explicitly so
+    // the auditor sees a precise reason (rather than a generic
+    // "ECDSA P-256 verify" failure later in the path) when somebody
+    // tries to substitute a same-key but unrecognised-shard checkpoint.
+    if !is_known_sigstore_rekor_v1_tree_id(tree_id) {
         return mk(format!(
-            "anchor tree_id {tree_id} is not the active Sigstore Rekor v1 shard \
-             ({}); historical shards land in V1.7",
-            SIGSTORE_REKOR_V1_ACTIVE_TREE_ID,
+            "anchor tree_id {tree_id} is not in the Sigstore Rekor v1 trusted-shard roster ({:?})",
+            SIGSTORE_REKOR_V1_TREE_IDS,
         ));
     }
 
@@ -1885,6 +1948,53 @@ mod tests {
             .expect("sigstore-rekor-v1 missing");
         assert!(matches!(ss.format, CheckpointFormat::SigstoreRekorV1));
         assert!(matches!(ss.pubkey, LogPubkey::EcdsaP256(_)));
+    }
+
+    /// Roster pin: V1.7 trusts exactly the active shard plus the two
+    /// known historical shards. Any change to this set is a deliberate
+    /// trust-property change and must be a source edit, not silent
+    /// drift; this test forces the change to surface in code review.
+    #[test]
+    fn sigstore_tree_id_roster_is_pinned() {
+        assert_eq!(
+            SIGSTORE_REKOR_V1_TREE_IDS,
+            &[
+                1_193_050_959_916_656_506_i64,
+                3_904_496_407_287_907_110_i64,
+                2_605_736_670_972_794_746_i64,
+            ],
+            "SIGSTORE_REKOR_V1_TREE_IDS roster changed — review the trust property",
+        );
+        // The active-shard constant must be the first roster member: the
+        // issuer always submits to the active shard, so verifier roster
+        // and issuer choice cannot diverge silently.
+        assert_eq!(
+            SIGSTORE_REKOR_V1_TREE_IDS[0], SIGSTORE_REKOR_V1_ACTIVE_TREE_ID,
+            "active tree-ID must lead the roster — issuer/verifier alignment invariant",
+        );
+    }
+
+    /// `is_known_sigstore_rekor_v1_tree_id` accepts every roster member
+    /// and rejects a value adjacent to a real shard (catches an
+    /// off-by-one in the membership scan) and an obviously-bogus value.
+    #[test]
+    fn known_sigstore_tree_id_membership() {
+        for &t in SIGSTORE_REKOR_V1_TREE_IDS {
+            assert!(
+                is_known_sigstore_rekor_v1_tree_id(t),
+                "roster member {t} must be accepted",
+            );
+        }
+        // One off from the active shard — must reject.
+        assert!(!is_known_sigstore_rekor_v1_tree_id(
+            SIGSTORE_REKOR_V1_ACTIVE_TREE_ID + 1
+        ));
+        // Negative — must reject.
+        assert!(!is_known_sigstore_rekor_v1_tree_id(-1));
+        // Zero — must reject.
+        assert!(!is_known_sigstore_rekor_v1_tree_id(0));
+        // A small unrelated value — must reject.
+        assert!(!is_known_sigstore_rekor_v1_tree_id(1_234_567_890));
     }
 
     // ────────────────────────────────────────────────────────────────────
