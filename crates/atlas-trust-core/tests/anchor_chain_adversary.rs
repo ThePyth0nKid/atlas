@@ -13,6 +13,7 @@
 //! minimal signed trace.
 
 use atlas_trust_core::{
+    anchor::{SIGSTORE_REKOR_V1_LOG_ID, SIGSTORE_REKOR_V1_TREE_IDS},
     chain_head_for,
     cose::build_signing_input,
     hashchain::compute_event_hash,
@@ -521,6 +522,178 @@ fn trace_anchor_with_swapped_proof_rejected_by_coverage() {
         "swapped-proof entry must be treated as missing from the \
          chain, not coincidentally covered by the matching-coordinates \
          entry; errors: {:?}",
+        outcome.errors,
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// V1.8 Sigstore carve-out
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Helper for the carve-out tests: build an `AnchorEntry` whose
+/// `log_id` matches the pinned Sigstore Rekor v1 production log.
+///
+/// The fixture is intentionally not a real Sigstore anchor: the
+/// inclusion proof and `entry_body_b64` are placeholder bytes, so the
+/// `verify_anchors` step ahead of the coverage check rejects the
+/// entry on its own merits. That is fine and *not* what these tests
+/// pin — coverage logic is independent of per-entry proof validity,
+/// because the verifier emits one evidence row per check and we
+/// inspect the coverage row directly.
+fn fake_sigstore_entry(seed: u64) -> AnchorEntry {
+    // Active production shard tree-ID — within roster. Pinned at the
+    // construction site so a roster restructure doesn't silently route
+    // these tests through the unknown-tree_id rejection branch instead
+    // of the inclusion-proof-failure branch they're meant to exercise.
+    const ACTIVE_TREE_ID: i64 = 1_193_050_959_916_656_506;
+    debug_assert!(
+        SIGSTORE_REKOR_V1_TREE_IDS.contains(&ACTIVE_TREE_ID),
+        "ACTIVE_TREE_ID {} not in SIGSTORE_REKOR_V1_TREE_IDS — fixture would test the wrong rejection branch",
+        ACTIVE_TREE_ID,
+    );
+    AnchorEntry {
+        kind: AnchorKind::DagTip,
+        anchored_hash: format!("{:064x}", 0xfeed_face_u64.wrapping_add(seed)),
+        log_id: SIGSTORE_REKOR_V1_LOG_ID.clone(),
+        log_index: 100_000_000 + seed,
+        integrated_time: 1_745_500_000 + seed as i64,
+        inclusion_proof: InclusionProof {
+            tree_size: 100_000_001 + seed,
+            root_hash: format!("{:064x}", 0xc0de_d00d_u64.wrapping_add(seed)),
+            hashes: vec![format!("{:064x}", 0xa1b2_c3d4_u64.wrapping_add(seed))],
+            checkpoint_sig: "AAAA".to_string(),
+        },
+        entry_body_b64: Some("AAAA".to_string()),
+        tree_id: Some(ACTIVE_TREE_ID),
+    }
+}
+
+/// V1.8 carve-out: a Sigstore-format anchor that lives in
+/// `trace.anchors` but is absent from `trace.anchor_chain` must be
+/// accepted by the coverage check. A V1.7 issuer could not extend the
+/// chain on the Sigstore path (see V1.7 issuer gate), but Sigstore
+/// Rekor v1's publicly-witnessed transparency log gives the same
+/// monotonicity guarantee for the entry on its own — coverage must
+/// not require chain presence.
+///
+/// We assert on the coverage *evidence* row (not on `valid`) because
+/// the placeholder inclusion proof in the fake Sigstore entry fails
+/// per-entry verification upstream, so the trace as a whole is
+/// invalid. Coverage is an independent check whose outcome is what
+/// this test pins.
+#[test]
+fn sigstore_anchor_not_in_chain_accepted_by_coverage() {
+    let chain = build_valid_chain(2);
+    let sigstore_entry = fake_sigstore_entry(0);
+
+    let (trace, bundle) = build_minimal_trace_with(Some(chain), vec![sigstore_entry]);
+    let outcome = verify_trace_with(&trace, &bundle, &VerifyOptions::default());
+
+    let coverage = outcome
+        .evidence
+        .iter()
+        .find(|e| e.check == "anchor-chain-coverage")
+        .expect("anchor-chain-coverage evidence row must be present");
+    assert!(
+        coverage.ok,
+        "Sigstore-deferred entry must pass coverage; detail: {}",
+        coverage.detail,
+    );
+    assert!(
+        coverage.detail.contains("Sigstore"),
+        "coverage evidence must explicitly name the Sigstore deferral; got: {}",
+        coverage.detail,
+    );
+    // No coverage error must surface in the error list — that would
+    // mean the carve-out branch ran but still pushed the message.
+    assert!(
+        !outcome
+            .errors
+            .iter()
+            .any(|e| e.contains("not present in any chain batch")),
+        "coverage error must not fire for Sigstore-deferred entry; errors: {:?}",
+        outcome.errors,
+    );
+}
+
+/// Mixed-mode trace: chain holds the mock entries, `trace.anchors`
+/// holds the same mock entries (must be in chain) plus a Sigstore
+/// entry (deferred). Coverage must accept the Sigstore entry while
+/// still asserting the mock entries are present in chain history.
+#[test]
+fn mixed_mode_mock_in_chain_plus_sigstore_deferred() {
+    let chain = build_valid_chain(2);
+    // Lift the chain's mock entries into trace.anchors verbatim — the
+    // coverage cross-check uses byte-level keys, so cloning is the
+    // simplest way to ensure they match.
+    let mock_anchors: Vec<AnchorEntry> = chain
+        .history
+        .iter()
+        .flat_map(|b| b.entries.iter().cloned())
+        .collect();
+    let sigstore_anchor = fake_sigstore_entry(7);
+    let mut trace_anchors = mock_anchors.clone();
+    trace_anchors.push(sigstore_anchor);
+
+    let (trace, bundle) = build_minimal_trace_with(Some(chain), trace_anchors);
+    let outcome = verify_trace_with(&trace, &bundle, &VerifyOptions::default());
+
+    let coverage = outcome
+        .evidence
+        .iter()
+        .find(|e| e.check == "anchor-chain-coverage")
+        .expect("coverage evidence row must be present");
+    assert!(
+        coverage.ok,
+        "mixed-mode (mock-in-chain + Sigstore-deferred) must pass coverage; detail: {}",
+        coverage.detail,
+    );
+    assert!(
+        coverage.detail.contains("Sigstore") && coverage.detail.contains("deferred"),
+        "coverage detail must call out the deferred Sigstore tail; got: {}",
+        coverage.detail,
+    );
+}
+
+/// Carve-out regression: the carve-out is keyed on
+/// `log_id == SIGSTORE_REKOR_V1_LOG_ID`. An anchor with any other
+/// `log_id` (here the fixture `deadbeef…` value, neither mock nor
+/// Sigstore) that is missing from the chain must still be rejected.
+/// Without this assertion, a future refactor could widen the carve-out
+/// (e.g. "any non-mock entry passes") and silently break the trust
+/// property for unknown logs.
+#[test]
+fn non_sigstore_anchor_not_in_chain_still_rejected() {
+    let chain = build_valid_chain(1);
+
+    let stray = AnchorEntry {
+        kind: AnchorKind::DagTip,
+        anchored_hash: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+            .to_string(),
+        // Same as the existing fixture: not the Sigstore log_id.
+        log_id: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+        log_index: 9999,
+        integrated_time: 1_745_000_999,
+        inclusion_proof: InclusionProof {
+            tree_size: 10000,
+            root_hash:
+                "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+            hashes: vec![],
+            checkpoint_sig: "AAAA".to_string(),
+        },
+        entry_body_b64: None,
+        tree_id: None,
+    };
+
+    let (trace, bundle) = build_minimal_trace_with(Some(chain), vec![stray]);
+    let outcome = verify_trace_with(&trace, &bundle, &VerifyOptions::default());
+    assert!(!outcome.valid, "non-Sigstore stray entry must still fail");
+    assert!(
+        outcome
+            .errors
+            .iter()
+            .any(|e| e.contains("not present in any chain batch")),
+        "expected coverage rejection for non-Sigstore stray entry; errors: {:?}",
         outcome.errors,
     );
 }

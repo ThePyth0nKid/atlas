@@ -6,7 +6,9 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::anchor::{default_trusted_logs, verify_anchor_chain, verify_anchors};
+use crate::anchor::{
+    default_trusted_logs, verify_anchor_chain, verify_anchors, SIGSTORE_REKOR_V1_LOG_ID,
+};
 use crate::cose::build_signing_input;
 use crate::ed25519::verify_signature;
 use crate::error::TrustResult;
@@ -431,6 +433,37 @@ pub fn verify_trace_with(
             // proof-swap attacks where two entries share trace
             // coordinates but carry different inclusion proofs).
             //
+            // Three classes of anchor are evaluated:
+            //
+            //   1. Covered      — entry appears byte-identically in some
+            //                     chain batch. Always passes.
+            //   2. Sigstore-deferred — entry's `log_id` matches the
+            //                     Sigstore Rekor v1 production log and
+            //                     it is absent from the chain. Accepted:
+            //                     a V1.7 bundle could not extend the
+            //                     chain on the Sigstore path (issuer
+            //                     gate, removed in V1.8) but Sigstore's
+            //                     own publicly-witnessed transparency
+            //                     log gives the same monotonicity
+            //                     guarantee for that entry. Per-entry
+            //                     verification (step `anchors`) still
+            //                     reconstructs the C2SP origin, checks
+            //                     the inclusion proof, and validates
+            //                     the checkpoint signature against the
+            //                     pinned Atlas anchoring key — so the
+            //                     entry is fully trust-anchored even
+            //                     without a chain presence.
+            //   3. Uncovered    — neither in chain nor a known Sigstore
+            //                     entry. Rejected: mock anchors must be
+            //                     in the chain (the chain is the only
+            //                     monotonicity witness for the dev
+            //                     mock-Rekor), and an unknown `log_id`
+            //                     would already have been rejected by
+            //                     `verify_anchors` upstream — so this
+            //                     branch fires for mock entries that
+            //                     escaped chain extension (a true
+            //                     coverage gap).
+            //
             // Gated on `outcome.ok`: if the chain walk failed, the
             // chain_keys set is built from a partially-walked or
             // structurally broken history, and a coverage "pass" against
@@ -443,15 +476,23 @@ pub fn verify_trace_with(
                     .flat_map(|b| b.entries.iter())
                     .map(anchor_entry_key)
                     .collect();
-                let missing: Vec<&AnchorEntry> = trace
-                    .anchors
-                    .iter()
-                    .filter(|e| !chain_keys.contains(&anchor_entry_key(e)))
-                    .collect();
-                if !missing.is_empty() {
+                let sigstore_log_id: &str = SIGSTORE_REKOR_V1_LOG_ID.as_str();
+                let mut missing_required: Vec<&AnchorEntry> = Vec::new();
+                let mut deferred_sigstore: Vec<&AnchorEntry> = Vec::new();
+                for entry in trace.anchors.iter() {
+                    if chain_keys.contains(&anchor_entry_key(entry)) {
+                        continue;
+                    }
+                    if entry.log_id == sigstore_log_id {
+                        deferred_sigstore.push(entry);
+                    } else {
+                        missing_required.push(entry);
+                    }
+                }
+                if !missing_required.is_empty() {
                     let msg = format!(
                         "anchor-chain: {} trace.anchors entry/entries not present in any chain batch",
-                        missing.len(),
+                        missing_required.len(),
                     );
                     errors.push(msg.clone());
                     evidence.push(VerifyEvidence {
@@ -460,13 +501,25 @@ pub fn verify_trace_with(
                         detail: msg,
                     });
                 } else {
+                    let total = trace.anchors.len();
+                    let in_chain = total - deferred_sigstore.len();
+                    let detail = if deferred_sigstore.is_empty() {
+                        format!(
+                            "all {} trace.anchors entry/entries covered by chain history",
+                            total,
+                        )
+                    } else {
+                        format!(
+                            "{} of {} trace.anchors covered by chain history; {} Sigstore entry/entries deferred (V1.7-issued, accepted via Rekor v1 monotonicity)",
+                            in_chain,
+                            total,
+                            deferred_sigstore.len(),
+                        )
+                    };
                     evidence.push(VerifyEvidence {
                         check: "anchor-chain-coverage".to_string(),
                         ok: true,
-                        detail: format!(
-                            "all {} trace.anchors entry/entries covered by chain history",
-                            trace.anchors.len(),
-                        ),
+                        detail,
                     });
                 }
             }
