@@ -65,7 +65,12 @@ fn decode_b64url(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
 }
 
 /// Produce canonical JSON bytes (keys sorted, no whitespace).
-fn canonical_json_bytes(v: &serde_json::Value) -> TrustResult<Vec<u8>> {
+///
+/// `pub(crate)` so the chain-head canonicalization in `anchor.rs` shares
+/// exactly one implementation with `PubkeyBundle::deterministic_hash` —
+/// any future canonicalization change (whitespace, key-sort, number
+/// formatting) cascades to every consumer at once.
+pub(crate) fn canonical_json_bytes(v: &serde_json::Value) -> TrustResult<Vec<u8>> {
     fn write_canonical(v: &serde_json::Value, out: &mut Vec<u8>) -> TrustResult<()> {
         match v {
             serde_json::Value::Null => out.extend_from_slice(b"null"),

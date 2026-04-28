@@ -188,6 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         anchors: vec![],
         policies: vec![],
         filters: None,
+        anchor_chain: None,
     };
 
     // Resolve repo-root (workspace root)

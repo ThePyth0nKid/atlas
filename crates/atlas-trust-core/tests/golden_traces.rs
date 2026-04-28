@@ -105,6 +105,7 @@ fn round_trip_two_event_dag_verifies() {
         anchors: vec![],
         policies: vec![],
         filters: None,
+        anchor_chain: None,
     };
 
     // 6. Verify
@@ -150,6 +151,7 @@ fn tampered_payload_detected() {
         anchors: vec![],
         policies: vec![],
         filters: None,
+        anchor_chain: None,
     };
 
     let outcome = verify_trace(&trace, &bundle);
@@ -193,6 +195,7 @@ fn unknown_kid_detected() {
         anchors: vec![],
         policies: vec![],
         filters: None,
+        anchor_chain: None,
     };
 
     let outcome = verify_trace(&trace, &bundle);
@@ -225,6 +228,7 @@ fn schema_mismatch_detected() {
         anchors: vec![],
         policies: vec![],
         filters: None,
+        anchor_chain: None,
     };
 
     let outcome = verify_trace(&trace, &bundle);
@@ -275,6 +279,7 @@ fn make_chain(
         anchors: vec![],
         policies: vec![],
         filters: None,
+        anchor_chain: None,
     };
     (trace, bundle)
 }

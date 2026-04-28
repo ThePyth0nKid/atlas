@@ -22,10 +22,12 @@ pub mod error;
 
 pub use error::{TrustError, TrustResult};
 pub use trace_format::{
-    AnchorEntry, AnchorKind, AtlasEvent, AtlasPayload, AtlasTrace, EventSignature, InclusionProof,
+    AnchorBatch, AnchorChain, AnchorEntry, AnchorKind, AtlasEvent, AtlasPayload, AtlasTrace,
+    EventSignature, InclusionProof, ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD,
 };
 pub use verify::{VerifyOutcome, VerifyEvidence, VerifyOptions, verify_trace, verify_trace_with};
 pub use pubkey_bundle::PubkeyBundle;
+pub use anchor::{chain_head_for, ANCHOR_CHAIN_DOMAIN};
 
 /// Schema version this build of the crate produces and accepts.
 pub const SCHEMA_VERSION: &str = "atlas-trace-v1";

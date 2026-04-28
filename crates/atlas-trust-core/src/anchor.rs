@@ -27,7 +27,11 @@ use ed25519_dalek::{Signature as EdSignature, Verifier as EdVerifier, VerifyingK
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
-use crate::trace_format::{AnchorEntry, AnchorKind, AtlasTrace, InclusionProof};
+use crate::error::{TrustError, TrustResult};
+use crate::trace_format::{
+    AnchorBatch, AnchorChain, AnchorEntry, AnchorKind, AtlasTrace, InclusionProof,
+    ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD,
+};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Pinned log identities
@@ -741,6 +745,180 @@ pub fn canonical_checkpoint_bytes_sigstore(
     }
     let root_b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
     Ok(format!("{origin} - {tree_id}\n{tree_size}\n{root_b64}\n").into_bytes())
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Anchor-chain head computation (V1.7)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Domain-separation prefix for `chain_head_for`. Mixed in with blake3 so
+/// the chain hash cannot collide with any other hash in the system (event
+/// hash, leaf hash, bundle hash, checkpoint signing input).
+///
+/// Versioned (`-v1`) so a future canonicalization change can ship under a
+/// new prefix without invalidating already-issued chains. If the format
+/// here changes incompatibly, bump to `-v2` AND bump `atlas-trust-core`'s
+/// crate version so `VERIFIER_VERSION` cascades.
+pub const ANCHOR_CHAIN_DOMAIN: &[u8] = b"atlas-anchor-chain-v1:";
+
+/// Canonical bytes for an `AnchorBatch` — the input to the chain hash.
+///
+/// Implementation strategy: serialize the batch through `serde_json` (which
+/// honors `#[serde(rename_all)]` and `#[serde(skip_serializing_if)]` on
+/// `AnchorBatch` and `AnchorEntry`), then re-emit those bytes through the
+/// same canonical-JSON pipeline `PubkeyBundle::deterministic_hash` uses —
+/// keys sorted lex, no whitespace, numbers as `Number::to_string`,
+/// strings JSON-escaped. One implementation, one set of pin tests, one
+/// source of truth.
+///
+/// JSON-escaping defends against splicing: if `log_id` ever contained an
+/// embedded newline or quote, JSON's escape rules render those bytes
+/// unambiguously, so two batches that differ in log_id contents cannot
+/// produce the same canonical bytes.
+fn canonical_chain_batch_body(batch: &AnchorBatch) -> TrustResult<Vec<u8>> {
+    let v = serde_json::to_value(batch).map_err(|e| TrustError::Encoding(e.to_string()))?;
+    crate::pubkey_bundle::canonical_json_bytes(&v)
+}
+
+/// Compute the chain head for an `AnchorBatch`.
+///
+/// `head_n = blake3(ANCHOR_CHAIN_DOMAIN || canonical_chain_batch_body(batch_n))`
+///
+/// The batch's `previous_head` field is part of the canonical body, so this
+/// commits to the entire history transitively: tampering with any past
+/// batch changes `head_{i}` for that batch, which changes `previous_head`
+/// in `batch_{i+1}`, which changes `head_{i+1}`, and so on up to the tip.
+/// Returns the lowercase hex of the 32-byte blake3 digest.
+pub fn chain_head_for(batch: &AnchorBatch) -> TrustResult<String> {
+    let body = canonical_chain_batch_body(batch)?;
+    let mut hasher = Hasher::new();
+    hasher.update(ANCHOR_CHAIN_DOMAIN);
+    hasher.update(&body);
+    Ok(hex::encode(hasher.finalize().as_bytes()))
+}
+
+/// Result of chain-internal verification (V1.7).
+///
+/// Returned by `verify_anchor_chain`. `ok = errors.is_empty()`. Carrying
+/// the recomputed tip allows the verifier to surface it in
+/// `VerifyOutcome::evidence` for auditor display.
+#[derive(Debug, Clone)]
+pub struct ChainVerifyOutcome {
+    /// Did all chain-internal checks pass?
+    pub ok: bool,
+    /// Number of batches walked.
+    pub batches_walked: usize,
+    /// Recomputed tip (head of the final successfully-walked batch),
+    /// for evidence display. `None` if walking aborted before the
+    /// first batch produced a head.
+    pub recomputed_head: Option<String>,
+    /// Per-batch error strings; empty on full success.
+    pub errors: Vec<String>,
+}
+
+/// Verify the internal consistency of an `AnchorChain`.
+///
+/// Checks, in order:
+///   1. `history` is non-empty (the issuer never emits empty chains).
+///   2. For each batch at index `i`:
+///      - `batch_index == i` (no gaps, skips, or duplicates).
+///      - `previous_head == chain_head_for(history[i-1])`, or the
+///        all-zero genesis sentinel for `i == 0`.
+///   3. `chain.head == chain_head_for(history.last())` — the
+///      convenience tip is never trusted as a shortcut; the verifier
+///      always recomputes from `history`.
+///
+/// All checks are independent of network state. The trust property
+/// holds against any auditor with the verifier code and the chain
+/// bytes — no log-side cooperation needed.
+///
+/// Cross-coverage between `trace.anchors` and chain entries is enforced
+/// at the `verify_trace_with` layer (it requires both fields), not
+/// here. This function answers only "is this chain self-consistent?".
+pub fn verify_anchor_chain(chain: &AnchorChain) -> ChainVerifyOutcome {
+    let mut errors = Vec::new();
+    let mut recomputed_head: Option<String> = None;
+
+    if chain.history.is_empty() {
+        errors.push(
+            "anchor_chain.history is empty; issuer never emits empty chains".to_string(),
+        );
+        return ChainVerifyOutcome {
+            ok: false,
+            batches_walked: 0,
+            recomputed_head,
+            errors,
+        };
+    }
+
+    let mut expected_prev = ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD.to_string();
+    let mut batches_walked = 0usize;
+    for (i, batch) in chain.history.iter().enumerate() {
+        // Sequential index check — gaps, skips, duplicates all rejected.
+        if batch.batch_index != i as u64 {
+            errors.push(format!(
+                "anchor_chain: batch[{i}] has batch_index={}, expected {}",
+                batch.batch_index, i,
+            ));
+        }
+
+        // previous_head links to predecessor's recomputed head (or the
+        // genesis sentinel for the first batch). Constant-time compare
+        // so a side-channel attacker cannot probe partial matches.
+        //
+        // STOP walking on mismatch: once the link is broken,
+        // `expected_prev` is no longer the "honest" head, and continuing
+        // would let an attacker hide a coordinated multi-batch rewrite
+        // (where batches `i` and `i+1` are both substituted with a
+        // consistent internal link) behind a single error report. We
+        // surface the first break and refuse to keep walking.
+        if !crate::ct::ct_eq_str(&batch.previous_head, &expected_prev) {
+            errors.push(format!(
+                "anchor_chain: batch[{i}] previous_head mismatch: claimed={}, expected={}",
+                batch.previous_head, expected_prev,
+            ));
+            break;
+        }
+
+        match chain_head_for(batch) {
+            Ok(head) => {
+                expected_prev = head.clone();
+                recomputed_head = Some(head);
+                batches_walked += 1;
+            }
+            Err(e) => {
+                errors.push(format!(
+                    "anchor_chain: batch[{i}] head computation failed: {e}"
+                ));
+                // Stop walking; subsequent previous_head checks would
+                // be meaningless without a recomputed predecessor.
+                break;
+            }
+        }
+    }
+
+    // Tip check is meaningful only when the full history walked
+    // cleanly. A short walk's tip is the head of wherever we stopped,
+    // not the chain tip — comparing it to chain.head would surface a
+    // confusing second error on top of the link/index errors that
+    // caused the early break.
+    if batches_walked == chain.history.len() {
+        if let Some(tip) = &recomputed_head {
+            if !crate::ct::ct_eq_str(&chain.head, tip) {
+                errors.push(format!(
+                    "anchor_chain: convenience head mismatch (chain.head={}, recomputed from history={})",
+                    chain.head, tip,
+                ));
+            }
+        }
+    }
+
+    ChainVerifyOutcome {
+        ok: errors.is_empty(),
+        batches_walked,
+        recomputed_head,
+        errors,
+    }
 }
 
 /// Extract the C2SP signed-note signature line that matches `expected_origin`,
@@ -1707,5 +1885,169 @@ mod tests {
             .expect("sigstore-rekor-v1 missing");
         assert!(matches!(ss.format, CheckpointFormat::SigstoreRekorV1));
         assert!(matches!(ss.pubkey, LogPubkey::EcdsaP256(_)));
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Anchor-chain head pin tests (V1.7)
+    //
+    // Cross-implementation goldens. The chain head is the load-bearing
+    // hash for V1.7's anti-rewrite property: silent mutation of any past
+    // batch must change the head and break verification. These pins
+    // anchor the wire format so a future canonicalization change trips
+    // CI before it desyncs issuer from verifier.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Helper: minimal fixture batch covering both anchor kinds and one
+    /// AnchorEntry per kind, with deterministic field values. Re-used by
+    /// the byte-determinism, domain-separation, and previous-head pin
+    /// tests so a single field tweak surfaces in all of them at once.
+    fn fixture_batch(batch_index: u64, previous_head: &str) -> AnchorBatch {
+        AnchorBatch {
+            batch_index,
+            integrated_time: 1_745_000_000,
+            entries: vec![AnchorEntry {
+                kind: AnchorKind::DagTip,
+                anchored_hash:
+                    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff".to_string(),
+                log_id: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                    .to_string(),
+                log_index: 7,
+                integrated_time: 1_745_000_000,
+                inclusion_proof: InclusionProof {
+                    tree_size: 8,
+                    root_hash:
+                        "cafebabe00000000cafebabe00000000cafebabe00000000cafebabe00000000"
+                            .to_string(),
+                    hashes: vec![
+                        "1111111111111111111111111111111111111111111111111111111111111111"
+                            .to_string(),
+                        "2222222222222222222222222222222222222222222222222222222222222222"
+                            .to_string(),
+                    ],
+                    checkpoint_sig: "AAAA".to_string(),
+                },
+                entry_body_b64: None,
+                tree_id: None,
+            }],
+            previous_head: previous_head.to_string(),
+        }
+    }
+
+    /// Pin the canonical-bytes output of `canonical_chain_batch_body`
+    /// for the genesis fixture. If `serde_json::to_value` ever changes
+    /// how it serializes the batch (field name, number formatting,
+    /// `skip_serializing_if` behavior) or if `canonical_json_bytes`
+    /// changes its sort/whitespace rules, this test trips immediately.
+    #[test]
+    fn chain_canonical_body_byte_determinism_pin() {
+        let batch = fixture_batch(0, crate::trace_format::ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        let body = canonical_chain_batch_body(&batch).unwrap();
+
+        // BEGIN PINNED — DO NOT EDIT WITHOUT INTENT.
+        // Canonical JSON of the genesis fixture: top-level keys sorted
+        // (batch_index, entries, integrated_time, previous_head); each
+        // entry's keys sorted (anchored_hash, inclusion_proof, kind,
+        // log_id, log_index, integrated_time); inclusion_proof keys
+        // sorted (checkpoint_sig, hashes, root_hash, tree_size). No
+        // whitespace, no trailing newline. `entry_body_b64` and
+        // `tree_id` are absent (Option::None + skip_serializing_if).
+        let expected = r#"{"batch_index":0,"entries":[{"anchored_hash":"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff","inclusion_proof":{"checkpoint_sig":"AAAA","hashes":["1111111111111111111111111111111111111111111111111111111111111111","2222222222222222222222222222222222222222222222222222222222222222"],"root_hash":"cafebabe00000000cafebabe00000000cafebabe00000000cafebabe00000000","tree_size":8},"integrated_time":1745000000,"kind":"dag_tip","log_id":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef","log_index":7}],"integrated_time":1745000000,"previous_head":"0000000000000000000000000000000000000000000000000000000000000000"}"#;
+        // END PINNED.
+
+        assert_eq!(
+            std::str::from_utf8(&body).unwrap(),
+            expected,
+            "anchor-chain canonical body wire-format drift. If \
+             intentional, update the pinned string AND bump \
+             atlas-trust-core's crate version so VERIFIER_VERSION \
+             cascades to old-format chains."
+        );
+    }
+
+    /// Pin `chain_head_for` for the genesis fixture. This is the
+    /// blake3 of `ANCHOR_CHAIN_DOMAIN || canonical_chain_batch_body`.
+    /// An auditor can re-derive: `printf 'atlas-anchor-chain-v1:<body>'
+    /// | b3sum`.
+    #[test]
+    fn chain_head_for_byte_determinism_pin() {
+        let batch = fixture_batch(0, crate::trace_format::ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        let head = chain_head_for(&batch).unwrap();
+
+        // BEGIN PINNED — DO NOT EDIT WITHOUT INTENT.
+        // blake3("atlas-anchor-chain-v1:" || canonical_body) hex.
+        let expected = "b3a7c15ad1d47a5e324d431501a20bd5defa78b734ef14bb612e1c0f2f5ddfd6";
+        // END PINNED.
+
+        assert_eq!(
+            head, expected,
+            "anchor-chain head wire-format drift. Issuer/verifier byte \
+             agreement on this hash is the V1.7 trust property."
+        );
+    }
+
+    /// Domain-separation prefix sanity check. We verify the easiest
+    /// case: blake3 of the canonical body WITHOUT the
+    /// `ANCHOR_CHAIN_DOMAIN` prefix differs from `chain_head_for`. This
+    /// alone does not prove cross-system collision resistance against
+    /// other blake3 inputs in the codebase (event signing inputs, leaf
+    /// hashes, bundle hashes), but it does prove the prefix is part of
+    /// the input — the load-bearing precondition for cross-system
+    /// separation given that those other inputs use distinct prefixes.
+    #[test]
+    fn chain_head_includes_domain_prefix() {
+        let batch = fixture_batch(0, crate::trace_format::ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        let head = chain_head_for(&batch).unwrap();
+
+        let body = canonical_chain_batch_body(&batch).unwrap();
+        let undomained = hex::encode(blake3::hash(&body).as_bytes());
+
+        assert_ne!(
+            head, undomained,
+            "chain head must include ANCHOR_CHAIN_DOMAIN prefix; \
+             dropping it would expose the chain hash to collision with \
+             any other blake3-of-canonical-JSON value in the system",
+        );
+    }
+
+    /// `previous_head` is part of the canonical body, so changing it
+    /// (which is what an attacker rewriting history would have to do)
+    /// MUST change the chain head. This is the load-bearing property
+    /// for the entire chain construction.
+    #[test]
+    fn chain_head_changes_with_previous_head() {
+        let h_genesis = chain_head_for(&fixture_batch(
+            1,
+            crate::trace_format::ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD,
+        ))
+        .unwrap();
+        let h_other = chain_head_for(&fixture_batch(
+            1,
+            "0101010101010101010101010101010101010101010101010101010101010101",
+        ))
+        .unwrap();
+        assert_ne!(
+            h_genesis, h_other,
+            "chain head must depend on previous_head; otherwise \
+             rewriting the predecessor would not change the head",
+        );
+    }
+
+    /// Same fixture, different `batch_index`. The index is part of the
+    /// canonical body, so the head must differ. Defends against an
+    /// attacker who tries to splice a batch into a different position
+    /// of the history.
+    #[test]
+    fn chain_head_changes_with_batch_index() {
+        let h0 = chain_head_for(&fixture_batch(
+            0,
+            crate::trace_format::ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD,
+        ))
+        .unwrap();
+        let h1 = chain_head_for(&fixture_batch(
+            1,
+            crate::trace_format::ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD,
+        ))
+        .unwrap();
+        assert_ne!(h0, h1, "chain head must depend on batch_index");
     }
 }

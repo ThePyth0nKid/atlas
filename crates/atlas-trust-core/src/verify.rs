@@ -6,26 +6,34 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
-use crate::anchor::{default_trusted_logs, verify_anchors};
+use crate::anchor::{default_trusted_logs, verify_anchor_chain, verify_anchors};
 use crate::cose::build_signing_input;
 use crate::ed25519::verify_signature;
 use crate::error::TrustResult;
 use crate::hashchain::{check_event_hashes, check_parent_links, compute_tips};
 use crate::pubkey_bundle::PubkeyBundle;
-use crate::trace_format::AtlasTrace;
+use crate::trace_format::{AnchorEntry, AnchorKind, AtlasTrace};
 
 /// Caller-tunable verification options.
 ///
 /// V1 had no options. V1.5 adds anchor strictness — the verifier still
 /// passes traces with no anchors by default (so V1 traces continue to
 /// verify), but auditors who insist on anchor coverage can enable strict
-/// mode to require every DAG-tip to be anchored.
+/// mode to require every DAG-tip to be anchored. V1.7 adds the analogous
+/// chain-strict flag: lenient by default (V1.5/V1.6 traces with no
+/// `anchor_chain` continue to verify), strict mode requires the chain.
 #[derive(Debug, Clone, Default)]
 pub struct VerifyOptions {
     /// If true, every `trace.dag_tips` entry must have a matching
     /// successful anchor in `trace.anchors`. Empty `trace.anchors` then
     /// fails verification rather than passing as "no claim, no problem".
     pub require_anchors: bool,
+
+    /// If true, `trace.anchor_chain` must be present, internally
+    /// consistent, and (if `trace.anchors` is also present) must cover
+    /// every entry in `trace.anchors`. Defaults to false so V1.5/V1.6
+    /// bundles continue to verify under V1.7 builds.
+    pub require_anchor_chain: bool,
 }
 
 /// Full verification result, suitable for showing in a UI / CLI.
@@ -354,6 +362,117 @@ pub fn verify_trace_with(
         }
     }
 
+    // 8. Anchor-chain consistency (V1.7).
+    //
+    // The chain commits, transitively via `previous_head`, to every
+    // batch ever issued for the workspace. Verification is two-pronged:
+    //   - Chain-internal: every batch's recomputed head must thread
+    //     through `previous_head` of the next batch, the index sequence
+    //     must be 0..N, and the tip must equal the convenience `head`.
+    //   - Coverage: every entry surfaced in `trace.anchors` must also
+    //     be present in some batch in `chain.history`. A trace claiming
+    //     anchors that were never recorded in the chain is a fork.
+    //
+    // Lenient by default: traces without `anchor_chain` continue to
+    // verify (V1.5/V1.6 compatibility). Strict mode (`require_anchor_chain`)
+    // demands the chain be present.
+    match &trace.anchor_chain {
+        None => {
+            if opts.require_anchor_chain {
+                let msg = "strict mode: trace has no anchor_chain, but require_anchor_chain is set"
+                    .to_string();
+                errors.push(msg.clone());
+                evidence.push(VerifyEvidence {
+                    check: "anchor-chain".to_string(),
+                    ok: false,
+                    detail: msg,
+                });
+            } else {
+                evidence.push(VerifyEvidence {
+                    check: "anchor-chain".to_string(),
+                    ok: true,
+                    detail: "no anchor_chain claimed (lenient mode passes)".to_string(),
+                });
+            }
+        }
+        Some(chain) => {
+            let outcome = verify_anchor_chain(chain);
+            if !outcome.ok {
+                for e in &outcome.errors {
+                    errors.push(format!("anchor-chain: {e}"));
+                }
+                evidence.push(VerifyEvidence {
+                    check: "anchor-chain".to_string(),
+                    ok: false,
+                    detail: format!(
+                        "{} chain error(s) over {} batch(es)",
+                        outcome.errors.len(),
+                        outcome.batches_walked,
+                    ),
+                });
+            } else {
+                let tip_short = outcome
+                    .recomputed_head
+                    .as_deref()
+                    .map(|h| &h[..16])
+                    .unwrap_or("<empty>");
+                evidence.push(VerifyEvidence {
+                    check: "anchor-chain".to_string(),
+                    ok: true,
+                    detail: format!(
+                        "chain head {} verified across {} batch(es)",
+                        tip_short, outcome.batches_walked,
+                    ),
+                });
+            }
+
+            // Coverage: every trace.anchors entry must appear in some
+            // chain batch, with byte-identical content (to prevent
+            // proof-swap attacks where two entries share trace
+            // coordinates but carry different inclusion proofs).
+            //
+            // Gated on `outcome.ok`: if the chain walk failed, the
+            // chain_keys set is built from a partially-walked or
+            // structurally broken history, and a coverage "pass" against
+            // that set would be meaningless (and misleading evidence).
+            if outcome.ok && !trace.anchors.is_empty() {
+                use std::collections::BTreeSet;
+                let chain_keys: BTreeSet<AnchorEntryKey<'_>> = chain
+                    .history
+                    .iter()
+                    .flat_map(|b| b.entries.iter())
+                    .map(anchor_entry_key)
+                    .collect();
+                let missing: Vec<&AnchorEntry> = trace
+                    .anchors
+                    .iter()
+                    .filter(|e| !chain_keys.contains(&anchor_entry_key(e)))
+                    .collect();
+                if !missing.is_empty() {
+                    let msg = format!(
+                        "anchor-chain: {} trace.anchors entry/entries not present in any chain batch",
+                        missing.len(),
+                    );
+                    errors.push(msg.clone());
+                    evidence.push(VerifyEvidence {
+                        check: "anchor-chain-coverage".to_string(),
+                        ok: false,
+                        detail: msg,
+                    });
+                } else {
+                    evidence.push(VerifyEvidence {
+                        check: "anchor-chain-coverage".to_string(),
+                        ok: true,
+                        detail: format!(
+                            "all {} trace.anchors entry/entries covered by chain history",
+                            trace.anchors.len(),
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     let valid = errors.is_empty();
 
     VerifyOutcome {
@@ -362,6 +481,35 @@ pub fn verify_trace_with(
         errors,
         verifier_version: crate::VERIFIER_VERSION.to_string(),
     }
+}
+
+/// Tuple-key identifying an `AnchorEntry` for cross-set comparison
+/// between `trace.anchors` and chain entries.
+///
+/// Includes the `inclusion_proof` root-hash and tree-size so that two
+/// entries sharing trace coordinates but carrying different proofs do
+/// NOT collide in the coverage set. If the key were just (kind, hash,
+/// log_id, log_index), an attacker could place a proof-A entry into
+/// the chain (where step-7 inclusion verification doesn't run) and a
+/// proof-B entry into trace.anchors (where step-7 does run) — coverage
+/// would pass on coordinates while the two proofs disagree about the
+/// witnessed log state. Including the proof root-hash + tree-size makes
+/// the cross-check truly independent from step 7.
+type AnchorEntryKey<'a> = (&'a str, &'a str, &'a str, u64, &'a str, u64);
+
+fn anchor_entry_key(e: &AnchorEntry) -> AnchorEntryKey<'_> {
+    let kind = match e.kind {
+        AnchorKind::DagTip => "dag_tip",
+        AnchorKind::BundleHash => "bundle_hash",
+    };
+    (
+        kind,
+        e.anchored_hash.as_str(),
+        e.log_id.as_str(),
+        e.log_index,
+        e.inclusion_proof.root_hash.as_str(),
+        e.inclusion_proof.tree_size,
+    )
 }
 
 fn decode_b64url(s: &str) -> Result<Vec<u8>, base64::DecodeError> {

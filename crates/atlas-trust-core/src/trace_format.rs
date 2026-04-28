@@ -32,6 +32,16 @@ pub struct AtlasTrace {
     #[serde(default)]
     pub anchors: Vec<AnchorEntry>,
 
+    /// Anchor-chain extension witness (V1.7). When present, binds this
+    /// trace to a monotonic sequence of anchor batches issued for the
+    /// workspace, defending against post-hoc rewriting of past anchored
+    /// state. Absent for V1.5 and V1.6 trace bundles; lenient mode
+    /// passes (matching the V1.5 "no claim is fine" rule), strict mode
+    /// (`VerifyOptions::require_anchor_chain`) demands a present, valid
+    /// chain. See `AnchorChain` for the round-trip story.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anchor_chain: Option<AnchorChain>,
+
     /// Cedar policies in scope at bundle generation time.
     /// Each policy is itself an event in `events` — this is just the index.
     #[serde(default)]
@@ -179,6 +189,110 @@ pub struct InclusionProof {
     ///   `atlas_trust_core::anchor::canonical_checkpoint_bytes_sigstore`.
     pub checkpoint_sig: String,
 }
+
+/// Hash-chain head over consecutive anchor batches issued for a
+/// workspace (V1.7).
+///
+/// V1.6 anchors prove "this `dag_tip`/`bundle_hash` was witnessed at
+/// time T against a pinned log". They do not prove "the SEQUENCE of
+/// witnessed states is consistent — no past state has been silently
+/// rewritten". A server could legitimately anchor state A at T₁,
+/// later corrupt the trace, then anchor a different state B at T₂,
+/// and an auditor with only the most recent `anchors.json` would not
+/// notice. V1.7 closes that gap by carrying every anchor batch ever
+/// issued for the workspace, cross-linked via `previous_head`.
+///
+/// **Trust property** — every additional batch_n is bound to all
+/// preceding batches via:
+/// ```text
+/// chain_head_n = blake3("atlas-anchor-chain-v1:" ||
+///                       canonical_chain_batch_body(batch_n))
+/// ```
+/// where `batch_n.previous_head == chain_head_{n-1}` (and zero for
+/// the genesis batch). The verifier walks `history[]` in order,
+/// recomputes each head locally, and rejects any missing batch,
+/// reordered batch, mutated entry list, or mismatched previous_head.
+///
+/// **Storage discipline** — the issuer is the only writer of
+/// `data/{workspace}/anchor-chain.jsonl`; the file is append-only and
+/// must NOT be truncated outside an explicit `atlas-signer
+/// rotate-chain --confirm` ceremony. Loss of the chain file means the
+/// trust property fails for the workspace from that point on. The MCP
+/// `atlas_export_bundle` tool reads the file and ships it here for
+/// offline verification.
+///
+/// **Backwards compatibility** — `AtlasTrace.anchor_chain` is
+/// `Option`. V1.5 and V1.6 trace bundles do not carry this field and
+/// continue to verify in lenient mode. Strict mode
+/// (`VerifyOptions::require_anchor_chain = true`) demands a present,
+/// valid chain.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnchorChain {
+    /// All anchor batches issued for this workspace, in issuance
+    /// order. Append-only on the wire: earlier entries cannot be
+    /// dropped, mutated, or reordered without breaking the chain.
+    /// Empty `history` is a malformed `AnchorChain` — strict mode
+    /// rejects it; the issuer never emits an empty chain.
+    pub history: Vec<AnchorBatch>,
+
+    /// blake3 hex of `chain_head_for(history[history.len() - 1])`.
+    /// Convenience field so the verifier can fail fast before walking
+    /// the whole history. The verifier recomputes from `history[]`
+    /// and compares; this field is NEVER trusted as a verification
+    /// shortcut.
+    pub head: String,
+}
+
+/// One anchor batch in the chain (V1.7).
+///
+/// A batch records the result of a single `atlas_anchor_bundle`
+/// invocation: which entries were issued at what `integrated_time`,
+/// indexed sequentially from 0, with each batch carrying the previous
+/// batch's `chain_head`. The verifier rejects gaps, reorderings, and
+/// mutations to any of these fields by recomputing
+/// `chain_head_for(batch)` and asserting `history[i+1].previous_head
+/// == chain_head_for(history[i])`.
+///
+/// Per-entry inclusion proofs in `entries` are checked independently
+/// by the existing `verify_anchors` pipeline — the chain layer adds a
+/// monotonicity witness on top, it does not replace per-entry
+/// verification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnchorBatch {
+    /// Sequential index, 0 for the genesis batch. The verifier
+    /// asserts `history[i].batch_index == i as u64` so any gap, skip,
+    /// or duplicate is rejected as a structural violation.
+    pub batch_index: u64,
+
+    /// Unix seconds the issuer recorded for this batch — typically
+    /// matches the `integrated_time` carried by every entry inside
+    /// `entries` (the issuer threads one timestamp through both). An
+    /// independent field on the batch lets the chain witness empty
+    /// batches in principle, though V1.7 issuers never emit them.
+    pub integrated_time: i64,
+
+    /// AnchorEntries issued in this batch, in their original order.
+    /// Each entry is verified separately (leaf-hash, inclusion proof,
+    /// checkpoint signature) by the standard per-entry pipeline; the
+    /// chain extension only commits to their canonical bytes via the
+    /// batch's `chain_head`.
+    pub entries: Vec<AnchorEntry>,
+
+    /// Hex `chain_head` of the previous batch (64 lowercase hex
+    /// chars). The genesis batch carries the all-zero head:
+    /// `"0000…0000"` × 32 bytes. The verifier asserts
+    /// `history[i].previous_head == chain_head_for(history[i-1])` so
+    /// silent rewriting of any past batch breaks the chain.
+    pub previous_head: String,
+}
+
+/// Genesis sentinel for `AnchorBatch::previous_head`: 64 ASCII zeros
+/// (= 32 zero bytes hex-encoded). Single source of truth so issuer
+/// and verifier never disagree on the genesis sentinel.
+pub const ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Optional filters applied to a bundle (for narrower audit-export).
 #[derive(Debug, Clone, Serialize, Deserialize)]
