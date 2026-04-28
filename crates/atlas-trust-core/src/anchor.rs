@@ -882,9 +882,14 @@ mod tests {
         assert_eq!(&der[..2], &[0x30, 0x59]);
         // Uncompressed-point marker before the 64-byte (X || Y) point.
         assert_eq!(der[26], 0x04);
-        // log_id is 64 hex chars (= 32 SHA-256 bytes).
+        // log_id is 64 hex chars (= 32 SHA-256 bytes), and equals the
+        // public log identity Rekor returns in `entry.logID`. Pinning
+        // the value catches accidental edits to SIGSTORE_REKOR_V1_PEM.
         let log_id = &*SIGSTORE_REKOR_V1_LOG_ID;
-        assert_eq!(log_id.len(), 64);
+        assert_eq!(
+            log_id,
+            "c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d",
+        );
         // C2SP keyID is the first 4 bytes of the log_id, hex-encoded
         // back to the same prefix.
         let keyid_hex = hex::encode(*SIGSTORE_REKOR_V1_KEY_ID);
