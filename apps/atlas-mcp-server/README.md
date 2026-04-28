@@ -19,7 +19,7 @@ multi-tenant service for third parties requires a commercial licence
 |---|---|
 | `atlas_write_node` | Append a `node.create` event (dataset, model, inference, etc.) |
 | `atlas_write_annotation` | Append an `annotation.add` event — used for human verification |
-| `atlas_anchor_bundle` | Issue mock-Rekor anchors over current `dag_tips` + `pubkey_bundle_hash` (V1.5+) |
+| `atlas_anchor_bundle` | Issue inclusion proofs over current `dag_tips` + `pubkey_bundle_hash`. Optional `rekor_url` field (or `ATLAS_REKOR_URL` env, precedence: field > env > mock) selects live Sigstore Rekor v1 submission or in-process mock-Rekor issuer. |
 | `atlas_export_bundle` | Emit an `AtlasTrace` + matching `PubkeyBundle` for a workspace |
 | `atlas_workspace_state` | Inspect current DAG tips, event count, kid roster |
 
@@ -107,7 +107,7 @@ workspace's `events.jsonl`.
 
 ---
 
-## V1.5 boundaries
+## V1.5 / V1.6 boundaries
 
 - **Signing keys are deterministic test keys** (matching the bank-demo
   keys in `crates/atlas-signer/examples/seed_bank_demo.rs`). The MCP
@@ -119,11 +119,15 @@ workspace's `events.jsonl`.
   (Postgres, S3, FalkorDB).
 - **No multi-tenant key isolation in V1.5.** V2 ships per-tenant key
   policies and bundle-rotation workers.
-- **Mock-Rekor anchoring (V1.5).** `atlas_anchor_bundle` calls a
-  deterministic in-process issuer (no live network call); the verifier
-  validates inclusion proofs + checkpoint signatures against a pinned
-  log pubkey. V1.6 swaps the issuer for a real Sigstore Rekor POST
-  behind `--rekor-url`; the verifier path is unchanged.
+- **Anchoring (V1.5 mock-Rekor, V1.6 live Sigstore).** `atlas_anchor_bundle`
+  issues anchors via the in-process mock-Rekor by default (V1.5, no
+  network call). Setting the `rekor_url` field or `ATLAS_REKOR_URL` env
+  (precedence: field > env > mock) opts into live Sigstore Rekor v1
+  submission against `https://rekor.sigstore.dev`. The verifier accepts
+  both formats by log_id dispatch and validates inclusion proofs +
+  checkpoint signatures against pinned log pubkeys (mock Ed25519 or
+  Sigstore ECDSA P-256). Verifier path unchanged — fully offline RFC 6962
+  proof recomputation in both cases.
 
 See [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the
 full system context.

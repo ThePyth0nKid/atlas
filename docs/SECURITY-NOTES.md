@@ -1,4 +1,4 @@
-# Atlas Verifier — Defended Attack Surface (V1.5)
+# Atlas Verifier — Defended Attack Surface (V1.6)
 
 This document describes what the V1.5 verifier (`atlas-trust-core`, exposed as
 `atlas-verify-cli` and `atlas-verify-wasm`) actually defends against. It is
@@ -95,9 +95,8 @@ step:
   pinned `MOCK_LOG_PUBKEY_HEX` derive to the same Ed25519 keypair.
   Touching one without the other fails CI — preventing the silent class
   of bug where the issuer rolls a new key but the verifier still pins
-  the old one (or vice-versa). The same pinning model generalises to
-  V1.6, where the operator pins one or more live Sigstore log
-  identities; the verifier path is unchanged.
+  the old one (or vice-versa). V1.6 adds analogous pins for the live
+  Sigstore path (see below).
 
 All three pins enforce the same contract: changing them requires a
 crate-version bump so the `VERIFIER_VERSION` cascade propagates and
@@ -145,34 +144,66 @@ Issuer-side adversary tests live in
 
 ---
 
-## Out of scope (V1.5)
+## Sigstore anchoring (V1.6 — in scope)
 
-The following are **not** defended in V1.5, and a `valid: true` outcome
+V1.6 ships live Sigstore Rekor v1 submission with the same offline-complete
+verification path as V1.5 mock-Rekor. The verifier validates both formats
+by log_id dispatch:
+
+- **Atlas anchoring key drift:** `crates/atlas-signer/src/anchor.rs::atlas_anchor_pubkey_pem_is_pinned`
+  pins the ECDSA P-256 pubkey derived from `ATLAS_ANCHOR_SEED`. Touching
+  the seed or the derivation without updating the pin fails CI.
+- **Sigstore Rekor v1 production pubkey pin:** `crates/atlas-trust-core/src/anchor.rs::SIGSTORE_REKOR_V1_PEM`
+  is the fixed ECDSA P-256 SPKI key (fetched from
+  `https://rekor.sigstore.dev/api/v1/log/publicKey` on 2026-04-28).
+  `SIGSTORE_REKOR_V1_LOG_ID` is SHA-256(DER bytes). Any anchor with a
+  mismatched log_id is rejected before proof work.
+- **apiVersion pin:** `entry_body_binds_anchored_hash` asserts
+  `apiVersion == "0.0.1"` — any other value is rejected at verify time.
+- **Trillian tree-ID pin:** `SIGSTORE_REKOR_V1_ACTIVE_TREE_ID` pins the
+  active shard (`1_193_050_959_916_656_506`). An anchor whose tree_id
+  does not match is rejected before ECDSA signature verify.
+- **keyID rotation handling:** The C2SP signed-note may carry multiple
+  signature lines (one per keyID rotation). The verifier iterates the
+  lines, extracting the 4-byte keyID from each; if the keyID matches the
+  pinned Sigstore log's `SIGSTORE_REKOR_V1_KEY_ID`, verify the signature.
+  Mismatch is `continue` (not error); success when ONE line verifies.
+  Tested in `crates/atlas-trust-core/tests/sigstore_golden.rs`.
+- **HTTP client validation:** `RekorClient::new` in
+  `crates/atlas-signer/src/rekor_client.rs` enforces: HTTPS required for
+  non-loopback hosts; plaintext http:// gated to localhost/127.0.0.1/[::1]
+  for wiremock testing only.
+- **Cross-format hash derivation:** `sigstore_anchored_hash_for(kind, blake3_hex)`
+  derives the SHA-256 that Rekor's hashedrekord entry binds, with domain
+  prefix by kind (`atlas-dag-tip-v1:` / `atlas-bundle-hash-v1:`). Single-sourced
+  in Rust so issuer and verifier produce identical bytes. Pinned in a
+  unit test to prevent silent logic drift.
+- **Real Sigstore entry round-trip:** `crates/atlas-trust-core/tests/sigstore_golden.rs::verifies_real_sigstore_rekor_entry`
+  tests against a captured production entry from the live Sigstore Rekor
+  v1 log (logIndex 800000000, Trillian treeID 1_193_050_959_916_656_506).
+  Full pipeline: entry body decodes, leaf hash recomputes, 31-deep audit
+  path reaches claimed root under SHA-256 RFC 6962, C2SP signed-note ECDSA
+  verify succeeds against the pinned production key.
+
+The following are **not** defended in V1.6, and a `valid: true` outcome
 does NOT imply them:
 
-- **Live Sigstore Rekor submission.** V1.5 ships an offline-complete
-  anchoring path: the issuer in `atlas-signer` is a deterministic
-  mock-Rekor that emits real RFC 6962 inclusion proofs and Ed25519
-  checkpoint signatures, and the verifier validates them against a
-  pinned log public key. The "mock" qualifier means *no live network
-  call to a public Rekor instance* — every other property is identical
-  to a production transparency log. V1.6 swaps the issuer for a real
-  Rekor POST behind `--rekor-url`; the verifier path is unchanged
-  (the pinned-pubkey rule generalises to "operator pins one or more
-  trusted log identities").
-- **Anchor-chain tip-rotation.** V1.5 anchors the current `dag_tips`
-  and the current `pubkey_bundle_hash`, but consecutive anchors are
-  not yet linked into a hash-chain-of-hash-chains. V2 ships
-  cross-anchor referencing so a server cannot rewrite past anchored
-  state without breaking the chain.
+- **Anchor-chain tip-rotation.** V1.6 anchors the current `dag_tips` and
+  the current `pubkey_bundle_hash`, but consecutive anchors are not yet
+  linked into a hash-chain-of-hash-chains. V2 ships cross-anchor
+  referencing so a server cannot rewrite past anchored state without
+  breaking the chain.
 - **Timestamp monotonicity / drift bounds.** The verifier checks that `ts`
   parses as RFC 3339 and nothing more. Future-timestamps and out-of-order
-  events both pass V1.5.
-- **Cedar policy enforcement.** Trace bundles list `policies[]` but V1.5
+  events both pass V1.6.
+- **Cedar policy enforcement.** Trace bundles list `policies[]` but V1.6
   does not evaluate them.
 - **SPIFFE attestation.** `kid` strings of the form `spiffe://...` are
   treated as opaque keys-of-id. SVID validation against an in-domain
   trust bundle is not implemented.
+- **Per-tenant key isolation.** The Atlas anchoring key is derived from
+  a single deterministic seed. V1.7 will seal keys per-tenant in a
+  TPM/HSM-backed enclave.
 - **Side-channel attacks beyond hash equality.** Constant-time compare
   is wired on hash and bundle-hash equality. Other code paths (CBOR
   encoding, JSON parsing, Merkle proof recomputation) make standard

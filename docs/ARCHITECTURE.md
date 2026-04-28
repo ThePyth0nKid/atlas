@@ -1,12 +1,12 @@
-# Atlas — System Architecture (V1.5)
+# Atlas — System Architecture (V1.6)
 
 This document is the system-design reference for Atlas. It describes the
 trust property the system exists to enforce, the data model that carries
 it, the components that produce and consume that data, and the explicit
 boundaries between V1 (deterministic signing + verification), V1.5
 (offline-complete anchoring via mock-Rekor issuer + pinned log pubkey —
-shipped), V1.6 (live Sigstore submission), and V2 (full COSE_Sign1,
-Cedar policy enforcement, SPIFFE attestation).
+shipped), V1.6 (live Sigstore Rekor v1 submission — shipped), and V2
+(full COSE_Sign1, Cedar policy enforcement, SPIFFE attestation).
 
 It is written for three audiences:
 
@@ -354,11 +354,11 @@ traces still verify against historic bundles by hash. The auditor needs
 both the trace and the matching bundle — the bundle hash binds them,
 the verifier refuses any mismatch.
 
-V1.5 already anchors each workspace's current `pubkey_bundle_hash` (see
-§8 Anchoring) so the auditor can independently confirm that bundle hash
-B was witnessed at time T against a pinned log pubkey. V1.6 swaps the
-mock issuer for a live Sigstore Rekor submission to give the witness
-public visibility.
+V1.5 anchors each workspace's current `pubkey_bundle_hash` (see §8 Anchoring)
+so the auditor can independently confirm that bundle hash B was witnessed at
+time T against a pinned log pubkey. V1.6 adds the option of live Sigstore
+Rekor v1 submission to give production audit trails public visibility while
+keeping verification fully offline.
 
 ### 7.3 Constant-time hash equality
 
@@ -371,7 +371,9 @@ compare is nil. We pay it.
 
 ---
 
-## 8. Anchoring (V1.5 — shipped)
+## 8. Anchoring
+
+### 8.1 Mock-Rekor (V1.5 — shipped)
 
 V1.5 ships an offline-complete anchoring path: a deterministic mock-Rekor
 issuer in `atlas-signer`, RFC 6962-style Merkle inclusion proofs, and a
@@ -381,7 +383,7 @@ public Rekor instance* — every other property (real Ed25519 over canonical
 checkpoint bytes, real audit-path with `leaf:`/`node:` domain separation,
 real anti-tamper) is identical to a production transparency log.
 
-### What gets anchored
+#### What gets anchored
 
 Two object kinds, in one batch sharing a single Merkle tree and
 checkpoint:
@@ -394,7 +396,7 @@ checkpoint:
   against tail truncation or fork: an auditor knows "this trace state
   existed by time T".
 
-### Verification
+#### Verification
 
 Lenient by default — empty `anchors[]` passes, mirroring the V1 contract
 that "no claim is fine, but a false claim is not". Strict mode
@@ -403,14 +405,77 @@ every `dag_tip` be covered by a `dag_tip` anchor entry. Tampering with
 either the anchored hash or the proof flips the per-entry verdict to
 fail and the whole verifier outcome to ✗ INVALID.
 
-### V1.6 — real Sigstore submission
+### 8.2 Live Sigstore submission (V1.6 — shipped)
 
-V1.6 swaps the issuer for a real Rekor POST behind `--rekor-url` without
-touching the verifier or the trace schema. The pinned-pubkey rule
-generalises to "the operator pins one or more log identities"; the rest
-of the verifier path is unchanged. That is the entire reason V1.5 ships
-the verifier first: the issuer becomes a deployment concern, not a trust
-concern.
+V1.6 ships live Sigstore Rekor v1 submission: `atlas-signer anchor --rekor-url https://rekor.sigstore.dev`
+POSTs each batch to the public log without touching the verifier or trace
+schema. The verifier dispatches by `log_id` (BTreeMap keyed by SHA-256
+of the log's DER SPKI pubkey), so both mock-Rekor and Sigstore anchors
+flow through the same trust path.
+
+#### Live Rekor submission
+
+- **CLI surface:** `atlas-signer anchor --rekor-url <url>` (also via
+  `ATLAS_REKOR_URL` env var in the MCP server; precedence: field > env >
+  mock)
+- **Wire format:** hashedrekord/v0.0.1 per
+  <https://github.com/sigstore/rekor/blob/main/pkg/types/hashedrekord/v0.0.1>
+- **Hash binding:** SHA-256 RFC 6962 + ECDSA P-256 over C2SP signed-note
+  checkpoint (three-line RFC 9162 format with origin label
+  `"rekor.sigstore.dev"` and the active Trillian tree-ID
+  `1_193_050_959_916_656_506`)
+- **Atlas anchoring key:** ECDSA P-256 derived from deterministic seed
+  `b"atlas-rekor-anchor-v1-dev-seed"` (dev only; V1.7 will seal in
+  TPM/HSM). Rekor admits the entry by verifying the signature; the
+  verifier does NOT pin the Atlas key — trust property depends only on
+  the Sigstore log's ECDSA P-256 pubkey.
+- **Atlas anchoring key pin:** `crates/atlas-signer/src/anchor.rs::atlas_anchor_pubkey_pem_is_pinned`
+  asserts the seed-derived pubkey stays in sync with the embedded PEM —
+  touching the seed without updating the test fails CI.
+- **Cross-format derivation:** `sigstore_anchored_hash_for(kind, blake3_hex)`
+  in `crates/atlas-trust-core/src/anchor.rs` derives the SHA-256 hash
+  that Rekor's hashedrekord entry binds. Domain-separated by kind
+  (`atlas-dag-tip-v1:` / `atlas-bundle-hash-v1:`) so issuer and verifier
+  produce identical SHA-256 from an Atlas blake3. Pinned in a test so
+  the derivation logic cannot silently drift between signer and verifier.
+- **Verifier dispatch:** `default_trusted_logs()` is a BTreeMap of
+  `log_id` → `TrustedLog { pubkey, format }`. The production Sigstore
+  Rekor v1 pubkey is one of the pinned entries. An inbound anchor whose
+  `log_id` is not in the map is rejected before proof work.
+- **Sigstore Rekor v1 pinning:** `SIGSTORE_REKOR_V1_PEM` is the production
+  log's ECDSA P-256 SPKI public key (retrieved from
+  `https://rekor.sigstore.dev/api/v1/log/publicKey` and checked in).
+  `SIGSTORE_REKOR_V1_LOG_ID` is SHA-256 of the DER bytes. `SIGSTORE_REKOR_V1_ACTIVE_TREE_ID`
+  pins the active Trillian tree-ID (`1_193_050_959_916_656_506`); an
+  anchor with a mismatched tree-ID is rejected before signature verify.
+- **API version pin:** `apiVersion == "0.0.1"` enforced in
+  `entry_body_binds_anchored_hash` — any other value is rejected.
+  Enforced in both issuer (generates 0.0.1 requests) and verifier
+  (rejects other versions).
+- **keyID rotation policy:** The C2SP signed-note `keyID` is the first
+  4 bytes of SHA-256(DER SPKI) — for Sigstore Rekor v1 this is
+  `c0d23d6a`. Multiple signature lines in a checkpoint (one per keyID
+  rotation) are handled by iterating: verify each line's signature
+  against the claimed keyID's pubkey; if one matches, accept the
+  checkpoint; if none match, reject. Mismatch on a single line is
+  `continue`, not an error. Tested in
+  `crates/atlas-trust-core/tests/sigstore_golden.rs`.
+- **Network transport:** HTTP client validation lives in
+  `crates/atlas-signer/src/rekor_client.rs::RekorClient::new`. HTTPS is
+  required for non-loopback hosts (`https://` enforced); plaintext `http://`
+  is gated to localhost (`localhost`, `127.0.0.1`, `[::1]`) for wiremock
+  testing. An operator typo cannot silently submit anchoring signatures
+  over an unencrypted wire.
+
+#### Verification unchanged
+
+The verifier path is bit-identical for both V1.5 mock and V1.6 Sigstore:
+no network call at verify time, no runtime log-rotation polling. The
+verifier never talks to our server or to Sigstore — it recomputes the
+RFC 6962 inclusion path from the entry body, re-derives the checkpoint
+from the anchor entry's tree_size/root_hash, and verifies the ECDSA or
+Ed25519 checkpoint signature against a pinned log pubkey. Full offline
+verification on any platform.
 
 ### Anchor-chain tip-rotation (V2)
 
@@ -444,7 +509,7 @@ Headline:
 
 ---
 
-## 10. V1 / V1.5 / V2 boundaries
+## 10. V1 / V1.5 / V1.6 / V2 boundaries
 
 ### V1 — what ships now
 
@@ -471,12 +536,27 @@ Headline:
 - `atlas_anchor_bundle` MCP tool persists `data/{workspace}/anchors.json`
   for inclusion in `atlas_export_bundle`
 
-### V1.6 — real Sigstore submission
+### V1.6 — live Sigstore submission (shipped)
 
-- Swap the mock issuer for a real Rekor POST behind `--rekor-url`
-- Verifier path unchanged (pinned-pubkey rule generalises to multiple
-  trusted log identities)
-- Anchor-chain tip-rotation (hash-chain of hash-chains)
+- Live Sigstore Rekor v1 submission via `atlas-signer anchor --rekor-url`
+  (also `ATLAS_REKOR_URL` env in MCP; precedence: field > env > mock)
+- hashedrekord/v0.0.1 wire format against rekor.sigstore.dev
+- SHA-256 RFC 6962 + ECDSA P-256 over C2SP signed-note checkpoint
+- `sigstore_anchored_hash_for(kind, blake3_hex)` cross-format hash
+  derivation with `atlas-dag-tip-v1:` / `atlas-bundle-hash-v1:` domain
+  prefixes — single source for issuer + verifier
+- Atlas anchoring key: ECDSA P-256 from deterministic seed, PEM pin
+  (`atlas_anchor_pubkey_pem_is_pinned` test asserts it stays in sync)
+- Verifier multi-format dispatch via `default_trusted_logs()` BTreeMap by
+  `log_id`; Sigstore Rekor v1 production pubkey is a pinned entry
+- apiVersion pin (`"0.0.1"` only, rejected otherwise)
+- keyID rotation policy: multi-line signed-note, iterate signature lines
+  by keyID; mismatch is `continue`, not error — success when ONE matches
+  the pinned key
+- HTTP client validation: https:// required for non-loopback hosts;
+  plaintext http:// gated to localhost only
+- Verifier path unchanged — no network call at verify time, fully offline
+  RFC 6962 proof recomputation + ECDSA verify against pinned log pubkey
 
 ### V2 — full COSE + policy + SPIFFE
 
@@ -503,12 +583,12 @@ What this V1 is **not** suitable for, and where the limits sit:
 - **Not a policy engine yet.** V1 records `policies[]` as an event-id
   list but does not evaluate Cedar at verify time. V2 ships full policy
   enforcement.
-- **Not a live Sigstore client yet.** V1.5 ships the offline-complete
-  anchoring path with a deterministic mock-Rekor issuer (`atlas-signer
-  anchor`). Verification — inclusion proof + signed checkpoint against
-  pinned log pubkey — is fully part of the verifier's `valid: true`
-  guarantee. V1.6 swaps the mock for a real Rekor POST behind
-  `--rekor-url`; the verifier path is unchanged.
+- **Live Sigstore client (V1.6).** Both V1.5 mock-Rekor and V1.6 live
+  Sigstore Rekor v1 submission are fully verifiable offline —
+  inclusion proof + signed checkpoint against pinned log pubkey are part
+  of the verifier's `valid: true` guarantee. Operator can opt into
+  production audit trails (`--rekor-url https://rekor.sigstore.dev`) or
+  stay offline with the mock. Verifier path is identical.
 - **Single-tenant key sealing in V1.** Secret material is delivered to
   `atlas-signer` over stdin (`--secret-stdin`). The legacy `--secret-hex`
   argv flag remains for backwards compatibility with the bank-demo

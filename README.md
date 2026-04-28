@@ -16,13 +16,15 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**V1.5 shipped — anchoring path complete, offline verifier green.**
+**V1.6 shipped — live Sigstore submission + offline-complete verification.**
 
-Trust-core crate + Rekor anchoring (mock-issuer + pinned-key verifier).
+Trust-core crate + Rekor anchoring (V1.5 mock-issuer and V1.6 live Sigstore Rekor v1).
 Current state:
 
-- 41 Rust tests green: 23 unit + 13 integration adversary tests in
-  `atlas-trust-core`, plus 5 anchor-issuer tests in `atlas-signer`
+- 73 Rust tests green: 41 unit + 13 integration adversary tests + 5
+  Sigstore round-trip golden tests in `atlas-trust-core`, plus 14
+  issuer/anchor tests in `atlas-signer` (mock-Rekor + live-Sigstore
+  wiremock round-trip + Atlas anchoring pubkey PEM pin)
 - Signing-input is deterministic CBOR per RFC 8949 §4.2.1
   (length-first map sort, no floats, byte-pinned golden)
 - Pubkey-bundle hash is canonical-JSON, byte-pinned golden — silent
@@ -41,12 +43,13 @@ Current state:
   CLI and the in-browser WASM verifier, including
   `✓ anchors — N anchor(s) verified against pinned log keys`
 
-V1.6 swaps the mock-Rekor issuer for a real Sigstore submission behind
-`--rekor-url`; the verifier path is unchanged. Graph-database integration
-and policy-engine follow in V2.
+V1.6 ships live Sigstore submission: `atlas-signer anchor --rekor-url https://rekor.sigstore.dev`
+anchors events against the public Sigstore Rekor v1 log. The verifier accepts both V1.5
+mock-Rekor anchors (for offline demos) and V1.6 Sigstore anchors (for production audit
+trails). Graph-database integration and policy-engine follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
-  trust property, write/export flows, V1/V1.5/V2 boundaries.
+  trust property, write/export flows, V1/V1.5/V1.6/V2 boundaries.
 - [docs/SECURITY-NOTES.md](docs/SECURITY-NOTES.md) — defended attack
   surface, per-test mapping for auditors.
 - [docs/COMPLIANCE-MAPPING.md](docs/COMPLIANCE-MAPPING.md) —
