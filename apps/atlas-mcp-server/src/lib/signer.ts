@@ -19,6 +19,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { parseAnchorJson } from "./anchor-json.js";
 import { resolveSignerBinary } from "./paths.js";
 import {
   AnchorChainSchema,
@@ -75,7 +76,13 @@ export async function signEvent(args: SignArgs): Promise<AtlasEvent> {
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stdout);
+    // Use the same lossless parser as anchor/chain output. AtlasEvent
+    // has no large-integer fields today, so the path is observationally
+    // identical to JSON.parse — but standardising every signer-stdout
+    // boundary on one parser eliminates a future trap where adding such
+    // a field (e.g. a nanosecond timestamp) silently truncates digits
+    // through this single remaining `JSON.parse` site.
+    parsed = parseAnchorJson(stdout);
   } catch (e) {
     throw new SignerError(
       `atlas-signer produced non-JSON output: ${(e as Error).message}`,
@@ -212,7 +219,10 @@ export async function anchorViaSigner(
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stdout);
+    // Lossless parse so Sigstore Rekor v1 `tree_id` values
+    // (~2^60) survive the spawn boundary intact. See
+    // `lib/anchor-json.ts` for the safe-vs-lossless decision rule.
+    parsed = parseAnchorJson(stdout);
   } catch (e) {
     throw new SignerError(
       `atlas-signer anchor produced non-JSON output: ${(e as Error).message}`,
@@ -256,7 +266,13 @@ export async function chainExportViaSigner(jsonlContent: string): Promise<Anchor
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stdout);
+    // Lossless parse — chain-export emits AnchorChain whose history
+    // batches embed AnchorEntry rows, including Sigstore tree_id
+    // values that exceed JS safe-integer range. The chain head is
+    // recomputed by the Rust signer over canonical bytes, so any
+    // precision loss here would silently invalidate the head an
+    // offline auditor recomputes.
+    parsed = parseAnchorJson(stdout);
   } catch (e) {
     throw new SignerError(
       `atlas-signer chain-export produced non-JSON output: ${(e as Error).message}`,

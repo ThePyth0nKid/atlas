@@ -26,6 +26,7 @@
 
 import { promises as fs } from "node:fs";
 import { z } from "zod";
+import { stringifyAnchorJson } from "../lib/anchor-json.js";
 import { exportWorkspaceBundle } from "../lib/bundle.js";
 import { anchorChainPath, anchorsPath } from "../lib/paths.js";
 import { anchorViaSigner, type AnchorRequest } from "../lib/signer.js";
@@ -95,35 +96,25 @@ export const anchorBundleTool: ToolDefinition<typeof anchorBundleInputSchema> = 
     // Live-Rekor opt-in: explicit field beats env, env beats mock.
     const rekorUrl = args.rekor_url ?? process.env.ATLAS_REKOR_URL;
     await ensureWorkspaceDir(workspaceId);
-    // V1.7 chain extension: tied to the mock issuer for now. Sigstore
-    // entries carry `tree_id` values around 2^60 (current Rekor shard
-    // is 1_193_050_959_916_656_506) which exceed `Number.MAX_SAFE_INTEGER`
-    // (~2^53). A JSON.parse round-trip in this Node process would zero
-    // out the low digits, corrupting the chain's recomputed head when
-    // the trace lands at a Rust verifier. V1.8 swaps `JSON.parse` for
-    // a precision-preserving parser (e.g. `lossless-json`); until
-    // then, chain coverage applies to the mock path only and Sigstore
-    // anchors keep the V1.6 standalone-anchor proof model.
-    //
-    // Trust property under mixed-mode workspaces: if an operator runs
-    // mock-then-Sigstore on the same workspace, the exported trace
-    // ships `anchors` = Sigstore entries (the latest snapshot) but
-    // `anchor_chain` = mock-only history. The verifier's
-    // `anchor-chain-coverage` check (verify.rs:438) then fires
-    // explicitly: every entry in `trace.anchors` must appear byte-
-    // identical in some chain batch, and a Sigstore entry will not.
-    // So mixed-mode is loud at audit time, not silently degraded.
-    const chainPath = rekorUrl === undefined ? anchorChainPath(workspaceId) : undefined;
-    const chainSkipReason = rekorUrl === undefined
-      ? null
-      : "live-sigstore: chain extension deferred to V1.8 (JS safe-integer limit on tree_id)";
+    // V1.8: chain extension applies to BOTH paths. The MCP server
+    // reads anchor stdout via `parseAnchorJson` (lossless-json), so
+    // Sigstore Rekor v1 `tree_id` values (~2^60, exceeding
+    // `Number.MAX_SAFE_INTEGER`) round-trip through Node without
+    // digit loss; the chain head the verifier recomputes is
+    // bit-identical to the head the issuer emitted. The Rust signer
+    // remains the sole writer of `anchor-chain.jsonl`.
+    const chainPath = anchorChainPath(workspaceId);
     const entries = await anchorViaSigner(
       { items, integrated_time: integratedTime },
       { rekorUrl, chainPath },
     );
 
     const target = anchorsPath(workspaceId);
-    const json = JSON.stringify(entries, null, 2);
+    // Lossless stringify so any Sigstore `tree_id` carried by an
+    // entry survives the on-disk round-trip. Mock entries (no
+    // `tree_id`) produce byte-identical output to legacy
+    // `JSON.stringify`.
+    const json = stringifyAnchorJson(entries, 2);
     // Atomic write — concurrent exporters either see the previous
     // anchors.json or the new one, never a half-written file. rename(2)
     // is atomic within a single filesystem on POSIX, and ReplaceFile-like
@@ -152,10 +143,7 @@ export const anchorBundleTool: ToolDefinition<typeof anchorBundleInputSchema> = 
               tree_size: bundleAnchor?.inclusion_proof.tree_size ?? 0,
               root_hash: bundleAnchor?.inclusion_proof.root_hash ?? null,
               anchors_path: target,
-              anchor_chain_path: chainPath ?? null,
-              ...(chainSkipReason !== null
-                ? { anchor_chain_skip_reason: chainSkipReason }
-                : {}),
+              anchor_chain_path: chainPath,
             },
             null,
             2,

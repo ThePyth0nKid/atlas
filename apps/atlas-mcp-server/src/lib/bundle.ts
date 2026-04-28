@@ -16,6 +16,7 @@
 
 import { promises as fs } from "node:fs";
 import { basename } from "node:path";
+import { parseAnchorJson } from "./anchor-json.js";
 import { buildDevBundle } from "./keys.js";
 import { anchorChainPath, anchorsPath } from "./paths.js";
 import { AnchorEntryArraySchema } from "./schema.js";
@@ -95,7 +96,10 @@ async function readAnchors(workspaceId: string): Promise<AnchorEntry[]> {
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw);
+    // Lossless parse so anchors.json round-trips Sigstore tree_id
+    // values without truncation. Mock entries omit `tree_id` so the
+    // parser still produces native numbers for every other field.
+    parsed = parseAnchorJson(raw);
   } catch (e) {
     throw new Error(`${basename(path)} is not valid JSON: ${(e as Error).message}`);
   }

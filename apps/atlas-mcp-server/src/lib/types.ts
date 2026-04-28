@@ -73,12 +73,15 @@ export type InclusionProof = {
  * Rekor v1 entries — the verifier dispatches by `log_id` and demands
  * them only when the format requires.
  *
- * Caveat: `tree_id` arrives over the wire as a JSON number. Sigstore's
- * current shard tree-id (~2^60) exceeds `Number.MAX_SAFE_INTEGER`
- * (~2^53), so a `JSON.parse` round-trip in this Node process can
- * silently truncate the low digits. V1.7 sidesteps the problem by
- * gating `anchor-chain` extension on the mock-only path; V1.8 lifts
- * the limitation with a precision-preserving JSON parser.
+ * `tree_id` round-trips with full precision via the V1.8 lossless-json
+ * boundary (`lib/anchor-json.ts`). Sigstore production tree-IDs
+ * (currently `1_193_050_959_916_656_506`) exceed
+ * `Number.MAX_SAFE_INTEGER` (~2^53), so the parser produces a
+ * `LosslessNumber` wrapper for oversized integers; safe-range values
+ * stay native `number`. The TS type therefore widens to the union, but
+ * downstream code never performs arithmetic on `tree_id` — it is only
+ * passed through to the Rust verifier (which decodes the original
+ * digit string back into `i64`).
  */
 export type AnchorEntry = {
   kind: AnchorKind;
@@ -88,7 +91,7 @@ export type AnchorEntry = {
   integrated_time: number;
   inclusion_proof: InclusionProof;
   entry_body_b64?: string;
-  tree_id?: number;
+  tree_id?: number | import("./anchor-json.js").LosslessNumber;
 };
 
 /**

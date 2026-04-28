@@ -12,11 +12,14 @@
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "smoke": "tsx scripts/smoke.ts",
+    "test:anchor-json": "tsx scripts/test-anchor-json.ts",
+    "test": "tsx scripts/test-anchor-json.ts",
     "lint": "tsc -p tsconfig.lint.json"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.4.0",
     "@noble/hashes": "^1.5.0",
+    "lossless-json": "^4.0.2",
     "zod": "^3.23.8"
   },
   "devDependencies": {

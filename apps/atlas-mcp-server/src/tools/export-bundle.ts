@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
+import { stringifyAnchorJson } from "../lib/anchor-json.js";
 import { exportWorkspaceBundle } from "../lib/bundle.js";
 import { workspaceDir } from "../lib/paths.js";
 import { DEFAULT_WORKSPACE } from "../lib/types.js";
@@ -47,7 +48,11 @@ export const exportBundleTool: ToolDefinition<typeof exportBundleInputSchema> = 
     const args = inputZ.parse(raw);
     const workspaceId = args.workspace_id ?? DEFAULT_WORKSPACE;
     const { trace, bundle } = await exportWorkspaceBundle(workspaceId);
-    const traceJson = JSON.stringify(trace, null, 2);
+    // Lossless stringify for the trace — `trace.anchors` and
+    // `trace.anchor_chain` may carry Sigstore `tree_id` values that
+    // exceed JS safe-integer range. The pubkey bundle has no such
+    // fields, so its standard `JSON.stringify` output is unchanged.
+    const traceJson = stringifyAnchorJson(trace, 2);
     const bundleJson = JSON.stringify(bundle, null, 2);
     const traceSha256 = sha256Hex(traceJson);
     const bundleSha256 = sha256Hex(bundleJson);

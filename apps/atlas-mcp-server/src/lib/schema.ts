@@ -17,6 +17,11 @@
  */
 
 import { z } from "zod";
+import {
+  INTEGER_LITERAL_REGEX,
+  isLosslessNumber,
+  type LosslessNumber,
+} from "./anchor-json.js";
 
 const Hex64 = z.string().regex(/^[0-9a-f]{64}$/, "expected 64-char lowercase hex");
 const Base64UrlNoPad = z.string().regex(/^[A-Za-z0-9_-]+$/, "expected base64url-no-pad");
@@ -57,14 +62,15 @@ export type AtlasEventValidated = z.infer<typeof AtlasEventSchema>;
  *     the canonical Rekor entry body. Optional and absent for the
  *     atlas-mock format. The base64 alphabet differs from
  *     `Base64UrlNoPad`, so we accept the standard alphabet here.
- *   - `tree_id`: Trillian tree-ID. Optional. NOTE: Sigstore production
- *     tree-IDs exceed `Number.MAX_SAFE_INTEGER` (~2^53). Zod
- *     accepts these as `z.number().int()`, but a `JSON.parse`
- *     round-trip in this Node process may have silently truncated
- *     low digits before the value reaches Zod. V1.8 swaps to a
- *     precision-preserving parser; until then, anchor-chain
- *     extension is gated on the mock-only path so the chain head
- *     is never recomputed over a corrupted `tree_id`.
+ *   - `tree_id`: Trillian tree-ID. Optional. Sigstore production
+ *     tree-IDs (e.g. `1_193_050_959_916_656_506`) exceed
+ *     `Number.MAX_SAFE_INTEGER` (~2^53), so V1.8 routes anchor-entry
+ *     JSON through `parseAnchorJson` (lossless-json) and accepts
+ *     either a native `number` (mock or any safe-range int) or a
+ *     `LosslessNumber` (the wrapper produced by `parseAnchorJson` for
+ *     oversized integers). The Zod check rejects both `NaN` and any
+ *     `LosslessNumber.value` that is not a clean signed integer
+ *     literal, so a malformed wrapper still fails at the boundary.
  */
 export const AnchorKindSchema = z.enum(["dag_tip", "bundle_hash"]);
 
@@ -88,6 +94,34 @@ const Base64Standard = z.string().regex(
   "expected RFC 4648 §4 standard base64 with correct padding",
 );
 
+/**
+ * Trillian `tree_id` magnitude ceiling. The Rust verifier deserializes
+ * `tree_id` as `i64`, whose decimal width is at most 19 digits. A
+ * crafted entry carrying e.g. a 500-digit literal would clear the
+ * integer-literal regex but later fail Rust deserialization with a
+ * cryptic overflow error. Bounding the digit count at the boundary
+ * surfaces that drift here, with a useful Zod error.
+ */
+const TREE_ID_MAX_DIGITS = 19;
+
+const LosslessIntegerSchema = z.custom<LosslessNumber>(
+  (v) => {
+    if (!isLosslessNumber(v)) return false;
+    const raw = (v as LosslessNumber).value;
+    return INTEGER_LITERAL_REGEX.test(raw) && raw.length <= TREE_ID_MAX_DIGITS;
+  },
+  { message: "expected a lossless integer literal within i64 magnitude" },
+);
+
+/**
+ * `tree_id` accepts either a native `number` (mock entries omit the
+ * field; safe-range Sigstore values stay native) or a `LosslessNumber`
+ * (oversized Sigstore production `tree_id`s preserved by
+ * `parseAnchorJson`). See `lib/anchor-json.ts` for the parser
+ * decision boundary.
+ */
+const TreeIdSchema = z.union([z.number().int(), LosslessIntegerSchema]);
+
 export const AnchorEntrySchema = z
   .object({
     kind: AnchorKindSchema,
@@ -97,7 +131,7 @@ export const AnchorEntrySchema = z
     integrated_time: z.number().int(),
     inclusion_proof: InclusionProofSchema,
     entry_body_b64: Base64Standard.optional(),
-    tree_id: z.number().int().optional(),
+    tree_id: TreeIdSchema.optional(),
   })
   .strict();
 

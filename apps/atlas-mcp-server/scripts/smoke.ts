@@ -18,6 +18,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, promises as fs, rmSync } from "node:fs";
 import { join } from "node:path";
+import { stringifyAnchorJson } from "../src/lib/anchor-json.js";
 import { exportWorkspaceBundle } from "../src/lib/bundle.js";
 import { writeSignedEvent } from "../src/lib/event.js";
 import { TEST_IDENTITIES } from "../src/lib/keys.js";
@@ -126,7 +127,7 @@ async function main(): Promise<void> {
   }
   const tracePath = join(dir, "trace.json");
   const bundlePath = join(dir, "bundle.json");
-  await fs.writeFile(tracePath, JSON.stringify(trace, null, 2), "utf8");
+  await fs.writeFile(tracePath, stringifyAnchorJson(trace, 2), "utf8");
   await fs.writeFile(bundlePath, JSON.stringify(bundle, null, 2), "utf8");
   log("export", `${tracePath}`);
   log("export", `${bundlePath}`);
