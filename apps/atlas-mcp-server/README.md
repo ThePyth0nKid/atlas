@@ -19,11 +19,14 @@ multi-tenant service for third parties requires a commercial licence
 |---|---|
 | `atlas_write_node` | Append a `node.create` event (dataset, model, inference, etc.) |
 | `atlas_write_annotation` | Append an `annotation.add` event — used for human verification |
+| `atlas_anchor_bundle` | Issue mock-Rekor anchors over current `dag_tips` + `pubkey_bundle_hash` (V1.5+) |
 | `atlas_export_bundle` | Emit an `AtlasTrace` + matching `PubkeyBundle` for a workspace |
 | `atlas_workspace_state` | Inspect current DAG tips, event count, kid roster |
 
 All tools take a `workspace` argument (default: `ws-mcp-default`).
-Workspaces are isolated on disk under `data/{workspace}/events.jsonl`.
+Workspaces are isolated on disk under `data/{workspace}/events.jsonl`;
+issued anchors are persisted alongside as `data/{workspace}/anchors.json`
+and folded into `trace.anchors` on export.
 
 ---
 
@@ -63,7 +66,7 @@ cd apps/atlas-mcp-server
 pnpm install
 pnpm build
 
-# 3. Run the smoke test (writes 3 events → exports → CLI-verifies)
+# 3. Run the smoke test (writes 3 events → issues 2 anchors → exports → CLI-verifies)
 pnpm smoke
 ```
 
@@ -104,7 +107,7 @@ workspace's `events.jsonl`.
 
 ---
 
-## V1 boundaries
+## V1.5 boundaries
 
 - **Signing keys are deterministic test keys** (matching the bank-demo
   keys in `crates/atlas-signer/examples/seed_bank_demo.rs`). The MCP
@@ -114,10 +117,13 @@ workspace's `events.jsonl`.
   TPM/HSM-sealed keys; both flags are removed at the build level.
 - **Persistence is JSONL on local disk.** V2 ships pluggable storage
   (Postgres, S3, FalkorDB).
-- **No multi-tenant key isolation in V1.** V2 ships per-tenant key
+- **No multi-tenant key isolation in V1.5.** V2 ships per-tenant key
   policies and bundle-rotation workers.
-- **No Rekor anchoring in V1.** V1.5 ships Sigstore anchoring; until
-  then exported bundles have `anchors: []`.
+- **Mock-Rekor anchoring (V1.5).** `atlas_anchor_bundle` calls a
+  deterministic in-process issuer (no live network call); the verifier
+  validates inclusion proofs + checkpoint signatures against a pinned
+  log pubkey. V1.6 swaps the issuer for a real Sigstore Rekor POST
+  behind `--rekor-url`; the verifier path is unchanged.
 
 See [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the
 full system context.

@@ -549,8 +549,9 @@ cargo run --example seed_bank_demo -p atlas-signer --release
 #   ✓ anchors
 
 # 4. Optional: prove the determinism property across builds
-cargo test -p atlas-trust-core --release
-# 33 tests pass on Linux, macOS, and Windows-MSVC.
+cargo test -p atlas-trust-core -p atlas-signer --release
+# 41 tests pass on Linux, macOS, and Windows-MSVC
+# (36 in atlas-trust-core + 5 in atlas-signer).
 ```
 
 If the verifier on your machine produces the same evidence as the

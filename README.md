@@ -16,24 +16,34 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**Pre-V1 — verifier hardened, demo green.**
+**V1.5 shipped — anchoring path complete, offline verifier green.**
 
-Trust-core crate ships first. Current state:
+Trust-core crate + Rekor anchoring (mock-issuer + pinned-key verifier).
+Current state:
 
-- 33 tests green: 20 unit + 13 integration adversary tests
+- 41 Rust tests green: 23 unit + 13 integration adversary tests in
+  `atlas-trust-core`, plus 5 anchor-issuer tests in `atlas-signer`
 - Signing-input is deterministic CBOR per RFC 8949 §4.2.1
   (length-first map sort, no floats, byte-pinned golden)
 - Pubkey-bundle hash is canonical-JSON, byte-pinned golden — silent
   bundle-rotation drift trips the test before reaching production
+- Anchor verification: RFC 6962-style Merkle inclusion proofs +
+  Ed25519-signed checkpoints, validated against a pinned log pubkey.
+  Anchored objects: `bundle_hash` (defends bundle swap) and `dag_tip`
+  (defends tail truncation). Lenient by default,
+  `VerifyOptions::require_anchors` strict mode for high-assurance audit
 - `workspace_id` bound into the signing-input — cross-workspace replay is
   structurally impossible
 - Constant-time hash equality, alg-downgrade rejection, RFC 3339 timestamp
   validation, duplicate-event-hash detection, `deny_unknown_fields` on the
   wire format
 - Bank demo bundle verifies `✓ VALID` end-to-end through both the native
-  CLI and the in-browser WASM verifier
+  CLI and the in-browser WASM verifier, including
+  `✓ anchors — N anchor(s) verified against pinned log keys`
 
-Graph-database integration and policy-engine follow.
+V1.6 swaps the mock-Rekor issuer for a real Sigstore submission behind
+`--rekor-url`; the verifier path is unchanged. Graph-database integration
+and policy-engine follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
   trust property, write/export flows, V1/V1.5/V2 boundaries.
@@ -43,10 +53,10 @@ Graph-database integration and policy-engine follow.
   clause-by-clause regulatory mapping (EU AI Act, GAMP 5, ICH E6(R3),
   DORA, GDPR).
 
-## Try it offline (when V1 ships)
+## Try it offline
 
 ```bash
-# Download atlas-verify-cli for your OS
+# Build atlas-verify-cli from source (or download a release binary)
 # Get any Atlas trace bundle (.json) and matching pubkey-bundle (.json)
 atlas-verify-cli verify-trace bundle.json -k pubkey-bundle.json
 
@@ -57,15 +67,21 @@ atlas-verify-cli verify-trace bundle.json -k pubkey-bundle.json
 #   ✓ event-signatures — 5 signatures verified
 #   ✓ parent-links — all parent_hashes resolved within trace
 #   ✓ dag-tips — 1 tips, match server claim
+#   ✓ anchors — 2 anchor(s) verified against pinned log keys
 ```
 
 No network calls. No talking to our server. Bit-identical determinism —
 the same input produces byte-identical signing-input bytes whether the
-verifier ran on Linux, on macOS, or as WASM in your browser. Two pinned
-goldens in `crates/atlas-trust-core/` lock this property at the build
-step: `cose.rs::signing_input_byte_determinism_pin` for the per-event
-signing-input, and `pubkey_bundle.rs::bundle_hash_byte_determinism_pin`
-for the pubkey-bundle hash that binds a trace to a keyset.
+verifier ran on Linux, on macOS, or as WASM in your browser. Three
+anti-drift properties in `crates/` lock the trust model at the build
+step:
+`atlas-trust-core/src/cose.rs::signing_input_byte_determinism_pin` for
+the per-event signing-input;
+`atlas-trust-core/src/pubkey_bundle.rs::bundle_hash_byte_determinism_pin`
+for the pubkey-bundle hash that binds a trace to a keyset; and
+`atlas-signer/src/anchor.rs::mock_log_pubkey_matches_signer_seed` which
+asserts the issuer-side seed and the verifier-pinned log pubkey stay in
+sync — touching one without the other fails CI.
 
 ## Components
 
