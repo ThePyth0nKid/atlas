@@ -10,6 +10,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod anchor;
 pub mod ed25519;
 pub mod cose;
 pub mod ct;
@@ -20,8 +21,10 @@ pub mod verify;
 pub mod error;
 
 pub use error::{TrustError, TrustResult};
-pub use trace_format::{AtlasTrace, AtlasEvent, AtlasPayload, EventSignature};
-pub use verify::{VerifyOutcome, VerifyEvidence, verify_trace};
+pub use trace_format::{
+    AnchorEntry, AnchorKind, AtlasEvent, AtlasPayload, AtlasTrace, EventSignature, InclusionProof,
+};
+pub use verify::{VerifyOutcome, VerifyEvidence, VerifyOptions, verify_trace, verify_trace_with};
 pub use pubkey_bundle::PubkeyBundle;
 
 /// Schema version this build of the crate produces and accepts.

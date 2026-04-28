@@ -41,3 +41,37 @@ export const AtlasEventSchema = z.object({
 });
 
 export type AtlasEventValidated = z.infer<typeof AtlasEventSchema>;
+
+/**
+ * AnchorEntry validation for the boundary where `atlas-signer anchor`
+ * stdout crosses into typed TS code. Mirrors `AnchorEntry` in
+ * `crates/atlas-trust-core/src/trace_format.rs` with the same
+ * `#[serde(deny_unknown_fields)]` strictness via `.strict()`.
+ *
+ * If the Rust schema drifts (rename, field added/removed), this fails at
+ * the MCP-server boundary with a descriptive Zod error rather than
+ * writing a malformed `anchors.json`.
+ */
+export const AnchorKindSchema = z.enum(["dag_tip", "bundle_hash"]);
+
+export const InclusionProofSchema = z
+  .object({
+    tree_size: z.number().int().nonnegative(),
+    root_hash: Hex64,
+    hashes: z.array(Hex64),
+    checkpoint_sig: Base64UrlNoPad,
+  })
+  .strict();
+
+export const AnchorEntrySchema = z
+  .object({
+    kind: AnchorKindSchema,
+    anchored_hash: Hex64,
+    log_id: Hex64,
+    log_index: z.number().int().nonnegative(),
+    integrated_time: z.number().int(),
+    inclusion_proof: InclusionProofSchema,
+  })
+  .strict();
+
+export const AnchorEntryArraySchema = z.array(AnchorEntrySchema);

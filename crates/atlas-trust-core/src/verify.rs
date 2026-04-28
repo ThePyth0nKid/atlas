@@ -6,12 +6,27 @@
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use crate::anchor::{default_trusted_logs, verify_anchors};
 use crate::cose::build_signing_input;
 use crate::ed25519::verify_signature;
 use crate::error::TrustResult;
 use crate::hashchain::{check_event_hashes, check_parent_links, compute_tips};
 use crate::pubkey_bundle::PubkeyBundle;
 use crate::trace_format::AtlasTrace;
+
+/// Caller-tunable verification options.
+///
+/// V1 had no options. V1.5 adds anchor strictness — the verifier still
+/// passes traces with no anchors by default (so V1 traces continue to
+/// verify), but auditors who insist on anchor coverage can enable strict
+/// mode to require every DAG-tip to be anchored.
+#[derive(Debug, Clone, Default)]
+pub struct VerifyOptions {
+    /// If true, every `trace.dag_tips` entry must have a matching
+    /// successful anchor in `trace.anchors`. Empty `trace.anchors` then
+    /// fails verification rather than passing as "no claim, no problem".
+    pub require_anchors: bool,
+}
 
 /// Full verification result, suitable for showing in a UI / CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,10 +52,21 @@ pub struct VerifyEvidence {
     pub detail: String,
 }
 
-/// Verify a full trace bundle against a pinned pubkey bundle.
+/// Verify a full trace bundle against a pinned pubkey bundle, using
+/// default options (`require_anchors = false`). Equivalent to
+/// `verify_trace_with(trace, bundle, &VerifyOptions::default())`.
 ///
 /// This function never panics. All errors are captured into `outcome.errors`.
 pub fn verify_trace(trace: &AtlasTrace, bundle: &PubkeyBundle) -> VerifyOutcome {
+    verify_trace_with(trace, bundle, &VerifyOptions::default())
+}
+
+/// Verify a trace with caller-supplied options.
+pub fn verify_trace_with(
+    trace: &AtlasTrace,
+    bundle: &PubkeyBundle,
+    opts: &VerifyOptions,
+) -> VerifyOutcome {
     let mut evidence = Vec::new();
     let mut errors = Vec::new();
 
@@ -241,29 +267,91 @@ pub fn verify_trace(trace: &AtlasTrace, bundle: &PubkeyBundle) -> VerifyOutcome 
         });
     }
 
-    // 7. Anchor check.
-    // V1 verifier does NOT yet validate Rekor inclusion proofs against a pinned
-    // Rekor pubkey + log root — that lands in V1.5. Until then, a non-empty
-    // `trace.anchors` MUST be treated as untrusted: presenting unverified
-    // anchor claims as `ok: true` would be a correctness lie. Empty anchors are
-    // honest — no claim, no claim to verify.
-    if trace.anchors.is_empty() {
-        evidence.push(VerifyEvidence {
-            check: "anchors".to_string(),
-            ok: true,
-            detail: "no anchors claimed (workspace anchoring not yet enabled)".to_string(),
-        });
-    } else {
-        let msg = format!(
-            "{} anchor(s) claimed but UNVERIFIED: V1 verifier cannot validate Rekor inclusion proofs (V1.5 feature). Reject the trace until anchor verification ships.",
-            trace.anchors.len()
-        );
-        errors.push(msg.clone());
+    // 7. Anchor check (V1.5).
+    // Each entry's Merkle inclusion proof is verified against a signed
+    // log checkpoint, the checkpoint signature is verified against the
+    // pinned log key roster, and `anchored_hash` must match what the
+    // trace itself claims for that anchor's `kind`. Lenient by default
+    // (empty anchors = honest no-claim, passes); strict mode
+    // (`opts.require_anchors`) enforces that every dag_tip is covered.
+    let trusted_logs = default_trusted_logs();
+    let anchor_outcomes = verify_anchors(trace, &trusted_logs);
+    let anchor_failures: Vec<&str> = anchor_outcomes
+        .iter()
+        .filter(|o| !o.ok)
+        .map(|o| o.reason.as_str())
+        .collect();
+
+    if !anchor_failures.is_empty() {
+        for f in &anchor_failures {
+            errors.push(format!("anchor: {f}"));
+        }
         evidence.push(VerifyEvidence {
             check: "anchors".to_string(),
             ok: false,
-            detail: msg,
+            detail: format!(
+                "{} of {} anchor(s) failed verification",
+                anchor_failures.len(),
+                anchor_outcomes.len(),
+            ),
         });
+    } else if anchor_outcomes.is_empty() {
+        if opts.require_anchors {
+            let msg =
+                "strict mode: trace claims no anchors, but require_anchors is set".to_string();
+            errors.push(msg.clone());
+            evidence.push(VerifyEvidence {
+                check: "anchors".to_string(),
+                ok: false,
+                detail: msg,
+            });
+        } else {
+            evidence.push(VerifyEvidence {
+                check: "anchors".to_string(),
+                ok: true,
+                detail: "no anchors claimed (lenient mode passes)".to_string(),
+            });
+        }
+    } else {
+        evidence.push(VerifyEvidence {
+            check: "anchors".to_string(),
+            ok: true,
+            detail: format!("{} anchor(s) verified against pinned log keys", anchor_outcomes.len()),
+        });
+    }
+
+    if opts.require_anchors && !trace.dag_tips.is_empty() {
+        use std::collections::BTreeSet;
+        let anchored_tips: BTreeSet<&str> = anchor_outcomes
+            .iter()
+            .filter(|o| o.ok && matches!(o.kind, crate::trace_format::AnchorKind::DagTip))
+            .map(|o| o.anchored_hash.as_str())
+            .collect();
+        let missing: Vec<&str> = trace
+            .dag_tips
+            .iter()
+            .map(String::as_str)
+            .filter(|t| !anchored_tips.contains(*t))
+            .collect();
+        if !missing.is_empty() {
+            let msg = format!(
+                "strict mode: {} dag_tip(s) not anchored: {:?}",
+                missing.len(),
+                missing,
+            );
+            errors.push(msg.clone());
+            evidence.push(VerifyEvidence {
+                check: "anchors-coverage".to_string(),
+                ok: false,
+                detail: msg,
+            });
+        } else {
+            evidence.push(VerifyEvidence {
+                check: "anchors-coverage".to_string(),
+                ok: true,
+                detail: format!("{} dag_tip(s) all anchored (strict mode)", trace.dag_tips.len()),
+            });
+        }
     }
 
     let valid = errors.is_empty();

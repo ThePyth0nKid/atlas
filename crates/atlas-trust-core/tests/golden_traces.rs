@@ -304,22 +304,38 @@ fn cross_workspace_replay_rejected() {
     );
 }
 
-/// Adversary: trace claims an anchor but V1 verifier cannot validate Rekor
-/// inclusion. Honesty rule: surface as `valid=false` rather than green-tick lie.
+/// Adversary: trace claims an anchor but the proof material is bogus.
+/// V1.5 verifier validates Merkle inclusion + checkpoint signature against
+/// the pinned log roster. A made-up proof must fail, not silently pass.
 #[test]
-fn non_empty_anchor_rejected_until_v1_5() {
+fn anchor_with_bogus_proof_is_rejected() {
+    use atlas_trust_core::trace_format::{AnchorKind, InclusionProof};
     let signing_key = SigningKey::from_bytes(&[42u8; 32]);
     let (mut trace, bundle) = make_chain(&signing_key, "ws-test", 1);
     trace.anchors.push(AnchorEntry {
-        dag_tip_hash: trace.dag_tips[0].clone(),
-        rekor_uuid: "fake-uuid".to_string(),
-        rekor_inclusion_proof: "deadbeef".to_string(),
-        rekor_log_index: 1,
-        rekor_ts: "2026-04-27T10:01:00Z".to_string(),
+        kind: AnchorKind::DagTip,
+        anchored_hash: trace.dag_tips[0].clone(),
+        // log_id not in the trusted roster — verifier must reject upfront.
+        log_id: "0000000000000000000000000000000000000000000000000000000000000000"
+            .to_string(),
+        log_index: 0,
+        integrated_time: 1_700_000_000,
+        inclusion_proof: InclusionProof {
+            tree_size: 1,
+            root_hash:
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                    .to_string(),
+            hashes: vec![],
+            checkpoint_sig: "AA".to_string(),
+        },
     });
     let outcome = verify_trace(&trace, &bundle);
-    assert!(!outcome.valid, "non-empty anchor must reject in V1");
-    assert!(outcome.errors.iter().any(|e| e.contains("UNVERIFIED")));
+    assert!(!outcome.valid, "anchor with bogus proof must be rejected");
+    assert!(
+        outcome.errors.iter().any(|e| e.contains("anchor:")),
+        "expected an anchor: error, got: {:#?}",
+        outcome.errors,
+    );
 }
 
 /// Adversary: signature alg field is something other than EdDSA.

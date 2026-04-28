@@ -38,12 +38,42 @@ export type PubkeyBundle = {
   keys: Record<string, string>;
 };
 
+/**
+ * What kind of object an `AnchorEntry` refers to.
+ *
+ * Mirrors `AnchorKind` in `crates/atlas-trust-core/src/trace_format.rs`
+ * with `#[serde(rename_all = "snake_case")]`. JSON values are exactly
+ * `"dag_tip"` or `"bundle_hash"`.
+ */
+export type AnchorKind = "dag_tip" | "bundle_hash";
+
+/**
+ * Merkle inclusion proof of a leaf against a signed log checkpoint.
+ * Mirrors `InclusionProof` in `crates/atlas-trust-core/src/trace_format.rs`.
+ */
+export type InclusionProof = {
+  tree_size: number;
+  root_hash: string;
+  hashes: string[];
+  checkpoint_sig: string;
+};
+
+/**
+ * One anchor entry — proof that a specific hash was committed to a
+ * transparency log at a specific time, with a Merkle inclusion proof
+ * against a signed log checkpoint.
+ *
+ * Mirrors `AnchorEntry` in `crates/atlas-trust-core/src/trace_format.rs`.
+ * V1.5 ships the offline verification path; the verifier validates the
+ * proof and checkpoint signature against pinned log pubkeys.
+ */
 export type AnchorEntry = {
-  dag_tip_hash: string;
-  rekor_uuid: string;
-  rekor_inclusion_proof: string;
-  rekor_log_index: number;
-  rekor_ts: string;
+  kind: AnchorKind;
+  anchored_hash: string;
+  log_id: string;
+  log_index: number;
+  integrated_time: number;
+  inclusion_proof: InclusionProof;
 };
 
 export type AtlasTrace = {

@@ -20,8 +20,8 @@
 
 import { spawn } from "node:child_process";
 import { resolveSignerBinary } from "./paths.js";
-import { AtlasEventSchema } from "./schema.js";
-import type { AtlasEvent } from "./types.js";
+import { AnchorEntryArraySchema, AtlasEventSchema } from "./schema.js";
+import type { AnchorEntry, AnchorKind, AtlasEvent } from "./types.js";
 
 export type SignArgs = {
   workspace: string;
@@ -115,6 +115,72 @@ export async function bundleHashViaSigner(bundleJson: string): Promise<string> {
     );
   }
   return hex;
+}
+
+/**
+ * One item in an anchor batch. Mirrors `AnchorRequest` in
+ * `crates/atlas-signer/src/anchor.rs`.
+ */
+export type AnchorRequest = {
+  kind: AnchorKind;
+  anchored_hash: string;
+};
+
+/**
+ * Stdin shape for `atlas-signer anchor`. Mirrors `AnchorBatchInput` in
+ * `crates/atlas-signer/src/anchor.rs`.
+ *
+ * `integrated_time` is caller-supplied (rather than `now`) so smoke
+ * tests produce byte-identical anchor output across runs.
+ */
+export type AnchorBatchInput = {
+  items: AnchorRequest[];
+  integrated_time: number;
+};
+
+/**
+ * Issue mock-Rekor anchor entries for a batch of hashes by shelling out
+ * to the Rust signer's `anchor` subcommand. The signer builds the Merkle
+ * tree, signs the checkpoint with the dev mock-Rekor key, and emits one
+ * `AnchorEntry` per request.
+ *
+ * Same single-canonicalisation discipline as `bundleHashViaSigner`: the
+ * MCP server never owns Merkle-tree construction or canonical-checkpoint
+ * formatting. V1.6 swaps the issuer for a real Sigstore POST without
+ * touching this boundary.
+ */
+export async function anchorViaSigner(
+  batch: AnchorBatchInput,
+): Promise<AnchorEntry[]> {
+  const bin = resolveOrThrow();
+  const { stdout, stderr, code } = await runProcess(
+    bin,
+    ["anchor"],
+    JSON.stringify(batch),
+  );
+  if (code !== 0) {
+    throw new SignerError(
+      `atlas-signer anchor exited with code ${code}: ${stderr.trim() || "(no stderr)"}`,
+      stderr,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch (e) {
+    throw new SignerError(
+      `atlas-signer anchor produced non-JSON output: ${(e as Error).message}`,
+      stdout,
+    );
+  }
+  const validated = AnchorEntryArraySchema.safeParse(parsed);
+  if (!validated.success) {
+    throw new SignerError(
+      `atlas-signer anchor output failed schema validation: ${validated.error.message}`,
+      stdout,
+    );
+  }
+  return validated.data as AnchorEntry[];
 }
 
 function resolveOrThrow(): string {

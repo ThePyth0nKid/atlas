@@ -73,6 +73,16 @@ export function eventsLogPath(workspaceId: string): string {
   return join(workspaceDir(workspaceId), "events.jsonl");
 }
 
+/**
+ * Path to the anchors snapshot file. Written atomically by the
+ * `atlas_anchor_bundle` MCP tool, read by `exportWorkspaceBundle` to
+ * populate `trace.anchors`. Absence is benign — the bundle simply ships
+ * with `anchors: []` and the verifier passes the lenient default.
+ */
+export function anchorsPath(workspaceId: string): string {
+  return join(workspaceDir(workspaceId), "anchors.json");
+}
+
 let cachedSignerBinary: string | null | undefined = undefined;
 
 /**

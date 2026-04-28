@@ -4,6 +4,7 @@
  * done.
  */
 
+import { anchorBundleTool } from "./anchor-bundle.js";
 import { exportBundleTool } from "./export-bundle.js";
 import type { RawShape, ToolDefinition } from "./types.js";
 import { workspaceStateTool } from "./workspace-state.js";
@@ -14,5 +15,6 @@ export const TOOL_REGISTRY: ReadonlyArray<ToolDefinition<RawShape>> = [
   writeNodeTool,
   writeAnnotationTool,
   exportBundleTool,
+  anchorBundleTool,
   workspaceStateTool,
 ];

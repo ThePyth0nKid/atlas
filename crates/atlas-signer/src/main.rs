@@ -1,6 +1,6 @@
 //! `atlas-signer` — server-side event signer + canonical-hash helper.
 //!
-//! Two subcommands:
+//! Three subcommands:
 //!
 //!   sign         — Build a canonical signing-input from CLI args, sign with
 //!                  Ed25519, emit a fully-formed `AtlasEvent` JSON on stdout.
@@ -10,6 +10,11 @@
 //!                  *single* canonicalisation source for pubkey-bundle hashes
 //!                  — TS and any other client must shell out here rather than
 //!                  re-implement the canonical JSON format.
+//!
+//!   anchor       — Read an `AnchorBatchInput` JSON document on stdin, build
+//!                  a Merkle tree, sign the checkpoint with the dev mock-Rekor
+//!                  key, emit `[AnchorEntry]` JSON on stdout. V1.6 swaps the
+//!                  mock issuer for a real Rekor POST behind `--rekor-url`.
 //!
 //! Why two commands instead of two binaries? Because the trust property
 //! (single source of canonicalisation) is enforced by code path, not by
@@ -23,6 +28,8 @@
 //! example only and emits a stderr deprecation warning. Argv secrets
 //! appear in `/proc/<pid>/cmdline`, `ps aux`, and shell history; stdin
 //! does not.
+
+mod anchor;
 
 use atlas_trust_core::{
     cose::build_signing_input,
@@ -56,6 +63,11 @@ enum Command {
     Sign(SignArgs),
     /// Compute the deterministic blake3 hash of a `PubkeyBundle` read from stdin.
     BundleHash,
+    /// Build a Merkle inclusion proof + signed checkpoint for a batch of
+    /// hashes (read from stdin as `AnchorBatchInput` JSON), emit
+    /// `[AnchorEntry]` JSON on stdout. Uses the dev mock-Rekor key; V1.6
+    /// adds `--rekor-url` for real Sigstore submission.
+    Anchor,
 }
 
 #[derive(clap::Args, Default)]
@@ -107,7 +119,40 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Command::Sign(args)) => run_sign(args),
         Some(Command::BundleHash) => run_bundle_hash(),
+        Some(Command::Anchor) => run_anchor(),
         None => run_sign(cli.legacy_sign),
+    }
+}
+
+fn run_anchor() -> ExitCode {
+    let mut buf = String::new();
+    if let Err(e) = io::stdin().read_to_string(&mut buf) {
+        eprintln!("anchor: failed to read stdin: {e}");
+        return ExitCode::from(2);
+    }
+    let batch: anchor::AnchorBatchInput = match serde_json::from_str(&buf) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("anchor: invalid AnchorBatchInput JSON: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let entries = match anchor::issue_anchors(batch) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("anchor: issue failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match serde_json::to_string_pretty(&entries) {
+        Ok(s) => {
+            println!("{s}");
+            ExitCode::from(0)
+        }
+        Err(e) => {
+            eprintln!("anchor: emit failed: {e}");
+            ExitCode::from(2)
+        }
     }
 }
 

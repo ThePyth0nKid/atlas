@@ -23,6 +23,7 @@ import { writeSignedEvent } from "../src/lib/event.js";
 import { TEST_IDENTITIES } from "../src/lib/keys.js";
 import { resolveSignerBinary, workspaceDir } from "../src/lib/paths.js";
 import { repoRoot } from "../src/lib/paths.js";
+import { anchorBundleTool } from "../src/tools/anchor-bundle.js";
 
 const WORKSPACE = "ws-mcp-smoke";
 
@@ -96,7 +97,20 @@ async function main(): Promise<void> {
   });
   log("write#3", `${ev3.event.event_id} hash=${ev3.event.event_hash.slice(0, 12)}…`);
 
-  // 4. Export bundle
+  // 4. Issue mock-Rekor anchors over the current state via the MCP tool.
+  //    Mirrors the path Claude Desktop / Cursor would drive. The tool
+  //    persists data/{workspace}/anchors.json which exportWorkspaceBundle
+  //    reads in step 5.
+  const anchorOut = await anchorBundleTool.handler({ workspace_id: WORKSPACE });
+  const anchorSummary = JSON.parse(anchorOut.content[0]?.text ?? "{}");
+  if (!anchorSummary.ok) fail(`anchor-bundle did not return ok: ${anchorOut.content[0]?.text}`);
+  // 1 bundle_hash anchor + 1 dag_tip anchor (single-tip workspace) = 2.
+  if (anchorSummary.anchor_count !== 2) {
+    fail(`expected 2 anchors (bundle + 1 tip), got ${anchorSummary.anchor_count}`);
+  }
+  log("anchor", `${anchorSummary.anchor_count} anchor(s) issued, root=${String(anchorSummary.root_hash).slice(0, 12)}…`);
+
+  // 5. Export bundle (now with anchors populated from anchors.json)
   const { trace, bundle } = await exportWorkspaceBundle(WORKSPACE);
   if (trace.events.length !== 3) {
     fail(`expected 3 events in trace, got ${trace.events.length}`);
@@ -107,6 +121,9 @@ async function main(): Promise<void> {
   if (trace.dag_tips[0] !== ev3.event.event_hash) {
     fail(`tip mismatch: tip=${trace.dag_tips[0]} expected=${ev3.event.event_hash}`);
   }
+  if (trace.anchors.length !== 2) {
+    fail(`expected 2 anchors in exported trace, got ${trace.anchors.length}`);
+  }
   const tracePath = join(dir, "trace.json");
   const bundlePath = join(dir, "bundle.json");
   await fs.writeFile(tracePath, JSON.stringify(trace, null, 2), "utf8");
@@ -114,7 +131,7 @@ async function main(): Promise<void> {
   log("export", `${tracePath}`);
   log("export", `${bundlePath}`);
 
-  // 5. Run atlas-verify-cli — the real Rust verifier — on the bundle
+  // 6. Run atlas-verify-cli — the real Rust verifier — on the bundle
   const verifierBin = resolveVerifierBinary();
   if (!verifierBin) {
     fail(
@@ -134,8 +151,14 @@ async function main(): Promise<void> {
   if (!/✓ VALID|VALID/.test(r.stdout)) {
     fail(`verifier did not report VALID. stdout above.`);
   }
+  // Anchor evidence specifically — guards against a regression where the
+  // verifier silently passes empty anchors but the smoke believed it was
+  // exercising the anchor path.
+  if (!/anchor\(s\) verified against pinned log keys/.test(r.stdout)) {
+    fail(`verifier did not report anchor evidence. stdout above.`);
+  }
 
-  log("done", "✓ end-to-end smoke OK — MCP write path verifies as VALID");
+  log("done", "✓ end-to-end smoke OK — MCP write+anchor path verifies as VALID");
 }
 
 function resolveVerifierBinary(): string | null {
