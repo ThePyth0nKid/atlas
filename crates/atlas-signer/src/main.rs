@@ -1,6 +1,6 @@
 //! `atlas-signer` — server-side event signer + canonical-hash helper.
 //!
-//! Three subcommands:
+//! Four subcommands:
 //!
 //!   sign         — Build a canonical signing-input from CLI args, sign with
 //!                  Ed25519, emit a fully-formed `AtlasEvent` JSON on stdout.
@@ -15,6 +15,13 @@
 //!                  a Merkle tree, sign the checkpoint with the dev mock-Rekor
 //!                  key, emit `[AnchorEntry]` JSON on stdout. V1.6 swaps the
 //!                  mock issuer for a real Rekor POST behind `--rekor-url`.
+//!
+//!   chain-export — Read a workspace's `anchor-chain.jsonl` content on stdin,
+//!                  recompute the chain head via `chain_head_for`, validate
+//!                  the full chain via `verify_anchor_chain`, and emit a
+//!                  wire-format `AnchorChain { history, head }` JSON document
+//!                  on stdout. Single source of canonicalisation for the
+//!                  chain head — the MCP TS-side never recomputes heads.
 //!
 //! Why two commands instead of two binaries? Because the trust property
 //! (single source of canonicalisation) is enforced by code path, not by
@@ -71,6 +78,12 @@ enum Command {
     /// `--rekor-url` is unset; otherwise POSTs to the named Rekor
     /// instance (Sigstore v1, hashedrekord/v0.0.1).
     Anchor(AnchorArgs),
+    /// Export a workspace's `anchor-chain.jsonl` (read from stdin) as a
+    /// validated wire-format `AnchorChain` JSON document on stdout. The
+    /// MCP server uses this to populate `AtlasTrace.anchor_chain`
+    /// without re-implementing the canonical-bytes path the verifier
+    /// uses for `chain_head_for`.
+    ChainExport,
 }
 
 #[derive(clap::Args, Default)]
@@ -143,6 +156,7 @@ fn main() -> ExitCode {
         Some(Command::Sign(args)) => run_sign(args),
         Some(Command::BundleHash) => run_bundle_hash(),
         Some(Command::Anchor(args)) => run_anchor(args),
+        Some(Command::ChainExport) => run_chain_export(),
         None => run_sign(cli.legacy_sign),
     }
 }
@@ -340,6 +354,36 @@ fn run_sign(args: SignArgs) -> ExitCode {
         }
         Err(e) => {
             eprintln!("emit error: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_chain_export() -> ExitCode {
+    // Buffer the JSONL into memory rather than streaming. A workspace's
+    // chain is dozens to hundreds of batches, each a few KB — well
+    // within memory comfort. Streaming would force partial-line
+    // recovery semantics across stdin EOF, which is more error-prone
+    // than just reading the whole thing.
+    let mut buf = Vec::new();
+    if let Err(e) = io::stdin().read_to_end(&mut buf) {
+        eprintln!("chain-export: failed to read stdin: {e}");
+        return ExitCode::from(2);
+    }
+    let chain = match chain::build_chain_export_from_jsonl(&buf) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("chain-export: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match serde_json::to_string_pretty(&chain) {
+        Ok(s) => {
+            println!("{s}");
+            ExitCode::from(0)
+        }
+        Err(e) => {
+            eprintln!("chain-export: emit failed: {e}");
             ExitCode::from(2)
         }
     }

@@ -200,28 +200,88 @@ fn read_existing_batches(chain_path: &Path) -> Result<Vec<AnchorBatch>, String> 
             ));
         }
     };
+    parse_chain_jsonl(&bytes)
+        .map_err(|e| format!("{e} at {}", chain_path.display()))
+}
+
+/// Parse JSONL bytes — one `AnchorBatch` per non-empty line — into a
+/// `Vec<AnchorBatch>`. Empty or whitespace-only input yields an empty
+/// vec.
+///
+/// The `serde(deny_unknown_fields)` attribute on `AnchorBatch` and
+/// `AnchorEntry` is the actual schema gate here: an attacker who slips
+/// an extra field into the chain file is rejected at parse time, not
+/// silently passed through to the verifier.
+///
+/// Error messages reference the BATCH NUMBER (1-indexed, counting only
+/// non-blank lines), not the raw split-token index. A trailing newline
+/// produces an empty token at the end of `split('\n')`; reporting the
+/// raw token index would tell an operator "line 4" for the second
+/// batch in a normally-formatted file, which makes the bad row
+/// inconvenient to find in an editor.
+fn parse_chain_jsonl(bytes: &[u8]) -> Result<Vec<AnchorBatch>, String> {
     if bytes.is_empty() {
         return Ok(Vec::new());
     }
-    let text = std::str::from_utf8(&bytes)
-        .map_err(|e| format!("anchor-chain at {} is not utf-8: {e}", chain_path.display()))?;
-
+    let text = std::str::from_utf8(bytes)
+        .map_err(|e| format!("anchor-chain bytes are not utf-8: {e}"))?;
     let mut out = Vec::new();
-    for (i, raw) in text.split('\n').enumerate() {
+    let mut batch_num = 0usize;
+    for raw in text.split('\n') {
         let line = raw.trim_end_matches('\r');
         if line.trim().is_empty() {
             continue;
         }
+        batch_num += 1;
         let batch: AnchorBatch = serde_json::from_str(line).map_err(|e| {
-            format!(
-                "parse anchor-chain line {} at {}: {e}",
-                i + 1,
-                chain_path.display(),
-            )
+            format!("parse anchor-chain line {batch_num}: {e}")
         })?;
         out.push(batch);
     }
     Ok(out)
+}
+
+/// Read JSONL bytes from an `anchor-chain.jsonl` file, recompute the
+/// chain head, validate the full chain, and return a wire-format
+/// `AnchorChain` ready to ship in `AtlasTrace.anchor_chain`.
+///
+/// This is the export-side counterpart to `extend_chain_with_batch`:
+/// the issuer writes one batch per anchoring invocation, the export
+/// path reads the accumulated history and rebuilds the `AnchorChain`
+/// envelope. Single-source canonicalization holds because the head is
+/// computed from `chain_head_for` (same path the verifier runs); the
+/// MCP TS-side never owns this calculation.
+///
+/// Defence-in-depth: `verify_anchor_chain` is run before returning. A
+/// chain that is corrupt at export time fails inside the operator's
+/// domain rather than leaking to an offline auditor as an opaque ✗
+/// result. The same outcome would eventually surface at the verifier,
+/// but failing earlier means the operator can repair without external
+/// pressure.
+///
+/// Empty `jsonl_bytes` yields an `Err` — `AnchorChain` requires at
+/// least one batch to be a meaningful witness. The TS caller is
+/// expected to skip the chain-export call when the on-disk file is
+/// missing or empty.
+pub fn build_chain_export_from_jsonl(jsonl_bytes: &[u8]) -> Result<AnchorChain, String> {
+    let history = parse_chain_jsonl(jsonl_bytes)?;
+    if history.is_empty() {
+        return Err("chain-export: anchor-chain JSONL is empty".to_string());
+    }
+    let head = chain_head_for(history.last().unwrap())
+        .map_err(|e| format!("chain-export: compute head: {e}"))?;
+    let chain = AnchorChain { history, head };
+
+    let outcome = verify_anchor_chain(&chain);
+    if !outcome.ok {
+        return Err(format!(
+            "chain-export: chain verification failed ({} batches walked, {} errors): {}",
+            outcome.batches_walked,
+            outcome.errors.len(),
+            outcome.errors.join("; "),
+        ));
+    }
+    Ok(chain)
 }
 
 /// Atomically replace the file at `target` with `bytes`.
@@ -526,6 +586,102 @@ mod tests {
         assert!(
             !path.exists(),
             "no file must be created on guard refusal",
+        );
+    }
+
+    #[test]
+    fn chain_export_round_trips_three_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("anchor-chain.jsonl");
+
+        let _b0 = extend_chain_with_batch(&path, &[fixture_entry(0x70, 0)], 1_700_000_000).unwrap();
+        let _b1 = extend_chain_with_batch(&path, &[fixture_entry(0x71, 0)], 1_700_000_100).unwrap();
+        let b2 = extend_chain_with_batch(&path, &[fixture_entry(0x72, 0)], 1_700_000_200).unwrap();
+
+        let bytes = fs::read(&path).unwrap();
+        let chain = build_chain_export_from_jsonl(&bytes)
+            .expect("export must succeed for valid chain");
+        assert_eq!(chain.history.len(), 3);
+        assert_eq!(chain.head, chain_head_for(&b2).unwrap());
+        // Round-trip via verify path.
+        let outcome = verify_anchor_chain(&chain);
+        assert!(outcome.ok, "exported chain must verify, errors: {:?}", outcome.errors);
+        assert_eq!(outcome.batches_walked, 3);
+    }
+
+    #[test]
+    fn chain_export_rejects_empty_input() {
+        let err = build_chain_export_from_jsonl(b"")
+            .expect_err("empty JSONL must error");
+        assert!(
+            err.contains("anchor-chain JSONL is empty"),
+            "error must call out empty input, got: {err}",
+        );
+    }
+
+    #[test]
+    fn chain_export_rejects_corrupt_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("anchor-chain.jsonl");
+        let _b0 = extend_chain_with_batch(&path, &[fixture_entry(0x80, 0)], 1_700_000_000).unwrap();
+        let _b1 = extend_chain_with_batch(&path, &[fixture_entry(0x81, 0)], 1_700_000_100).unwrap();
+        // Tamper after issuance: swap an anchored hash in batch[0].
+        let raw = fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<String> = raw.lines().map(str::to_string).collect();
+        let mut b0: AnchorBatch = serde_json::from_str(&lines[0]).unwrap();
+        b0.entries[0].anchored_hash = hex::encode([0xEEu8; 32]);
+        lines[0] = serde_json::to_string(&b0).unwrap();
+        let tampered = lines.join("\n") + "\n";
+        let err = build_chain_export_from_jsonl(tampered.as_bytes())
+            .expect_err("tampered chain must fail export");
+        assert!(
+            err.contains("chain verification failed"),
+            "error must call out verification failure, got: {err}",
+        );
+    }
+
+    #[test]
+    fn chain_export_rejects_malformed_line() {
+        let err = build_chain_export_from_jsonl(b"{ this is not valid json\n")
+            .expect_err("malformed JSONL must error");
+        assert!(
+            err.contains("parse anchor-chain line 1"),
+            "error must reference the bad line, got: {err}",
+        );
+    }
+
+    #[test]
+    fn chain_export_treats_whitespace_only_input_as_empty() {
+        // An operator who pre-creates the chain file as an empty (or
+        // whitespace-only) placeholder must not silently get a chain
+        // export — they must see the empty-input error and notice
+        // that the file has not yet been initialised by the issuer.
+        let err = build_chain_export_from_jsonl(b"   \n\n\t\r\n")
+            .expect_err("whitespace-only JSONL must error");
+        assert!(
+            err.contains("anchor-chain JSONL is empty"),
+            "error must call out empty input, got: {err}",
+        );
+    }
+
+    #[test]
+    fn chain_export_line_number_skips_blank_lines() {
+        // Build a file with a valid first batch + trailing newline,
+        // then a malformed second batch. The error must report
+        // "line 2" (the second non-blank batch), not "line 3" (which
+        // would be the raw split-token index counting the blank line
+        // produced by the trailing newline after batch 1).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("anchor-chain.jsonl");
+        let _b0 =
+            extend_chain_with_batch(&path, &[fixture_entry(0x90, 0)], 1_700_000_000).unwrap();
+        let mut raw = fs::read_to_string(&path).unwrap();
+        raw.push_str("{ malformed second line }\n");
+        let err = build_chain_export_from_jsonl(raw.as_bytes())
+            .expect_err("malformed second batch must error");
+        assert!(
+            err.contains("parse anchor-chain line 2"),
+            "error must point to batch number 2, got: {err}",
         );
     }
 

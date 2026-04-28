@@ -20,8 +20,17 @@
 
 import { spawn } from "node:child_process";
 import { resolveSignerBinary } from "./paths.js";
-import { AnchorEntryArraySchema, AtlasEventSchema } from "./schema.js";
-import type { AnchorEntry, AnchorKind, AtlasEvent } from "./types.js";
+import {
+  AnchorChainSchema,
+  AnchorEntryArraySchema,
+  AtlasEventSchema,
+} from "./schema.js";
+import type {
+  AnchorChain,
+  AnchorEntry,
+  AnchorKind,
+  AtlasEvent,
+} from "./types.js";
 
 export type SignArgs = {
   workspace: string;
@@ -218,6 +227,50 @@ export async function anchorViaSigner(
     );
   }
   return validated.data as AnchorEntry[];
+}
+
+/**
+ * Read a workspace's `anchor-chain.jsonl` content (already loaded by
+ * the caller) through the Rust signer's `chain-export` subcommand,
+ * returning a validated wire-format `AnchorChain` ready to embed in
+ * `AtlasTrace.anchor_chain`.
+ *
+ * Single-canonicalisation discipline: the chain head is computed by
+ * `atlas_trust_core::anchor::chain_head_for` inside the signer — the
+ * MCP server never re-implements that path. The signer also re-runs
+ * `verify_anchor_chain` before returning, so a chain corrupted on
+ * disk fails inside the operator's domain at export time rather than
+ * leaking to an offline auditor as an opaque ✗.
+ *
+ * The caller is responsible for skipping this call when the chain
+ * file is missing or empty — the signer rejects empty input.
+ */
+export async function chainExportViaSigner(jsonlContent: string): Promise<AnchorChain> {
+  const bin = resolveOrThrow();
+  const { stdout, stderr, code } = await runProcess(bin, ["chain-export"], jsonlContent);
+  if (code !== 0) {
+    throw new SignerError(
+      `atlas-signer chain-export exited with code ${code}: ${stderr.trim() || "(no stderr)"}`,
+      stderr,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch (e) {
+    throw new SignerError(
+      `atlas-signer chain-export produced non-JSON output: ${(e as Error).message}`,
+      stdout,
+    );
+  }
+  const validated = AnchorChainSchema.safeParse(parsed);
+  if (!validated.success) {
+    throw new SignerError(
+      `atlas-signer chain-export output failed schema validation: ${validated.error.message}`,
+      stdout,
+    );
+  }
+  return validated.data as AnchorChain;
 }
 
 function resolveOrThrow(): string {
