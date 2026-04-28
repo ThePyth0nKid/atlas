@@ -111,6 +111,11 @@ pub fn issue_anchors(batch: AnchorBatchInput) -> Result<Vec<AnchorEntry>, String
                 hashes: proof_hashes,
                 checkpoint_sig: sig_b64.clone(),
             },
+            // Atlas mock-rekor-v1 format: leaf hash is constructed from
+            // (kind, anchored_hash) directly via leaf_hash_for, so no
+            // entry_body is needed. tree_id is unused outside Sigstore.
+            entry_body_b64: None,
+            tree_id: None,
         };
         out.push(entry);
     }

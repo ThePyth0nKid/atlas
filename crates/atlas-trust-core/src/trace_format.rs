@@ -99,11 +99,22 @@ pub enum AnchorKind {
 /// transparency log at a specific time, with a Merkle inclusion proof
 /// against a signed log checkpoint.
 ///
-/// V1.5 ships the offline verification path. The anchored hash is
-/// canonically bound to a tree position, the tree position is bound to
-/// the root via the inclusion proof, and the root is bound to the log
-/// identity via the checkpoint signature. An auditor with the pinned
-/// log public key can verify all three links without network access.
+/// The anchored hash is canonically bound to a tree position, the tree
+/// position is bound to the root via the inclusion proof, and the root
+/// is bound to the log identity via the checkpoint signature. An
+/// auditor with the pinned log public key can verify all three links
+/// without network access.
+///
+/// The verifier dispatches the per-link checks (leaf-hash construction,
+/// Merkle algorithm, checkpoint signature scheme) on the format
+/// associated with `log_id` in the trusted-log roster:
+/// - `atlas-mock-rekor-v1` (V1.5): blake3 leaf/parent prefixes,
+///   Ed25519 over a three-line atlas-mock checkpoint.
+/// - `sigstore-rekor-v1` (V1.6): SHA-256 RFC 6962 leaves/parents,
+///   ECDSA P-256 over a C2SP signed-note checkpoint. Requires
+///   `entry_body_b64` (the canonical Rekor entry body, from which
+///   the leaf hash is recomputed) and `tree_id` (used in the
+///   signed-note origin line).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AnchorEntry {
@@ -113,8 +124,9 @@ pub struct AnchorEntry {
     /// for `BundleHash` this is the trace's `pubkey_bundle_hash`.
     pub anchored_hash: String,
     /// Identifier of the transparency log holding this entry. For Sigstore
-    /// Rekor this is the hex SHA-256 of the log's public key. The verifier
-    /// uses this to look up the corresponding pinned pubkey.
+    /// Rekor this is the hex SHA-256 of the log's DER-SPKI public key. The
+    /// verifier uses this to look up the corresponding pinned pubkey and
+    /// the format that pubkey signs in.
     pub log_id: String,
     /// 0-indexed leaf position of the entry in the log.
     pub log_index: u64,
@@ -122,6 +134,19 @@ pub struct AnchorEntry {
     pub integrated_time: i64,
     /// Merkle inclusion proof against a signed checkpoint.
     pub inclusion_proof: InclusionProof,
+    /// V1.6 Sigstore-format only: base64 (standard, padded) of the
+    /// canonical Rekor entry body. The verifier recomputes the leaf hash
+    /// as SHA-256(0x00 || decoded body) and additionally checks that the
+    /// body's hashedrekord `data.hash.value` equals `anchored_hash`.
+    /// Absent (None) for the atlas-mock format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_body_b64: Option<String>,
+    /// V1.6 Sigstore-format only: Trillian tree-ID this entry was
+    /// committed to. Used to reconstruct the C2SP signed-note origin
+    /// line `"rekor.sigstore.dev - {tree_id}"`. Absent (None) for the
+    /// atlas-mock format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_id: Option<i64>,
 }
 
 /// Merkle inclusion proof of a leaf against a signed log checkpoint.

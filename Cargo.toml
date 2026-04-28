@@ -21,6 +21,10 @@ ed25519-dalek = { version = "2.1", default-features = false, features = ["std", 
 coset = "0.3"
 ciborium = "0.2"
 blake3 = "1.5"
+# ECDSA P-256 + SHA-256: required for V1.6 Sigstore Rekor verification path
+# (Rekor signs checkpoints with ECDSA P-256 over RFC 6962 SHA-256 trees).
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"] }
+sha2 = "0.10"
 
 # Serde
 serde = { version = "1.0", features = ["derive"] }

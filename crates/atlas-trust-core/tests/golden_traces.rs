@@ -328,6 +328,8 @@ fn anchor_with_bogus_proof_is_rejected() {
             hashes: vec![],
             checkpoint_sig: "AA".to_string(),
         },
+        entry_body_b64: None,
+        tree_id: None,
     });
     let outcome = verify_trace(&trace, &bundle);
     assert!(!outcome.valid, "anchor with bogus proof must be rejected");
