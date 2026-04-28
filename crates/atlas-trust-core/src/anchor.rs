@@ -138,6 +138,53 @@ pub static SIGSTORE_REKOR_V1_KEY_ID: LazyLock<[u8; 4]> = LazyLock::new(|| {
     out
 });
 
+/// Domain-separated SHA-256 derivation of an Atlas blake3 hash into the
+/// SHA-256 hex string that Sigstore Rekor's `hashedrekord` schema requires
+/// for `data.hash.value` (algorithm = "sha256").
+///
+/// Atlas internally hashes events and pubkey-bundles with blake3, but
+/// Rekor's hashedrekord v0.0.1 spec only accepts SHA-1/256/384/512. The
+/// V1.6 verifier pins `algorithm == "sha256"` (see
+/// `entry_body_binds_anchored_hash`), so when we anchor a blake3 hash to
+/// Sigstore we have to commit to a derived SHA-256 that an offline
+/// auditor can independently recompute from the trace's blake3.
+///
+/// Why a single tiny derivation function rather than "SHA-256 of the
+/// canonical signing-input"? Because the latter would force the verifier
+/// to re-canonicalise the underlying event/bundle before checking the
+/// anchor. That logic exists, but routing it through here doubles the
+/// canonical-bytes drift surface that the Phase 1 trust property
+/// minimised. One pure pre-hash function shared by issuer + verifier is
+/// the smallest possible bind.
+///
+/// Domain separation by `kind`: `dag_tip` and `bundle_hash` use
+/// different prefixes, so even if Atlas ever produced a blake3 collision
+/// across a tip and a bundle (it cannot under blake3, but defence in
+/// depth) the derived Sigstore hashes still differ — preventing an
+/// adversary from re-targeting one anchor as the other.
+///
+/// The version suffix `-v1` lets V1.7+ add new domains (e.g.
+/// `atlas-policy-set-v2:`) without retroactively changing what older
+/// trace bundles' anchors commit to.
+///
+/// **Single source of truth**: every Sigstore-format issuer (atlas-signer
+/// `--rekor-url`) MUST call this helper to compute the `value` it
+/// submits to Rekor. Every Sigstore-format verifier MUST call this
+/// helper to recompute the expected hash it compares against
+/// `entry.anchored_hash`. Drift between the two is exactly what the
+/// trust property forbids.
+pub fn sigstore_anchored_hash_for(kind: &AnchorKind, blake3_hex: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let prefix: &[u8] = match kind {
+        AnchorKind::DagTip => b"atlas-dag-tip-v1:",
+        AnchorKind::BundleHash => b"atlas-bundle-hash-v1:",
+    };
+    let mut h = Sha256::new();
+    h.update(prefix);
+    h.update(blake3_hex.as_bytes());
+    hex::encode(h.finalize())
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Multi-format trust model
 // ─────────────────────────────────────────────────────────────────────────
@@ -205,8 +252,17 @@ pub struct AnchorOutcome {
     pub ok: bool,
     /// What kind it was (re-emitted for evidence formatting).
     pub kind: AnchorKind,
-    /// Hash this entry vouched for.
+    /// Hash this entry vouched for, exactly as serialised in the
+    /// `AnchorEntry`. For `atlas-mock-rekor-v1` this is the trace's
+    /// blake3; for `sigstore-rekor-v1` this is the derived SHA-256
+    /// (see `sigstore_anchored_hash_for`).
     pub anchored_hash: String,
+    /// The trace-native blake3 hash this anchor commits to — identical
+    /// to `anchored_hash` for `atlas-mock-rekor-v1`, and the underlying
+    /// blake3 (`dag_tip` or `pubkey_bundle_hash`) it was derived from
+    /// for `sigstore-rekor-v1`. Strict-mode coverage uses this so
+    /// "every dag_tip is anchored" still works across formats.
+    pub trace_hash: String,
     /// Log it was anchored to.
     pub log_id: String,
     /// On failure, the specific reason. Empty on success.
@@ -229,10 +285,18 @@ pub fn verify_anchor_entry(
     expected_hash: &str,
     trusted_logs: &BTreeMap<String, TrustedLog>,
 ) -> AnchorOutcome {
+    // `trace_hash` defaults to `expected_hash` — the caller-supplied
+    // trace-side hash. For atlas-mock-rekor-v1 this is the blake3 the
+    // trace claims (`expected_hash == entry.anchored_hash` after the
+    // bind-check below). For sigstore-rekor-v1 the wrapper
+    // `verify_anchors` overrides it with the matched dag_tip / bundle
+    // blake3 so strict-mode coverage works across formats.
+    let trace_hash_default = expected_hash.to_string();
     let mk = |reason: String| AnchorOutcome {
         ok: false,
         kind: entry.kind.clone(),
         anchored_hash: entry.anchored_hash.clone(),
+        trace_hash: trace_hash_default.clone(),
         log_id: entry.log_id.clone(),
         reason,
     };
@@ -252,42 +316,134 @@ pub fn verify_anchor_entry(
     };
 
     match trusted.format {
-        CheckpointFormat::AtlasMockV1 => verify_atlas_mock_v1(entry, &trusted.pubkey, mk),
-        CheckpointFormat::SigstoreRekorV1 => verify_sigstore_rekor_v1(entry, &trusted.pubkey, mk),
+        CheckpointFormat::AtlasMockV1 => {
+            verify_atlas_mock_v1(entry, &trusted.pubkey, &trace_hash_default, mk)
+        }
+        CheckpointFormat::SigstoreRekorV1 => {
+            verify_sigstore_rekor_v1(entry, &trusted.pubkey, &trace_hash_default, mk)
+        }
     }
 }
 
-/// Verify every anchor in a trace and emit one outcome per entry plus a
-/// roll-up `all_ok`. Lenient mode (caller's choice) accepts an empty
-/// `entries` vector; strict mode enforces coverage at the call site.
+/// Verify every anchor in a trace and emit one outcome per entry.
+/// Lenient by default (empty `trace.anchors` returns empty); strict
+/// coverage is enforced by the caller via `VerifyOptions::require_anchors`.
+///
+/// Two responsibilities here that `verify_anchor_entry` cannot do alone,
+/// because both depend on trace-level context:
+///
+///   1. **Coverage check** — `entry.anchored_hash` MUST commit to a hash
+///      the trace itself claims (`trace.dag_tips` for `DagTip`,
+///      `trace.pubkey_bundle_hash` for `BundleHash`). Otherwise a server
+///      could attach a valid-but-unrelated Rekor proof and pass it off
+///      as covering the trace.
+///
+///   2. **Format-specific derivation** — for `sigstore-rekor-v1`,
+///      `entry.anchored_hash` is a SHA-256 derived from the trace's
+///      blake3 via `sigstore_anchored_hash_for`. The wrapper recomputes
+///      the derivation, finds which trace-side blake3 matches, and
+///      records that blake3 in `outcome.trace_hash` so strict-mode
+///      coverage works uniformly across formats.
 pub fn verify_anchors(
     trace: &AtlasTrace,
     trusted_logs: &BTreeMap<String, TrustedLog>,
 ) -> Vec<AnchorOutcome> {
     let mut out = Vec::with_capacity(trace.anchors.len());
-    let dag_tip_set: std::collections::BTreeSet<&str> =
-        trace.dag_tips.iter().map(String::as_str).collect();
     for entry in &trace.anchors {
-        let expected = match entry.kind {
-            AnchorKind::DagTip => {
-                if !dag_tip_set.contains(entry.anchored_hash.as_str()) {
-                    out.push(AnchorOutcome {
-                        ok: false,
-                        kind: entry.kind.clone(),
-                        anchored_hash: entry.anchored_hash.clone(),
-                        log_id: entry.log_id.clone(),
-                        reason: format!(
-                            "anchored dag_tip {} not present in trace.dag_tips",
-                            &entry.anchored_hash,
-                        ),
-                    });
-                    continue;
-                }
-                entry.anchored_hash.as_str()
-            }
-            AnchorKind::BundleHash => trace.pubkey_bundle_hash.as_str(),
+        // Look up the log first. Unknown log → reject before doing any
+        // coverage / derivation work; the failure reason is identical to
+        // what `verify_anchor_entry` would produce, so callers see one
+        // canonical error message.
+        let Some(trusted) = trusted_logs.get(&entry.log_id) else {
+            out.push(AnchorOutcome {
+                ok: false,
+                kind: entry.kind.clone(),
+                anchored_hash: entry.anchored_hash.clone(),
+                trace_hash: entry.anchored_hash.clone(),
+                log_id: entry.log_id.clone(),
+                reason: format!(
+                    "log_id {} is not in the verifier's trusted log roster",
+                    entry.log_id,
+                ),
+            });
+            continue;
         };
-        out.push(verify_anchor_entry(entry, expected, trusted_logs));
+        let log_format = trusted.format;
+
+        // Resolve coverage: for which trace-side blake3 (`trace_hash`) does
+        // `entry.anchored_hash` claim to be a witness, and what value does
+        // `verify_anchor_entry` expect for the per-entry equality check?
+        // Pair them so we never pass the wrong one to the inner call.
+        let resolution = match (&entry.kind, log_format) {
+            (AnchorKind::DagTip, CheckpointFormat::AtlasMockV1) => trace
+                .dag_tips
+                .iter()
+                .find(|t| crate::ct::ct_eq_str(t, &entry.anchored_hash))
+                .map(|t| (entry.anchored_hash.clone(), t.clone())),
+            (AnchorKind::DagTip, CheckpointFormat::SigstoreRekorV1) => trace
+                .dag_tips
+                .iter()
+                .find(|t| {
+                    crate::ct::ct_eq_str(
+                        &sigstore_anchored_hash_for(&AnchorKind::DagTip, t),
+                        &entry.anchored_hash,
+                    )
+                })
+                .map(|t| (entry.anchored_hash.clone(), t.clone())),
+            (AnchorKind::BundleHash, CheckpointFormat::AtlasMockV1) => {
+                if crate::ct::ct_eq_str(
+                    &trace.pubkey_bundle_hash,
+                    &entry.anchored_hash,
+                ) {
+                    Some((entry.anchored_hash.clone(), trace.pubkey_bundle_hash.clone()))
+                } else {
+                    None
+                }
+            }
+            (AnchorKind::BundleHash, CheckpointFormat::SigstoreRekorV1) => {
+                let derived = sigstore_anchored_hash_for(
+                    &AnchorKind::BundleHash,
+                    &trace.pubkey_bundle_hash,
+                );
+                if crate::ct::ct_eq_str(&derived, &entry.anchored_hash) {
+                    Some((entry.anchored_hash.clone(), trace.pubkey_bundle_hash.clone()))
+                } else {
+                    None
+                }
+            }
+        };
+
+        let Some((expected, trace_hash)) = resolution else {
+            let reason = match entry.kind {
+                AnchorKind::DagTip => format!(
+                    "anchored dag_tip hash {} does not cover any trace.dag_tips entry under format {:?}",
+                    &entry.anchored_hash, log_format,
+                ),
+                AnchorKind::BundleHash => format!(
+                    "anchored bundle_hash {} does not match trace.pubkey_bundle_hash under format {:?}",
+                    &entry.anchored_hash, log_format,
+                ),
+            };
+            out.push(AnchorOutcome {
+                ok: false,
+                kind: entry.kind.clone(),
+                anchored_hash: entry.anchored_hash.clone(),
+                trace_hash: entry.anchored_hash.clone(),
+                log_id: entry.log_id.clone(),
+                reason,
+            });
+            continue;
+        };
+
+        // Inner per-entry verification. trace_hash is overridden after
+        // the call: verify_anchor_entry's default sets it to expected
+        // (correct for AtlasMockV1, equal-hash; wrong for SigstoreRekorV1
+        // where expected is sha256-derived and trace_hash is blake3).
+        let outcome = verify_anchor_entry(entry, &expected, trusted_logs);
+        out.push(AnchorOutcome {
+            trace_hash,
+            ..outcome
+        });
     }
     out
 }
@@ -299,6 +455,7 @@ pub fn verify_anchors(
 fn verify_atlas_mock_v1(
     entry: &AnchorEntry,
     log_pubkey: &LogPubkey,
+    trace_hash: &str,
     mk: impl Fn(String) -> AnchorOutcome,
 ) -> AnchorOutcome {
     let LogPubkey::Ed25519(ed_key) = log_pubkey else {
@@ -330,6 +487,7 @@ fn verify_atlas_mock_v1(
         ok: true,
         kind: entry.kind.clone(),
         anchored_hash: entry.anchored_hash.clone(),
+        trace_hash: trace_hash.to_string(),
         log_id: entry.log_id.clone(),
         reason: String::new(),
     }
@@ -424,6 +582,7 @@ fn verify_checkpoint_sig_atlas_mock(
 fn verify_sigstore_rekor_v1(
     entry: &AnchorEntry,
     log_pubkey: &LogPubkey,
+    trace_hash: &str,
     mk: impl Fn(String) -> AnchorOutcome,
 ) -> AnchorOutcome {
     let LogPubkey::EcdsaP256(p256_key) = log_pubkey else {
@@ -496,6 +655,7 @@ fn verify_sigstore_rekor_v1(
         ok: true,
         kind: entry.kind.clone(),
         anchored_hash: entry.anchored_hash.clone(),
+        trace_hash: trace_hash.to_string(),
         log_id: entry.log_id.clone(),
         reason: String::new(),
     }
@@ -1017,6 +1177,52 @@ mod tests {
         let err_empty = canonical_checkpoint_bytes_sigstore("", 1, 1, root_hex)
             .expect_err("empty origin must be rejected");
         assert!(err_empty.contains("empty"), "got: {err_empty}");
+    }
+
+    /// Pin every output of `sigstore_anchored_hash_for`. Drift here is
+    /// indistinguishable from a silent break of the trust property:
+    /// every Sigstore-format issuer and verifier hashes through this
+    /// function, and the two halves only meet via byte-for-byte
+    /// equality. A change in prefix string, byte-vs-string ordering,
+    /// or hash algorithm would split the issuer from the verifier
+    /// without any other test catching it.
+    ///
+    /// Provenance: each expected value was independently re-derived
+    /// at pin time with `printf '<prefix><blake3_hex>' | sha256sum`.
+    /// An auditor can repeat the same command and confirm.
+    #[test]
+    fn sigstore_anchored_hash_for_is_pinned() {
+        // All-zero blake3 — covers the "trivial input" case.
+        let zeros = "0".repeat(64);
+        assert_eq!(
+            sigstore_anchored_hash_for(&AnchorKind::DagTip, &zeros),
+            "893af4ccf889f69bed1a770b0bd0a66c71f5924f430f804eee18eae8e305a72a",
+        );
+        assert_eq!(
+            sigstore_anchored_hash_for(&AnchorKind::BundleHash, &zeros),
+            "f973e87c35ee55ed6a2db553291cd479b2e20b050704bacb7c0b52d5a9fec437",
+        );
+
+        // Non-trivial blake3 — distinct nibbles to catch byte-order
+        // regressions in the SHA-256 update path.
+        let mixed = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+        assert_eq!(
+            sigstore_anchored_hash_for(&AnchorKind::DagTip, mixed),
+            "b90e10ef48f535c10de4dc3ea040fb055ad6b60cc5c5e9d4df2f41bfa0ee0df6",
+        );
+        assert_eq!(
+            sigstore_anchored_hash_for(&AnchorKind::BundleHash, mixed),
+            "74d4b1fedf3030f735e46b73ace6622fc6bae0ffd5364b0faf023bc549bdf33c",
+        );
+
+        // Domain separation: same blake3, different kind ⇒ different
+        // SHA-256. Defence in depth against an adversary who manages
+        // to collide a tip and a bundle hash upstream.
+        assert_ne!(
+            sigstore_anchored_hash_for(&AnchorKind::DagTip, mixed),
+            sigstore_anchored_hash_for(&AnchorKind::BundleHash, mixed),
+            "tip and bundle prefixes must yield different anchored hashes",
+        );
     }
 
     /// Default trusted roster carries exactly the two logs V1.6 ships

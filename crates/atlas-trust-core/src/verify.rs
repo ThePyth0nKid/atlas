@@ -325,7 +325,7 @@ pub fn verify_trace_with(
         let anchored_tips: BTreeSet<&str> = anchor_outcomes
             .iter()
             .filter(|o| o.ok && matches!(o.kind, crate::trace_format::AnchorKind::DagTip))
-            .map(|o| o.anchored_hash.as_str())
+            .map(|o| o.trace_hash.as_str())
             .collect();
         let missing: Vec<&str> = trace
             .dag_tips
