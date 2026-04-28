@@ -553,14 +553,53 @@ some batch of `trace.anchor_chain.history`. This catches mixed-mode workspaces
 (operator switches from mock to Sigstore without preserving chain continuity) because
 the Sigstore entries are absent from the mock-only history — the check fires loudly.
 
-#### Sigstore path constraint (V1.8 future)
+#### Sigstore path: precision-preserving JSON (V1.8 — shipped)
 
-Currently, anchor-chain extension is gated to the mock-issuer path only. The reason:
-Sigstore Rekor tree_id values (e.g. `1_193_050_959_916_656_506`) exceed
-`Number.MAX_SAFE_INTEGER` (~2^53) in JavaScript. JSON round-trip through the MCP
-server would silently corrupt the tree_id (lose low digits). V1.8 will adopt a
-precision-preserving JSON parser (e.g. `lossless-json`) to lift this gate, and
-issuer-side chain extension for the Sigstore path will follow.
+V1.7 gated chain extension to the mock-issuer path because Sigstore Rekor v1
+`tree_id` values (e.g. `1_193_050_959_916_656_506`) exceed
+`Number.MAX_SAFE_INTEGER` (~2^53) in JavaScript: a `JSON.parse` round-trip in
+the MCP server silently rewrote the low digits, so the chain head an offline
+auditor recomputed would diverge from the head the issuer emitted.
+
+V1.8 routes every signer-stdout and on-disk anchor JSON boundary in the MCP
+server through `lossless-json` (`apps/atlas-mcp-server/src/lib/anchor-json.ts`).
+The custom number parser keeps integer literals in safe range as native
+`number` (so existing `z.number().int()` schemas are unchanged), and wraps
+oversized integers, fractionals, and scientific-notation literals in a
+`LosslessNumber` whose `.value` preserves the exact source string.
+`stringifyAnchorJson` re-emits those wrappers as their original digits.
+
+The Zod boundary (`AnchorEntrySchema.tree_id`) accepts the union
+`z.number().int() | LosslessIntegerSchema`, where the second arm enforces a
+non-negative integer-literal regex bounded at 19 decimal digits (i64 magnitude
+ceiling). A signer that ever emits scientific notation (`1.193e18`) or a
+malformed wrapper fails at this boundary with a descriptive Zod error rather
+than silently passing as a Number.isInteger-valued float.
+
+The V1.7 Sigstore-path gate in `apps/atlas-mcp-server/src/tools/anchor-bundle.ts`
+is removed: chain extension now applies to both paths. `anchor-chain.jsonl`
+remains write-once via the Rust signer's atomic append.
+
+#### V1.7 Sigstore-deferred coverage carve-out (V1.8 — shipped)
+
+The verifier's `anchor_chain_coverage` (`crates/atlas-trust-core/src/verify.rs`)
+classifies each entry in `trace.anchors` into one of three buckets:
+
+- **Covered** — entry is byte-identical to a row in `trace.anchor_chain.history`.
+- **Sigstore-deferred** — entry's `log_id == SIGSTORE_REKOR_V1_LOG_ID` but is
+  absent from chain history. Accepted on the basis that Sigstore Rekor v1's
+  own publicly-witnessed transparency log provides equivalent monotonicity for
+  that entry, and the per-entry verification (`verify_anchors`, runs unconditionally
+  before coverage) still validates the full inclusion proof and checkpoint
+  signature against the pinned PEM. Forging a Sigstore `log_id` is SHA-256
+  preimage resistance; forging a valid checkpoint requires the Sigstore Rekor
+  private key. The carve-out does not weaken the per-entry trust anchor.
+- **Uncovered** — any other entry absent from chain history. Coverage fails.
+
+The carve-out exists so that V1.7-issued bundles (Sigstore anchors not in
+chain) keep verifying after V1.8, and so that mixed-mode batches (mock entry
++ Sigstore entry in the same batch, recorded in chain) still chain-verify
+properly.
 
 #### Chain rotation ceremony
 
@@ -713,9 +752,12 @@ Headline:
   `trace.anchors` (latest snapshot) appears byte-identical in some chain batch.
   Catches mixed-mode workspaces (mock→Sigstore transitions without chain
   continuity preservation) because Sigstore entries are absent from mock-only chain.
-- **Sigstore path gated (V1.8 future):** Anchor-chain extension disabled on
-  Sigstore path due to JS `Number.MAX_SAFE_INTEGER` truncation risk to tree_id.
-  V1.8 will adopt precision-preserving JSON parser; chain extension follows.
+- **Precision-preserving JSON (V1.8):** MCP server routes signer-stdout and
+  on-disk anchor JSON through `lossless-json`; oversized `tree_id` values
+  (~2^60) survive round-trip byte-identical. Sigstore-path chain extension
+  re-enabled. Coverage check carves out Sigstore entries (not required to be
+  in chain) since Sigstore Rekor v1's own log provides monotonicity; mock
+  entries are still required to be in chain.
 - **Chain rotation:** `atlas-signer rotate-chain --confirm <workspace>` produces
   new genesis batch with `previous_head = old_chain.head`, bridging continuity.
 - **Sigstore Rekor v1 shard roster:** Replaces single-tree-id pin with

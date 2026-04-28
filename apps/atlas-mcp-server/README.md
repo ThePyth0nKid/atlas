@@ -135,11 +135,23 @@ workspace's `events.jsonl`.
   appends a new `AnchorBatch` to `data/{workspace}/anchor-chain.jsonl`,
   cross-linked to the previous batch via blake3 hash-chain (domain prefix
   `atlas-anchor-chain-v1:`). The verifier walks the chain and validates
-  monotonic growth (no gaps, no reorder, chain continuity). Chain extension
-  is gated to the mock-issuer path only in V1.7 (V1.8 will lift the gate for
-  Sigstore path once a precision-preserving JSON parser is available). Old
-  bundles lacking the chain pass under lenient mode; strict mode
+  monotonic growth (no gaps, no reorder, chain continuity). Old bundles
+  lacking the chain pass under lenient mode; strict mode
   (`require_anchor_chain`) demands a present, valid chain.
+- **Precision-preserving JSON (V1.8).** Every signer-stdout and on-disk
+  anchor JSON boundary parses through `lossless-json`
+  (`src/lib/anchor-json.ts`). Oversized integers — notably the Sigstore
+  Rekor v1 production `tree_id` (~2^60), which exceeds JS
+  `Number.MAX_SAFE_INTEGER` — survive round-trip byte-identical. The Zod
+  boundary on `AnchorEntry.tree_id` accepts native `number` (safe range)
+  or a `LosslessNumber` whose `.value` is a non-negative integer literal
+  bounded at 19 decimal digits (i64 magnitude); scientific notation,
+  fractionals, and malformed literals fail with a descriptive error
+  rather than silent truncation. This lifts the V1.7 Sigstore-path
+  chain-extension gate. The verifier's coverage check carves out
+  Sigstore entries (deferred to Rekor's own monotonicity), so V1.7-issued
+  bundles continue to verify; mock entries are still required to be in
+  chain.
 - **Sigstore shard roster (V1.7).** Verifier accepts the active production
   Sigstore shard plus two historical shards, all signed by the pinned
   ECDSA P-256 public key. Same single-key trust property; no cross-shard

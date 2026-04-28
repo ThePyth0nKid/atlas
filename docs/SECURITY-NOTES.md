@@ -197,13 +197,20 @@ as V1.5/V1.6 anchoring. New threats and mitigations:
   chain can establish with certainty that no past batch has been silently rewritten.
   Tested via 15 adversary tests in `crates/atlas-trust-core/tests/anchor_chain_adversary.rs`:
   reorder, gap, head mismatch, coordinated rewrite, previous_head break, etc.
-- **Mixed-mode safety:** If an operator runs mock-issuer and then switches to
-  live Sigstore on the same workspace without proper continuity ceremony, the
-  bundle ships Sigstore `anchors` (latest snapshot) but mock-only `anchor_chain`
-  history. The verifier's `anchor_chain_coverage` check fires explicitly because
-  Sigstore entries are absent from mock chain batches — mixed-mode is loud at
-  audit time, not silently degraded. This coupling between `trace.anchors` (current
-  snapshot) and `trace.anchor_chain.history` (full history) is deliberate.
+- **Mixed-mode safety (V1.8 carve-out):** From V1.8, both mock and Sigstore
+  paths extend the chain. The coverage check classifies each entry as covered
+  (in chain history), Sigstore-deferred (Sigstore `log_id` and absent from
+  history — accepted on the basis of Sigstore Rekor v1's own publicly-witnessed
+  log providing equivalent monotonicity), or uncovered (any other absence —
+  rejected). A non-Sigstore anchor that is not in chain still fails coverage,
+  preserving the V1.7 anti-rewrite property for the mock path. Per-entry
+  verification (`verify_anchors`) runs unconditionally against the pinned PEM
+  before coverage, so a forged Sigstore `log_id` cannot bypass anything: the
+  inclusion proof and checkpoint signature must still verify. Tested via
+  `sigstore_anchor_not_in_chain_accepted_by_coverage`,
+  `mixed_mode_mock_in_chain_plus_sigstore_deferred`, and
+  `non_sigstore_anchor_not_in_chain_still_rejected` in
+  `crates/atlas-trust-core/tests/anchor_chain_adversary.rs`.
 - **Chain-file integrity:** The issuer is the sole writer of `anchor-chain.jsonl`
   (append-only, atomic tmp-and-rename). Corruption is caught at parse time if the
   file is modified out-of-band. Loss of the chain file breaks the trust property
@@ -213,14 +220,41 @@ as V1.5/V1.6 anchoring. New threats and mitigations:
   The verifier's lenient default (`require_anchor_chain = false`) passes them;
   strict mode (`require_anchor_chain = true`) demands a present, valid chain.
   Existing golden traces and integration tests continue to pass without modification.
-- **Sigstore path constraint (V1.8 future):** Anchor-chain extension is gated to
-  the mock-issuer path only. The reason: Sigstore tree_id values (~2^60) exceed
-  `Number.MAX_SAFE_INTEGER` (~2^53) in JavaScript, and JSON round-trip would
-  silently corrupt the tree_id (lose low digits). Verifier-side chain validation
-  accepts Sigstore-path anchors that are part of a mock-built chain (via
-  `anchor_chain_coverage` check), but issuer-side chain extension for new Sigstore
-  anchors is deferred to V1.8. V1.8 will adopt a precision-preserving JSON parser
-  to lift this gate.
+## Precision-preserving anchor JSON pipeline (V1.8 — in scope)
+
+V1.8 closes a precision-loss gap that V1.7 sidestepped via the Sigstore-path
+chain-extension gate. The trust property at stake is byte-identical chain heads
+between issuer and offline auditor: a silent digit loss anywhere in the
+pipeline diverges the heads and breaks audit-by-mail.
+
+- **Lossless boundary:** The MCP server routes every signer-stdout boundary
+  (`signEvent`, `anchorViaSigner`, `chainExportViaSigner`) and on-disk parse
+  (`anchors.json`, `anchor-chain.jsonl`) through `lossless-json` via the
+  helper `apps/atlas-mcp-server/src/lib/anchor-json.ts`. Integer literals in
+  safe range stay native `number`; oversized integers, fractionals, and
+  scientific-notation literals wrap as `LosslessNumber` whose `.value`
+  preserves the source string. `stringifyAnchorJson` re-emits wrappers
+  verbatim so the round-trip is byte-identical.
+- **Defensive number parser:** `1.193e18` happens to be an integer-valued
+  double, so a naive `isSafeNumber`-only gate would let it pass
+  `z.number().int()`. The custom parser forces every non-integer literal
+  through `LosslessNumber`, where the schema's regex check rejects it. This
+  defends against a hypothetical signer drift toward scientific notation —
+  exactly the silent-precision-loss class V1.8 is closing.
+- **Schema-side magnitude bound:** `LosslessIntegerSchema` validates the
+  digit string with `/^(?:0|[1-9]\d*)$/` (non-negative, no leading zeros)
+  AND a 19-digit ceiling (i64 magnitude). A crafted anchor entry carrying a
+  500-digit literal fails at the Zod boundary with a descriptive error
+  rather than later as a cryptic Rust deserialization overflow.
+- **Sigstore-path chain extension re-enabled:** The V1.7 gate in
+  `apps/atlas-mcp-server/src/tools/anchor-bundle.ts` (`rekorUrl === undefined`
+  conditional) is removed. Both paths now extend `anchor-chain.jsonl`. The
+  signer remains the sole writer; atomic append unchanged.
+- **Coverage carve-out:** See "Mixed-mode safety (V1.8 carve-out)" above.
+  V1.7-issued bundles (Sigstore anchors not in chain) keep verifying.
+- **Tested via:** `apps/atlas-mcp-server/scripts/test-anchor-json.ts` (5
+  tests: oversized parse, safe-range integer, round-trip, scientific-notation
+  rejection, array round-trip) plus the Rust adversary tests cited above.
 
 ## Sigstore shard roster (V1.7 — in scope)
 
