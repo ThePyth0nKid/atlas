@@ -83,6 +83,18 @@ export function anchorsPath(workspaceId: string): string {
   return join(workspaceDir(workspaceId), "anchors.json");
 }
 
+/**
+ * V1.7 anchor-chain JSONL. One `AnchorBatch` per line, append-only
+ * within the lifetime of a workspace. Written atomically (read-all +
+ * tmp + rename + fsync) by the Rust signer when `--chain-path` is
+ * passed; the MCP server reads but never modifies this file. Absence
+ * is benign — `exportWorkspaceBundle` ships traces without a chain
+ * and the lenient verifier passes them.
+ */
+export function anchorChainPath(workspaceId: string): string {
+  return join(workspaceDir(workspaceId), "anchor-chain.jsonl");
+}
+
 let cachedSignerBinary: string | null | undefined = undefined;
 
 /**

@@ -152,9 +152,18 @@ export type AnchorBatchInput = {
  * an operator typo cannot silently submit anchoring signatures over
  * an unencrypted wire. The TS side does NOT duplicate that check —
  * the policy lives in one place, in the signer.
+ *
+ * `chainPath`: when set, the signer reads the existing
+ * `anchor-chain.jsonl` at this path, builds a new `AnchorBatch`
+ * committing the freshly-issued entries plus `integrated_time`, and
+ * atomically appends one row. Stdout shape (`[AnchorEntry]`) is
+ * unchanged — this option only adds a side effect on disk. The
+ * signer is the SOLE writer; the MCP server reads but never
+ * modifies the chain file.
  */
 export type AnchorOptions = {
   rekorUrl?: string;
+  chainPath?: string;
 };
 
 /**
@@ -177,6 +186,9 @@ export async function anchorViaSigner(
   const argv = ["anchor"];
   if (options.rekorUrl !== undefined) {
     argv.push("--rekor-url", options.rekorUrl);
+  }
+  if (options.chainPath !== undefined) {
+    argv.push("--chain-path", options.chainPath);
   }
   const { stdout, stderr, code } = await runProcess(
     bin,

@@ -27,7 +27,7 @@
 import { promises as fs } from "node:fs";
 import { z } from "zod";
 import { exportWorkspaceBundle } from "../lib/bundle.js";
-import { anchorsPath } from "../lib/paths.js";
+import { anchorChainPath, anchorsPath } from "../lib/paths.js";
 import { anchorViaSigner, type AnchorRequest } from "../lib/signer.js";
 import { ensureWorkspaceDir } from "../lib/storage.js";
 import { DEFAULT_WORKSPACE } from "../lib/types.js";
@@ -94,12 +94,17 @@ export const anchorBundleTool: ToolDefinition<typeof anchorBundleInputSchema> = 
 
     // Live-Rekor opt-in: explicit field beats env, env beats mock.
     const rekorUrl = args.rekor_url ?? process.env.ATLAS_REKOR_URL;
+    // V1.7: every anchor-bundle call extends the workspace's
+    // anchor-chain by one row. The signer is the sole writer; ensure
+    // the workspace dir exists first so a fresh workspace can produce
+    // its genesis batch without a separate setup step.
+    await ensureWorkspaceDir(workspaceId);
+    const chainPath = anchorChainPath(workspaceId);
     const entries = await anchorViaSigner(
       { items, integrated_time: integratedTime },
-      { rekorUrl },
+      { rekorUrl, chainPath },
     );
 
-    await ensureWorkspaceDir(workspaceId);
     const target = anchorsPath(workspaceId);
     const json = JSON.stringify(entries, null, 2);
     // Atomic write — concurrent exporters either see the previous
@@ -130,6 +135,7 @@ export const anchorBundleTool: ToolDefinition<typeof anchorBundleInputSchema> = 
               tree_size: bundleAnchor?.inclusion_proof.tree_size ?? 0,
               root_hash: bundleAnchor?.inclusion_proof.root_hash ?? null,
               anchors_path: target,
+              anchor_chain_path: chainPath,
             },
             null,
             2,

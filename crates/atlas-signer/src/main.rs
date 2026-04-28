@@ -30,6 +30,7 @@
 //! does not.
 
 mod anchor;
+mod chain;
 mod rekor_client;
 
 use atlas_trust_core::{
@@ -81,6 +82,15 @@ struct AnchorArgs {
     /// issuer runs unchanged.
     #[arg(long)]
     rekor_url: Option<String>,
+
+    /// V1.7 anchor-chain file (`anchor-chain.jsonl`). When set, the
+    /// signer reads the existing chain, builds a new `AnchorBatch`
+    /// committing the freshly-issued entries plus `integrated_time`,
+    /// and atomically appends one row. The signer is the SOLE writer
+    /// for this file; the MCP server reads it but never modifies it.
+    /// Stdout shape (`[AnchorEntry]`) is unchanged for backward compat.
+    #[arg(long)]
+    chain_path: Option<std::path::PathBuf>,
 }
 
 #[derive(clap::Args, Default)]
@@ -150,6 +160,11 @@ fn run_anchor(args: AnchorArgs) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Capture the integrated_time before `batch` is consumed by the
+    // issuer; the chain extension below threads the same value into
+    // the new AnchorBatch so the on-disk row matches every entry's
+    // own integrated_time.
+    let integrated_time = batch.integrated_time;
     // Dispatch: live Rekor when `--rekor-url` is set, otherwise the
     // in-process mock issuer. The two paths produce mutually-distinct
     // AnchorEntry shapes (entry_body_b64, tree_id are Some for the
@@ -172,6 +187,29 @@ fn run_anchor(args: AnchorArgs) -> ExitCode {
             }
         },
     };
+
+    // V1.7: if --chain-path is set, atomically append a new AnchorBatch
+    // row committing these entries. We extend AFTER successful issuance
+    // so a Rekor failure does not bind a phantom batch to the chain.
+    // The signer is the sole writer for this file.
+    if let Some(chain_path) = args.chain_path.as_deref() {
+        match chain::extend_chain_with_batch(chain_path, &entries, integrated_time) {
+            Ok(new_batch) => {
+                eprintln!(
+                    "anchor: extended chain at {} (batch_index={}, previous_head={}, entries={})",
+                    chain_path.display(),
+                    new_batch.batch_index,
+                    new_batch.previous_head,
+                    new_batch.entries.len(),
+                );
+            }
+            Err(e) => {
+                eprintln!("anchor: chain extension failed: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+
     match serde_json::to_string_pretty(&entries) {
         Ok(s) => {
             println!("{s}");
