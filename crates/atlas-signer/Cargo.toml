@@ -21,3 +21,16 @@ clap = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
 blake3 = { workspace = true }
+# V1.6 Sigstore issuer path. Blocking client because the signer is a
+# short-lived CLI; rustls-tls avoids the OpenSSL build dependency on
+# Windows. JSON feature for serde_json integration.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+# ECDSA P-256 + SHA-256 for the Atlas anchoring key (matches Sigstore
+# Rekor's own signing scheme; verifier-side is unambiguous).
+p256 = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+# Mock Rekor server for the integration test of the Sigstore issuer flow.
+wiremock = "0.6"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

@@ -30,6 +30,7 @@
 //! does not.
 
 mod anchor;
+mod rekor_client;
 
 use atlas_trust_core::{
     cose::build_signing_input,
@@ -65,9 +66,21 @@ enum Command {
     BundleHash,
     /// Build a Merkle inclusion proof + signed checkpoint for a batch of
     /// hashes (read from stdin as `AnchorBatchInput` JSON), emit
-    /// `[AnchorEntry]` JSON on stdout. Uses the dev mock-Rekor key; V1.6
-    /// adds `--rekor-url` for real Sigstore submission.
-    Anchor,
+    /// `[AnchorEntry]` JSON on stdout. Uses the dev mock-Rekor key when
+    /// `--rekor-url` is unset; otherwise POSTs to the named Rekor
+    /// instance (Sigstore v1, hashedrekord/v0.0.1).
+    Anchor(AnchorArgs),
+}
+
+#[derive(clap::Args, Default)]
+struct AnchorArgs {
+    /// Rekor base URL (e.g. `https://rekor.sigstore.dev`). When set,
+    /// the anchor subcommand POSTs each batch item to
+    /// `<url>/api/v1/log/entries` and produces Sigstore-format
+    /// `AnchorEntry` rows. When unset, the in-process mock-Rekor
+    /// issuer runs unchanged.
+    #[arg(long)]
+    rekor_url: Option<String>,
 }
 
 #[derive(clap::Args, Default)]
@@ -119,12 +132,12 @@ fn main() -> ExitCode {
     match cli.command {
         Some(Command::Sign(args)) => run_sign(args),
         Some(Command::BundleHash) => run_bundle_hash(),
-        Some(Command::Anchor) => run_anchor(),
+        Some(Command::Anchor(args)) => run_anchor(args),
         None => run_sign(cli.legacy_sign),
     }
 }
 
-fn run_anchor() -> ExitCode {
+fn run_anchor(args: AnchorArgs) -> ExitCode {
     let mut buf = String::new();
     if let Err(e) = io::stdin().read_to_string(&mut buf) {
         eprintln!("anchor: failed to read stdin: {e}");
@@ -137,12 +150,27 @@ fn run_anchor() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let entries = match anchor::issue_anchors(batch) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("anchor: issue failed: {e}");
-            return ExitCode::from(2);
-        }
+    // Dispatch: live Rekor when `--rekor-url` is set, otherwise the
+    // in-process mock issuer. The two paths produce mutually-distinct
+    // AnchorEntry shapes (entry_body_b64, tree_id are Some for the
+    // Sigstore path, None for mock); the verifier dispatches by
+    // log_id so both shapes flow through `verify_anchor_entry`
+    // unchanged.
+    let entries = match args.rekor_url.as_deref() {
+        Some(url) => match anchor::issue_anchors_via_rekor(batch, url) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("anchor: rekor issue failed: {e}");
+                return ExitCode::from(2);
+            }
+        },
+        None => match anchor::issue_anchors(batch) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("anchor: issue failed: {e}");
+                return ExitCode::from(2);
+            }
+        },
     };
     match serde_json::to_string_pretty(&entries) {
         Ok(s) => {
@@ -299,7 +327,7 @@ fn run_bundle_hash() -> ExitCode {
         }
         Err(e) => {
             eprintln!("bundle-hash: deterministic_hash failed: {e}");
-            return ExitCode::from(2);
+            ExitCode::from(2)
         }
     }
 }

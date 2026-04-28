@@ -175,14 +175,43 @@ pub static SIGSTORE_REKOR_V1_KEY_ID: LazyLock<[u8; 4]> = LazyLock::new(|| {
 /// trust property forbids.
 pub fn sigstore_anchored_hash_for(kind: &AnchorKind, blake3_hex: &str) -> String {
     use sha2::{Digest, Sha256};
-    let prefix: &[u8] = match kind {
-        AnchorKind::DagTip => b"atlas-dag-tip-v1:",
-        AnchorKind::BundleHash => b"atlas-bundle-hash-v1:",
-    };
     let mut h = Sha256::new();
-    h.update(prefix);
+    h.update(sigstore_artifact_prefix_for(kind));
     h.update(blake3_hex.as_bytes());
     hex::encode(h.finalize())
+}
+
+/// Sister of [`sigstore_anchored_hash_for`]: returns the **artifact bytes**
+/// the issuer signs with the Atlas anchoring key before submitting to
+/// Rekor as a `hashedrekord`. By construction:
+///
+///   sigstore_anchored_hash_for(kind, hex)
+///     == hex(SHA-256(sigstore_artifact_bytes_for(kind, hex)))
+///
+/// Rekor's `hashedrekord` schema commits the SHA-256 hash of an opaque
+/// artifact and an asymmetric signature over that artifact. The verifier
+/// only needs the hash (it checks `body.spec.data.hash.value ==
+/// anchored_hash`); the signature is verified by Sigstore at submit time
+/// and the verifier does not re-check it. So the only requirement on the
+/// artifact bytes is that the issuer and verifier agree byte-for-byte on
+/// what hashes to `anchored_hash`. This helper centralises the agreement.
+pub fn sigstore_artifact_bytes_for(kind: &AnchorKind, blake3_hex: &str) -> Vec<u8> {
+    let prefix = sigstore_artifact_prefix_for(kind);
+    let mut v = Vec::with_capacity(prefix.len() + blake3_hex.len());
+    v.extend_from_slice(prefix);
+    v.extend_from_slice(blake3_hex.as_bytes());
+    v
+}
+
+/// Internal: domain-separation prefix shared by `sigstore_anchored_hash_for`
+/// and `sigstore_artifact_bytes_for`. Defined once so a future edit cannot
+/// silently desynchronise the two helpers.
+#[inline]
+fn sigstore_artifact_prefix_for(kind: &AnchorKind) -> &'static [u8] {
+    match kind {
+        AnchorKind::DagTip => b"atlas-dag-tip-v1:",
+        AnchorKind::BundleHash => b"atlas-bundle-hash-v1:",
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -714,6 +743,180 @@ pub fn canonical_checkpoint_bytes_sigstore(
     Ok(format!("{origin} - {tree_id}\n{tree_size}\n{root_b64}\n").into_bytes())
 }
 
+/// Extract the C2SP signed-note signature line that matches `expected_origin`,
+/// returning the standard-base64 signature blob (`base64(4-byte BE keyID ||
+/// DER ECDSA sig)`) ready to drop into `InclusionProof::checkpoint_sig`.
+///
+/// The Rekor REST API returns the FULL signed-note in
+/// `verification.inclusionProof.checkpoint`. The verifier's
+/// `checkpoint_sig` field is just the base64 signature (the third token of
+/// the matching signature line), so the issuer must extract it. Putting
+/// the parser here (atlas-trust-core, not atlas-signer) keeps it in the
+/// same crate as the verifier-side checkpoint canonicalisation — one
+/// place, one set of pin tests, one source of truth for the C2SP format.
+///
+/// The format (per C2SP signed-note v1) is:
+///
+/// ```text
+/// <origin> - <tree-id>          <- line 1: signed body header
+/// <tree-size>                   <- line 2
+/// <base64(rootHash)>            <- line 3
+///                               <- line 4: blank separator
+/// — <name1> <base64-sig1>       <- line 5+: one or more signature lines
+/// — <name2> <base64-sig2>
+/// …
+/// ```
+///
+/// Each signature line begins with U+2014 (em-dash) + U+0020 (space).
+/// Splitting the remainder on ASCII whitespace yields `[name, base64_sig]`.
+/// We pick the line whose `name` equals `expected_origin` (Rekor signs
+/// each shard's checkpoints with its origin as the signer name).
+///
+/// **Defensive checks**:
+/// - Returns an error if the blank-line separator is missing.
+/// - Returns an error if no signature line matches `expected_origin`.
+/// - Returns an error if the matched line cannot be split into exactly
+///   three whitespace-separated tokens.
+/// - Returns an error if the base64 cannot be decoded under STANDARD
+///   base64 (RFC 4648 §4 with `=` padding — same encoding the verifier
+///   uses; reject deviations).
+/// - Returns an error if the decoded signature is shorter than `4 + 8`
+///   bytes (need a 4-byte keyID + a minimum-length DER ECDSA signature).
+/// - If `expected_keyid` is `Some`, returns an error when the first 4
+///   bytes of the decoded signature do not match. The verifier re-checks
+///   this; failing fast at issue time produces a clearer error than
+///   waiting for the verifier to reject the trace later.
+pub fn extract_signature_line_sigstore(
+    checkpoint: &str,
+    expected_origin: &str,
+    expected_keyid: Option<&[u8; 4]>,
+) -> Result<String, String> {
+    // C2SP requires the body and signature lines to be separated by a
+    // single blank line. `\n\n` is therefore the only valid separator;
+    // `\r\n\r\n` would imply the issuer added CRLF, which is not C2SP.
+    let (_body, sig_block) = checkpoint
+        .split_once("\n\n")
+        .ok_or_else(|| "checkpoint missing blank-line separator between body and signatures".to_string())?;
+
+    if sig_block.is_empty() {
+        return Err("checkpoint has no signature lines after the blank separator".to_string());
+    }
+
+    // C2SP signature line marker: em-dash (U+2014) + space.
+    const SIG_PREFIX: &str = "\u{2014} ";
+
+    let mut last_err: Option<String> = None;
+    for line in sig_block.lines() {
+        if line.is_empty() {
+            // Trailing blank line is permitted; skip.
+            continue;
+        }
+        let Some(rest) = line.strip_prefix(SIG_PREFIX) else {
+            // Some signed-notes carry comments after the signatures;
+            // skip lines that do not start with the C2SP marker rather
+            // than rejecting the whole document.
+            continue;
+        };
+        // Two ASCII whitespace-separated tokens: name and base64 sig.
+        // splitn(2, char) splits exactly once, so a single space suffices.
+        let mut parts = rest.splitn(2, ' ');
+        let name = match parts.next() {
+            Some(n) if !n.is_empty() => n,
+            _ => {
+                last_err = Some(format!(
+                    "malformed signature line (missing name): {line:?}"
+                ));
+                continue;
+            }
+        };
+        let sig_b64 = match parts.next() {
+            Some(s) if !s.is_empty() => s,
+            _ => {
+                last_err = Some(format!(
+                    "malformed signature line (missing base64 token): {line:?}"
+                ));
+                continue;
+            }
+        };
+        if name != expected_origin {
+            // Different signer (e.g. an additional witness) — skip.
+            continue;
+        }
+
+        // Strict standard base64 — same dialect the verifier expects.
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(sig_b64.as_bytes())
+            .map_err(|e| format!("signature line is not standard base64: {e}"))?;
+        if raw.len() < 4 + 8 {
+            return Err(format!(
+                "signature blob too short: {} bytes (need 4-byte keyID + DER ECDSA sig)",
+                raw.len(),
+            ));
+        }
+        if let Some(expected) = expected_keyid {
+            let mut keyid = [0u8; 4];
+            keyid.copy_from_slice(&raw[..4]);
+            if &keyid != expected {
+                // Same origin, different keyID. This is the
+                // key-rotation-overlap window: a checkpoint may carry
+                // signatures from both the rotating-out and rotating-in
+                // keys for one tick. Skip-and-remember rather than
+                // return Err so a later matching-keyID line for the
+                // same origin can still succeed. The last_err captures
+                // the rejection so the final "no match" error names
+                // what we actually saw.
+                last_err = Some(format!(
+                    "signature keyID {} does not match expected log keyID {} \
+                     (same origin {:?}, different key — possibly a rotation \
+                     witness; ignoring)",
+                    hex::encode(keyid),
+                    hex::encode(expected),
+                    expected_origin,
+                ));
+                continue;
+            }
+        }
+        return Ok(sig_b64.to_string());
+    }
+
+    Err(last_err.unwrap_or_else(|| {
+        format!(
+            "checkpoint contains no signature line for origin {:?}",
+            expected_origin,
+        )
+    }))
+}
+
+/// Parse the active tree-ID off the first line of a C2SP signed-note
+/// body: `<origin> - <tree-id>\n…`. Errors on any deviation from that
+/// exact shape so a truncated, reformatted, or wrong-origin checkpoint
+/// fails loud rather than supplying a default tree-id the verifier
+/// would later reject (yielding an opaque "tree mismatch" instead of
+/// the clearer parse error).
+///
+/// Lives here in `atlas-trust-core` (next to the other C2SP parsers)
+/// so issuer and verifier read the same canonical interpretation; a
+/// drift in the issuer-side parser would otherwise silently feed the
+/// verifier a tree-id the issuer never actually saw.
+pub fn parse_sigstore_checkpoint_tree_id(checkpoint: &str) -> Result<i64, String> {
+    let first_line = checkpoint
+        .lines()
+        .next()
+        .ok_or_else(|| "checkpoint has no lines".to_string())?;
+    let (origin, tree_id_str) = first_line
+        .rsplit_once(" - ")
+        .ok_or_else(|| format!("checkpoint first line missing ' - ' separator: {first_line:?}"))?;
+    if origin != SIGSTORE_REKOR_V1_ORIGIN {
+        return Err(format!(
+            "checkpoint first-line origin {origin:?} does not match the pinned Sigstore origin {:?}",
+            SIGSTORE_REKOR_V1_ORIGIN,
+        ));
+    }
+    tree_id_str
+        .parse::<i64>()
+        .map_err(|e| format!("checkpoint tree-id is not a valid i64: {e} ({tree_id_str:?})"))
+}
+
 /// RFC 6962 §2.1 leaf hash: `SHA-256(0x00 || leaf_data)`.
 ///
 /// `leaf_data` for sigstore-rekor-v1 is the canonical Rekor entry body
@@ -829,6 +1032,22 @@ fn entry_body_binds_anchored_hash(entry_body: &[u8], anchored_hash: &str) -> Res
     if kind != "hashedrekord" {
         return Err(format!(
             "entry body kind {kind:?} is not supported by V1.6 (hashedrekord only)"
+        ));
+    }
+
+    // Pin apiVersion explicitly. Future hashedrekord schema versions could
+    // re-shape spec.data.hash with the same field names but different
+    // semantics — without this gate, the value-equality check below would
+    // silently succeed against a body whose meaning has shifted under our
+    // feet. V1.7 may admit additional pinned versions; until then, any
+    // body that is not hashedrekord/v0.0.1 is rejected loud.
+    let api_version = v
+        .get("apiVersion")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| "entry body has no apiVersion field".to_string())?;
+    if api_version != "0.0.1" {
+        return Err(format!(
+            "entry body apiVersion {api_version:?} is not supported by V1.6 (hashedrekord/v0.0.1 only)"
         ));
     }
 
@@ -1136,6 +1355,61 @@ mod tests {
         assert!(err.contains("sha256"), "error must mention sha256 pin: {err}");
     }
 
+    /// `entry_body_binds_anchored_hash` must reject a hashedrekord whose
+    /// `apiVersion` is not "0.0.1". A future schema bump might preserve the
+    /// `kind`+`spec.data.hash` field names but redefine the hash semantics
+    /// (e.g. switch from artifact-hash to digest-of-canonical-body); without
+    /// this gate the value-equality check would silently accept the new
+    /// shape.
+    #[test]
+    fn entry_body_with_wrong_api_version_is_rejected() {
+        let body = serde_json::json!({
+            "apiVersion": "0.0.2",
+            "kind": "hashedrekord",
+            "spec": {
+                "data": {
+                    "hash": {
+                        "algorithm": "sha256",
+                        "value": "deadbeef",
+                    }
+                }
+            }
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let err = entry_body_binds_anchored_hash(&body_bytes, "deadbeef")
+            .expect_err("non-v0.0.1 hashedrekord must be rejected");
+        assert!(
+            err.contains("apiVersion") && err.contains("0.0.1"),
+            "error must call out apiVersion pin: {err}",
+        );
+    }
+
+    /// `entry_body_binds_anchored_hash` must reject a hashedrekord that
+    /// omits the `apiVersion` field entirely. Falling back to "ok" when
+    /// the field is missing would re-introduce the same drift surface
+    /// the explicit pin closes.
+    #[test]
+    fn entry_body_with_missing_api_version_is_rejected() {
+        let body = serde_json::json!({
+            "kind": "hashedrekord",
+            "spec": {
+                "data": {
+                    "hash": {
+                        "algorithm": "sha256",
+                        "value": "deadbeef",
+                    }
+                }
+            }
+        });
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let err = entry_body_binds_anchored_hash(&body_bytes, "deadbeef")
+            .expect_err("hashedrekord without apiVersion must be rejected");
+        assert!(
+            err.contains("apiVersion"),
+            "error must mention apiVersion: {err}",
+        );
+    }
+
     /// `entry_body_binds_anchored_hash` must reject a hashedrekord with
     /// no `algorithm` field — the hashedrekord schema requires it, and
     /// silently skipping the algorithm check (treating "missing" as
@@ -1223,6 +1497,197 @@ mod tests {
             sigstore_anchored_hash_for(&AnchorKind::BundleHash, mixed),
             "tip and bundle prefixes must yield different anchored hashes",
         );
+    }
+
+    /// `sigstore_artifact_bytes_for` is the issuer-side counterpart of
+    /// `sigstore_anchored_hash_for`. The two MUST stay in lockstep:
+    /// the SHA-256 of the artifact bytes is exactly the anchored hash.
+    /// This test pins both shapes and the hash relationship explicitly,
+    /// so a future edit cannot silently desynchronise them.
+    #[test]
+    fn sigstore_artifact_bytes_for_is_pinned() {
+        use sha2::{Digest, Sha256};
+
+        let mixed = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+        // Exact byte layout: prefix (ASCII), then blake3 hex (ASCII).
+        let tip_bytes = sigstore_artifact_bytes_for(&AnchorKind::DagTip, mixed);
+        assert_eq!(
+            tip_bytes,
+            b"atlas-dag-tip-v1:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        );
+
+        let bundle_bytes = sigstore_artifact_bytes_for(&AnchorKind::BundleHash, mixed);
+        assert_eq!(
+            bundle_bytes,
+            b"atlas-bundle-hash-v1:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        );
+
+        // Lockstep check: SHA-256(artifact_bytes) MUST equal the
+        // anchored hash hex-decoded. If either helper is edited
+        // independently this assertion catches the drift.
+        let tip_digest = hex::encode(Sha256::digest(&tip_bytes));
+        assert_eq!(
+            tip_digest,
+            sigstore_anchored_hash_for(&AnchorKind::DagTip, mixed),
+            "sha256(artifact_bytes) MUST equal sigstore_anchored_hash_for output",
+        );
+        let bundle_digest = hex::encode(Sha256::digest(&bundle_bytes));
+        assert_eq!(
+            bundle_digest,
+            sigstore_anchored_hash_for(&AnchorKind::BundleHash, mixed),
+            "sha256(artifact_bytes) MUST equal sigstore_anchored_hash_for output",
+        );
+    }
+
+    /// `extract_signature_line_sigstore` parses a synthetic C2SP signed-
+    /// note and returns exactly the base64 signature blob for the origin
+    /// the caller asked for. Pinning concrete inputs catches whitespace
+    /// drift, line-separator regressions, and prefix-marker errors.
+    #[test]
+    fn extract_signature_line_sigstore_returns_matching_origin_sig() {
+        // 4-byte keyID = [0xCA, 0xFE, 0xBA, 0xBE] + 8 bytes of DER stand-in.
+        // (Real signatures are longer but we only need ≥ 4+8 to pass the
+        // length check; the issuer is responsible for ensuring it submitted
+        // a real DER ECDSA sig.)
+        let raw = [
+            0xCAu8, 0xFE, 0xBA, 0xBE, // keyID
+            0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02, // 8-byte DER stub
+        ];
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+
+        let checkpoint = format!(
+            "rekor.sigstore.dev - 42\n7\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\n\u{2014} rekor.sigstore.dev {sig_b64}\n",
+        );
+
+        let key_id = [0xCAu8, 0xFE, 0xBA, 0xBE];
+        let extracted = extract_signature_line_sigstore(
+            &checkpoint,
+            "rekor.sigstore.dev",
+            Some(&key_id),
+        )
+        .expect("matching origin must extract");
+        assert_eq!(extracted, sig_b64);
+    }
+
+    /// Multiple signature lines: pick the one whose name matches the
+    /// requested origin and ignore lines authored by other witnesses.
+    #[test]
+    fn extract_signature_line_sigstore_skips_non_matching_origins() {
+        let raw_a = {
+            let mut v = vec![0xAA, 0xAA, 0xAA, 0xAA];
+            v.extend_from_slice(&[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02]);
+            v
+        };
+        let raw_b = {
+            let mut v = vec![0xBB, 0xBB, 0xBB, 0xBB];
+            v.extend_from_slice(&[0x30, 0x06, 0x02, 0x01, 0x03, 0x02, 0x01, 0x04]);
+            v
+        };
+        let sig_a = base64::engine::general_purpose::STANDARD.encode(&raw_a);
+        let sig_b = base64::engine::general_purpose::STANDARD.encode(&raw_b);
+        let checkpoint = format!(
+            "rekor.sigstore.dev - 42\n7\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\n\
+             \u{2014} witness.example.com {sig_a}\n\
+             \u{2014} rekor.sigstore.dev {sig_b}\n",
+        );
+        let extracted = extract_signature_line_sigstore(
+            &checkpoint,
+            "rekor.sigstore.dev",
+            Some(&[0xBB, 0xBB, 0xBB, 0xBB]),
+        )
+        .expect("matching origin must be found among multi-signer body");
+        assert_eq!(extracted, sig_b);
+    }
+
+    /// keyID enforcement: a signature whose first 4 bytes don't match
+    /// the expected keyID is rejected — defends against a neighbouring
+    /// signer line being authored by a different log.
+    #[test]
+    fn extract_signature_line_sigstore_rejects_keyid_mismatch() {
+        let raw = {
+            let mut v = vec![0x11, 0x22, 0x33, 0x44];
+            v.extend_from_slice(&[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02]);
+            v
+        };
+        let sig_b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+        let checkpoint = format!(
+            "rekor.sigstore.dev - 42\n7\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\n\u{2014} rekor.sigstore.dev {sig_b64}\n",
+        );
+        let err = extract_signature_line_sigstore(
+            &checkpoint,
+            "rekor.sigstore.dev",
+            Some(&[0x55, 0x66, 0x77, 0x88]),
+        )
+        .expect_err("keyID mismatch must be rejected");
+        assert!(err.contains("keyID"), "got: {err}");
+    }
+
+    /// Key-rotation overlap: a checkpoint with two same-origin signature
+    /// lines (rotating-out keyID first, rotating-in keyID second) must
+    /// succeed by scanning past the mismatching first line. Rejecting
+    /// fast on the first mismatch would lock Atlas verifiers out of any
+    /// real-world Sigstore key rotation that overlaps two trees.
+    #[test]
+    fn extract_signature_line_sigstore_skips_keyid_mismatch_within_origin() {
+        let raw_old = {
+            let mut v = vec![0x11, 0x22, 0x33, 0x44];
+            v.extend_from_slice(&[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02]);
+            v
+        };
+        let raw_new = {
+            let mut v = vec![0x55, 0x66, 0x77, 0x88];
+            v.extend_from_slice(&[0x30, 0x06, 0x02, 0x01, 0x03, 0x02, 0x01, 0x04]);
+            v
+        };
+        let sig_old = base64::engine::general_purpose::STANDARD.encode(&raw_old);
+        let sig_new = base64::engine::general_purpose::STANDARD.encode(&raw_new);
+        let checkpoint = format!(
+            "rekor.sigstore.dev - 42\n7\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n\n\
+             \u{2014} rekor.sigstore.dev {sig_old}\n\
+             \u{2014} rekor.sigstore.dev {sig_new}\n",
+        );
+        let extracted = extract_signature_line_sigstore(
+            &checkpoint,
+            "rekor.sigstore.dev",
+            Some(&[0x55, 0x66, 0x77, 0x88]),
+        )
+        .expect("matching keyID line must be found past the rotated-out line");
+        assert_eq!(extracted, sig_new);
+    }
+
+    /// Missing blank-line separator: not a valid C2SP signed-note.
+    #[test]
+    fn extract_signature_line_sigstore_rejects_missing_separator() {
+        let err = extract_signature_line_sigstore(
+            "rekor.sigstore.dev - 42\n7\nAAAA=\n\u{2014} rekor.sigstore.dev abcd",
+            "rekor.sigstore.dev",
+            None,
+        )
+        .expect_err("no blank line ⇒ reject");
+        assert!(err.contains("blank-line separator"), "got: {err}");
+    }
+
+    /// No matching origin line: must error out, not silently return
+    /// some other line's signature.
+    #[test]
+    fn extract_signature_line_sigstore_rejects_no_match() {
+        let raw = {
+            let mut v = vec![0xAA, 0xAA, 0xAA, 0xAA];
+            v.extend_from_slice(&[0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x02]);
+            v
+        };
+        let sig = base64::engine::general_purpose::STANDARD.encode(raw);
+        let checkpoint = format!(
+            "rekor.sigstore.dev - 42\n7\nAAAA=\n\n\u{2014} witness.example.com {sig}\n",
+        );
+        let err = extract_signature_line_sigstore(
+            &checkpoint,
+            "rekor.sigstore.dev",
+            None,
+        )
+        .expect_err("no matching origin ⇒ reject");
+        assert!(err.contains("no signature line"), "got: {err}");
     }
 
     /// Default trusted roster carries exactly the two logs V1.6 ships
