@@ -158,6 +158,44 @@ export const AnchorBatchSchema = z
   .strict();
 
 /**
+ * V1.9: `atlas-signer derive-key` stdout shape. Trust-boundary check
+ * for the only path where a per-tenant secret crosses out of the
+ * signer (used in ceremonies — manual `sign --secret-stdin` drives
+ * and rotation tooling). Routine signing uses
+ * `sign --derive-from-workspace` and never produces this shape.
+ *
+ * `kid` must start with `atlas-anchor:` — verifier-side strict mode
+ * rejects every other prefix, so allowing one through here would
+ * silently break every per-tenant trace it produced.
+ */
+export const PerTenantKidSchema = z
+  .string()
+  .min("atlas-anchor:".length + 1, "expected an `atlas-anchor:{workspace}` kid")
+  .startsWith("atlas-anchor:", "kid must start with `atlas-anchor:`");
+
+export const DerivedIdentitySchema = z
+  .object({
+    kid: PerTenantKidSchema,
+    pubkey_b64url: Base64UrlNoPad,
+    secret_hex: Hex64,
+  })
+  .strict();
+
+/**
+ * V1.9: `atlas-signer derive-pubkey` stdout shape. The hot-path
+ * complement to `DerivedIdentitySchema` — the secret intentionally
+ * never leaves the signer process, so the wire format omits it. The
+ * MCP server uses this to assemble per-workspace `PubkeyBundle`s
+ * without ever materialising the workspace's signing key in TS heap.
+ */
+export const DerivedPubkeySchema = z
+  .object({
+    kid: PerTenantKidSchema,
+    pubkey_b64url: Base64UrlNoPad,
+  })
+  .strict();
+
+/**
  * V1.7 anchor-chain wire-format. Mirrors `AnchorChain` in
  * `crates/atlas-trust-core/src/trace_format.rs`.
  *

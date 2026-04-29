@@ -25,6 +25,8 @@ import {
   AnchorChainSchema,
   AnchorEntryArraySchema,
   AtlasEventSchema,
+  DerivedIdentitySchema,
+  DerivedPubkeySchema,
 } from "./schema.js";
 import type {
   AnchorChain,
@@ -33,6 +35,21 @@ import type {
   AtlasEvent,
 } from "./types.js";
 
+/**
+ * V1.9: signing-secret source — exactly one of these must be supplied.
+ *
+ * `secretHex`     — legacy SPIFFE kids on the production path. The hex
+ *                   is piped to the signer via stdin (never argv).
+ * `deriveFromWorkspace` — V1.9 per-tenant kid path. The signer derives
+ *                   the secret internally via HKDF and signs without
+ *                   ever emitting it. The TS process never holds the
+ *                   per-tenant secret.
+ *
+ * The shape is a discriminated union so a caller cannot accidentally
+ * pass both — the signer's CLI also enforces mutual exclusion, but
+ * catching it at the type system keeps the failure local rather than
+ * surfacing it as a `code 2` from the child process.
+ */
 export type SignArgs = {
   workspace: string;
   eventId: string;
@@ -40,9 +57,10 @@ export type SignArgs = {
   kid: string;
   parents: string[];
   payload: unknown;
-  /** 32-byte secret as 64-char hex. Passed to the child via stdin. */
-  secretHex: string;
-};
+} & (
+  | { secretHex: string; deriveFromWorkspace?: never }
+  | { deriveFromWorkspace: string; secretHex?: never }
+);
 
 export class SignerError extends Error {
   constructor(message: string, readonly stderr?: string) {
@@ -54,7 +72,7 @@ export class SignerError extends Error {
 export async function signEvent(args: SignArgs): Promise<AtlasEvent> {
   const bin = resolveOrThrow();
 
-  const argv = [
+  const baseArgv = [
     "sign",
     "--workspace", args.workspace,
     "--event-id", args.eventId,
@@ -62,10 +80,20 @@ export async function signEvent(args: SignArgs): Promise<AtlasEvent> {
     "--kid", args.kid,
     "--parents", args.parents.join(","),
     "--payload", JSON.stringify(args.payload),
-    "--secret-stdin",
   ];
 
-  const { stdout, stderr, code } = await runProcess(bin, argv, args.secretHex);
+  // V1.9: dispatch by secret-source mode. `deriveFromWorkspace` is the
+  // hot path for per-tenant kids — the signer derives internally via
+  // HKDF and the secret never crosses this subprocess boundary.
+  // `secretHex` is the legacy SPIFFE-kid path; the hex is piped via
+  // stdin (never argv) to keep it out of the OS process listing.
+  const isDerive = "deriveFromWorkspace" in args && args.deriveFromWorkspace !== undefined;
+  const argv = isDerive
+    ? [...baseArgv, "--derive-from-workspace", args.deriveFromWorkspace as string]
+    : [...baseArgv, "--secret-stdin"];
+  const stdin = isDerive ? undefined : (args.secretHex as string);
+
+  const { stdout, stderr, code } = await runProcess(bin, argv, stdin);
 
   if (code !== 0) {
     throw new SignerError(
@@ -237,6 +265,110 @@ export async function anchorViaSigner(
     );
   }
   return validated.data as AnchorEntry[];
+}
+
+/**
+ * V1.9: derive a workspace's per-tenant Ed25519 identity by shelling
+ * out to `atlas-signer derive-key --workspace <ws>`.
+ *
+ * The signer owns the master seed and the HKDF-SHA256 derivation rule
+ * (`info = "atlas-anchor-v1:" + workspace_id`). This call returns the
+ * full triple (`kid`, `pubkey_b64url`, `secret_hex`) — the secret DOES
+ * cross the subprocess boundary on this path. Use only in ceremonies
+ * (rotation, key inspection) where a TS-side caller genuinely needs
+ * the derived secret. Routine event signing should use
+ * `signEvent({ deriveFromWorkspace })`, which routes through
+ * `sign --derive-from-workspace` and keeps the secret inside the
+ * signer process.
+ *
+ * Bundle assembly should use `derivePubkeyViaSigner` — the secret is
+ * not needed to populate `PubkeyBundle.keys`, so the public-only path
+ * is strictly preferable.
+ */
+export type DerivedIdentity = {
+  kid: string;
+  pubkey_b64url: string;
+  secret_hex: string;
+};
+
+export async function deriveKeyViaSigner(workspaceId: string): Promise<DerivedIdentity> {
+  const bin = resolveOrThrow();
+  const { stdout, stderr, code } = await runProcess(
+    bin,
+    ["derive-key", "--workspace", workspaceId],
+  );
+  if (code !== 0) {
+    throw new SignerError(
+      `atlas-signer derive-key exited with code ${code}: ${stderr.trim() || "(no stderr)"}`,
+      stderr,
+    );
+  }
+  let parsed: unknown;
+  try {
+    // Consistent with the rest of the signer-stdout boundary: route
+    // through the lossless parser so a future field that grows past
+    // safe-integer range cannot silently truncate here.
+    parsed = parseAnchorJson(stdout);
+  } catch (e) {
+    throw new SignerError(
+      `atlas-signer derive-key produced non-JSON output: ${(e as Error).message}`,
+      stdout,
+    );
+  }
+  const validated = DerivedIdentitySchema.safeParse(parsed);
+  if (!validated.success) {
+    throw new SignerError(
+      `atlas-signer derive-key output failed schema validation: ${validated.error.message}`,
+      stdout,
+    );
+  }
+  return validated.data as DerivedIdentity;
+}
+
+/**
+ * V1.9: derive a workspace's per-tenant kid + pubkey by shelling out
+ * to `atlas-signer derive-pubkey --workspace <ws>`. The secret never
+ * leaves the signer process on this path — the wire format omits it.
+ *
+ * The MCP server uses this to assemble per-workspace `PubkeyBundle`s
+ * without ever materialising the workspace's signing key in TS heap.
+ * Compared to `deriveKeyViaSigner`, this is the strictly safer path
+ * for any caller that does not actually need the secret.
+ */
+export type DerivedPubkey = {
+  kid: string;
+  pubkey_b64url: string;
+};
+
+export async function derivePubkeyViaSigner(workspaceId: string): Promise<DerivedPubkey> {
+  const bin = resolveOrThrow();
+  const { stdout, stderr, code } = await runProcess(
+    bin,
+    ["derive-pubkey", "--workspace", workspaceId],
+  );
+  if (code !== 0) {
+    throw new SignerError(
+      `atlas-signer derive-pubkey exited with code ${code}: ${stderr.trim() || "(no stderr)"}`,
+      stderr,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = parseAnchorJson(stdout);
+  } catch (e) {
+    throw new SignerError(
+      `atlas-signer derive-pubkey produced non-JSON output: ${(e as Error).message}`,
+      stdout,
+    );
+  }
+  const validated = DerivedPubkeySchema.safeParse(parsed);
+  if (!validated.success) {
+    throw new SignerError(
+      `atlas-signer derive-pubkey output failed schema validation: ${validated.error.message}`,
+      stdout,
+    );
+  }
+  return validated.data as DerivedPubkey;
 }
 
 /**

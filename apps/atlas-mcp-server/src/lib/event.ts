@@ -19,7 +19,7 @@
  * is `withWorkspaceLock` and is the only place to change.
  */
 
-import { identityForKid } from "./keys.js";
+import { resolveIdentityForKid } from "./keys.js";
 import { signEvent, SignerError } from "./signer.js";
 import { appendEvent, computeTips, readAllEvents } from "./storage.js";
 import type { AtlasEvent } from "./types.js";
@@ -71,10 +71,12 @@ async function withWorkspaceLock<T>(workspaceId: string, fn: () => Promise<T>): 
  * Common write path used by every signed-event MCP tool.
  */
 export async function writeSignedEvent(args: WriteEventArgs): Promise<WriteEventResult> {
-  const identity = identityForKid(args.kid);
+  const identity = await resolveIdentityForKid(args.kid);
   if (!identity) {
     throw new Error(
-      `unknown kid: ${args.kid}. V1 dev keys: see src/lib/keys.ts (agent / human / anchor).`,
+      `unknown kid: ${args.kid}. Legacy V1 dev kids live in src/lib/keys.ts ` +
+        `(agent / human / anchor); per-tenant kids must match the shape ` +
+        `'atlas-anchor:{workspace_id}'.`,
     );
   }
 
@@ -83,17 +85,24 @@ export async function writeSignedEvent(args: WriteEventArgs): Promise<WriteEvent
     const ts = args.ts ?? nowIso();
     const eventId = ulid();
 
+    // V1.9: dispatch by identity.secretSource. Legacy SPIFFE kids pipe
+    // their hex secret through stdin; per-tenant kids let the signer
+    // derive internally so no secret crosses this process boundary.
+    const baseSign = {
+      workspace: args.workspaceId,
+      eventId,
+      ts,
+      kid: args.kid,
+      parents,
+      payload: args.payload,
+    } as const;
+
     let event: AtlasEvent;
     try {
-      event = await signEvent({
-        workspace: args.workspaceId,
-        eventId,
-        ts,
-        kid: args.kid,
-        parents,
-        payload: args.payload,
-        secretHex: identity.secretHex,
-      });
+      event =
+        identity.secretSource === "hex"
+          ? await signEvent({ ...baseSign, secretHex: identity.secretHex })
+          : await signEvent({ ...baseSign, deriveFromWorkspace: identity.workspaceId });
     } catch (e) {
       if (e instanceof SignerError) throw e;
       throw new Error(`signer failed: ${(e as Error).message}`);

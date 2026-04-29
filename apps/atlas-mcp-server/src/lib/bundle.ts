@@ -17,7 +17,7 @@
 import { promises as fs } from "node:fs";
 import { basename } from "node:path";
 import { parseAnchorJson } from "./anchor-json.js";
-import { buildDevBundle } from "./keys.js";
+import { buildBundleForWorkspace } from "./keys.js";
 import { anchorChainPath, anchorsPath } from "./paths.js";
 import { AnchorEntryArraySchema } from "./schema.js";
 import { bundleHashViaSigner, chainExportViaSigner } from "./signer.js";
@@ -58,7 +58,12 @@ export type ExportedBundle = {
  */
 export async function exportWorkspaceBundle(workspaceId: string): Promise<ExportedBundle> {
   const events: AtlasEvent[] = await readAllEvents(workspaceId);
-  const bundle = buildDevBundle();
+  // V1.9: bundle pins the legacy kids AND the per-tenant kid for this
+  // workspace, so events signed under either path verify. The bundle
+  // hash therefore varies per workspace — this is intentional: the
+  // verifier recomputes the hash of the bundle the auditor receives,
+  // so a per-workspace shape stays self-consistent end-to-end.
+  const bundle = await buildBundleForWorkspace(workspaceId);
   const pubkeyHash = await bundleHash(bundle);
   const anchors = await readAnchors(workspaceId);
   const anchorChain = await readAnchorChain(workspaceId);

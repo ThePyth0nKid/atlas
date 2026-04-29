@@ -21,12 +21,19 @@ import { join } from "node:path";
 import { stringifyAnchorJson } from "../src/lib/anchor-json.js";
 import { exportWorkspaceBundle } from "../src/lib/bundle.js";
 import { writeSignedEvent } from "../src/lib/event.js";
-import { TEST_IDENTITIES } from "../src/lib/keys.js";
+import { perTenantKidFor, TEST_IDENTITIES } from "../src/lib/keys.js";
 import { resolveSignerBinary, workspaceDir } from "../src/lib/paths.js";
 import { repoRoot } from "../src/lib/paths.js";
 import { anchorBundleTool } from "../src/tools/anchor-bundle.js";
 
 const WORKSPACE = "ws-mcp-smoke";
+// V1.9: a second workspace exercises per-tenant key derivation. The
+// HKDF info is "atlas-anchor-v1:" + workspace_id, so two distinct
+// workspace names produce two distinct signing keys — and the first
+// workspace's bundle hash differs from the second's. The smoke runs
+// the full pipeline against both to prove tenant isolation in the
+// happy path.
+const WORKSPACE_PT = "ws-mcp-smoke-alice";
 
 function log(step: string, msg: string): void {
   process.stdout.write(`[smoke] ${step.padEnd(14)} ${msg}\n`);
@@ -158,6 +165,74 @@ async function main(): Promise<void> {
   if (!/anchor\(s\) verified against pinned log keys/.test(r.stdout)) {
     fail(`verifier did not report anchor evidence. stdout above.`);
   }
+
+  // 7. V1.9 per-tenant smoke. Same shape as steps 2–6 but driven by a
+  //    per-tenant kid (`atlas-anchor:{WORKSPACE_PT}`). Proves that the
+  //    HKDF derivation pipeline (atlas-signer derive-key → MCP keys.ts
+  //    → signEvent → exportWorkspaceBundle → atlas-verify-cli) is
+  //    end-to-end consistent and that tenant isolation holds: the bundle
+  //    hash for ws-mcp-smoke-alice differs from ws-mcp-smoke's, even
+  //    though both share the same legacy three-kid block.
+  log("v1.9", `per-tenant kid path for workspace=${WORKSPACE_PT}`);
+  const ptDir = workspaceDir(WORKSPACE_PT);
+  rmSync(ptDir, { recursive: true, force: true });
+  await fs.mkdir(ptDir, { recursive: true });
+  const ptKid = perTenantKidFor(WORKSPACE_PT);
+  log("v1.9-write", `kid=${ptKid}`);
+  const ptEvent = await writeSignedEvent({
+    workspaceId: WORKSPACE_PT,
+    kid: ptKid,
+    payload: {
+      type: "node.create",
+      node: { kind: "dataset", id: "alice-private-corpus", rows: 7 },
+    },
+  });
+  log("v1.9-write", `${ptEvent.event.event_id} hash=${ptEvent.event.event_hash.slice(0, 12)}…`);
+
+  const { trace: ptTrace, bundle: ptBundle } = await exportWorkspaceBundle(WORKSPACE_PT);
+  if (ptTrace.events.length !== 1) {
+    fail(`v1.9: expected 1 event, got ${ptTrace.events.length}`);
+  }
+  if (ptTrace.events[0]?.signature.kid !== ptKid) {
+    fail(`v1.9: event kid mismatch: got ${ptTrace.events[0]?.signature.kid} expected ${ptKid}`);
+  }
+  if (!Object.keys(ptBundle.keys).includes(ptKid)) {
+    fail(`v1.9: per-tenant kid ${ptKid} missing from bundle.keys`);
+  }
+  // Tenant isolation: per-workspace bundles must have different
+  // pubkey_bundle_hash values. (`pubkey_bundle_hash` is recomputed
+  // inside `exportWorkspaceBundle`, so equality here would mean the
+  // per-tenant kid was not actually included in the bundle.)
+  const baselineBundle = await exportWorkspaceBundle(WORKSPACE);
+  if (baselineBundle.trace.pubkey_bundle_hash === ptTrace.pubkey_bundle_hash) {
+    fail(
+      `v1.9: bundle hashes for ${WORKSPACE} and ${WORKSPACE_PT} collided ` +
+        `(${ptTrace.pubkey_bundle_hash}); per-tenant key was not actually injected.`,
+    );
+  }
+  log(
+    "v1.9-iso",
+    `${WORKSPACE} hash=${baselineBundle.trace.pubkey_bundle_hash.slice(0, 12)}… ` +
+      `≠ ${WORKSPACE_PT} hash=${ptTrace.pubkey_bundle_hash.slice(0, 12)}…`,
+  );
+
+  const ptTracePath = join(ptDir, "trace.json");
+  const ptBundlePath = join(ptDir, "bundle.json");
+  await fs.writeFile(ptTracePath, stringifyAnchorJson(ptTrace, 2), "utf8");
+  await fs.writeFile(ptBundlePath, JSON.stringify(ptBundle, null, 2), "utf8");
+  log("v1.9-export", ptTracePath);
+
+  const ptVerify = spawnSync(verifierBin, ["verify-trace", ptTracePath, "-k", ptBundlePath], {
+    encoding: "utf8",
+  });
+  if (ptVerify.error) fail(`v1.9 verifier spawn failed: ${ptVerify.error.message}`);
+  process.stdout.write(ptVerify.stdout);
+  if (ptVerify.stderr) process.stderr.write(ptVerify.stderr);
+  if (ptVerify.status !== 0) fail(`v1.9 verifier exited with status ${ptVerify.status}`);
+  if (!/✓ VALID|VALID/.test(ptVerify.stdout)) {
+    fail("v1.9 verifier did not report VALID");
+  }
+  log("v1.9-done", `✓ per-tenant trace verifies for ${WORKSPACE_PT}`);
 
   log("done", "✓ end-to-end smoke OK — MCP write+anchor path verifies as VALID");
 }
