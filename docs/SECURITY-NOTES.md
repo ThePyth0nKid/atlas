@@ -1,6 +1,6 @@
-# Atlas Verifier — Defended Attack Surface (V1.7)
+# Atlas Verifier — Defended Attack Surface (V1.9)
 
-This document describes what the V1.7 verifier (`atlas-trust-core`, exposed as
+This document describes what the V1.9 verifier (`atlas-trust-core`, exposed as
 `atlas-verify-cli` and `atlas-verify-wasm`) actually defends against. It is
 written for auditors and security reviewers who want to know "what does this
 verifier protect, and where are the limits" without reading Rust.
@@ -295,13 +295,120 @@ does NOT imply them:
 - **SPIFFE attestation.** `kid` strings of the form `spiffe://...` are
   treated as opaque keys-of-id. SVID validation against an in-domain
   trust bundle is not implemented.
-- **Per-tenant key isolation.** The Atlas anchoring key is derived from
-  a single deterministic seed. V1.8 will seal keys per-tenant in a
-  TPM/HSM-backed enclave.
+- **Master-seed compromise still compromises every workspace.** V1.9
+  ships per-tenant *workspace* keys derived from a single master seed
+  (see "Per-tenant Atlas anchoring keys (V1.9)" below); this removes
+  the single-key blast radius for *workspace* keys, but the master seed
+  itself is the new single point of failure. V1.10 closes this with
+  HSM/TPM sealing of the master seed.
+- **`DEV_MASTER_SEED` is a source-committed constant.** The dev master
+  seed in `crates/atlas-signer/src/keys.rs` is fixed across builds for
+  reproducibility. Any production deployment MUST set
+  `ATLAS_PRODUCTION=1` (which causes the per-tenant subcommands to
+  refuse to run with the dev seed) and either supply a sealed-seed
+  loader (V1.10) or otherwise replace `DEV_MASTER_SEED` before going
+  live.
 - **Side-channel attacks beyond hash equality.** Constant-time compare
   is wired on hash and bundle-hash equality. Other code paths (CBOR
   encoding, JSON parsing, Merkle proof recomputation) make standard
   branching choices.
+
+---
+
+## Per-tenant Atlas anchoring keys (V1.9 — in scope)
+
+V1.9 ships per-tenant Atlas anchoring keys: each workspace's events are
+signed by an Ed25519 keypair derived from a single master seed via
+HKDF-SHA256, with the workspace_id bound into the HKDF `info`
+parameter. The verifier consumes the resulting public key from the
+`PubkeyBundle` under a kid of shape `atlas-anchor:{workspace_id}` and
+makes no network call.
+
+- **Per-workspace key separation:** `atlas_trust_core::per_tenant`
+  pins the kid prefix at `"atlas-anchor:"` and exposes
+  `per_tenant_kid_for(workspace_id)` and `parse_per_tenant_kid(kid)` as
+  the only kid-shape APIs. The HKDF *derivation* itself lives in
+  `atlas-signer::keys` (`derive_workspace_signing_key`) — the verifier
+  never sees the master seed and cannot re-derive any workspace's
+  secret. Compromise of one workspace's signing key does not compromise
+  others (HKDF is one-way per `info` string).
+- **Domain-separation prefix is the trust boundary:** The HKDF `info`
+  parameter is `"atlas-anchor-v1:" || workspace_id`. The
+  `-v1` is a future-rotation tag — bumping it produces a disjoint key
+  set without re-using the same `(ikm, info)` pair. The
+  *issuer-side* HKDF info-prefix (`atlas-anchor-v1:`) is intentionally
+  distinct from the *verifier-side* kid prefix (`atlas-anchor:`); they
+  serve different purposes and sit on different sides of the trust
+  boundary.
+- **Pinned pubkey goldens:** `crates/atlas-signer/src/keys.rs::workspace_pubkeys_are_pinned`
+  pins the base64url-no-pad public key for two workspace_ids
+  (`alice`, `ws-mcp-default`) derived from `DEV_MASTER_SEED`. Any
+  change to the master seed, the HKDF info-prefix, the curve, or the
+  encoder trips this test before silently rotating production keys.
+  Pinning two distinct ids defends against a degenerate change that
+  happened to leave one workspace stable but broke others.
+- **Strict mode (`VerifyOptions::require_per_tenant_keys`):** A
+  V1.9-issued bundle should verify under strict mode, which demands
+  every event's `kid` equal `format!("atlas-anchor:{trace.workspace_id}")`.
+  Mixed legacy + per-tenant kids are rejected. Lenient mode (the
+  default for V1.5–V1.8 backwards compatibility) accepts both.
+  **Caveat — lenient is not a free win:** an attacker who can downgrade
+  a workspace's bundle to legacy form bypasses per-tenant isolation.
+  Strict mode is the real security boundary for V1.9-issued data;
+  document the gap.
+- **Production gate:** All V1.9 per-tenant subcommands
+  (`derive-key`, `derive-pubkey`, `rotate-pubkey-bundle`, and
+  `sign --derive-from-workspace`) call `keys::production_gate()`,
+  which refuses to run when `ATLAS_PRODUCTION=1` is set. V1.9 has no
+  sealed-seed loader; the gate ensures a production environment cannot
+  silently sign with the source-committed dev master seed. V1.10 will
+  replace the gate with an `ATLAS_MASTER_SEED_PATH` loader.
+- **Workspace_id ingress validation:** `keys::validate_workspace_id`
+  rejects empty strings, non-ASCII-printable bytes (control chars,
+  Unicode confusables), and the `:` delimiter. The verifier itself
+  (`parse_per_tenant_kid`) is intentionally lenient — the trust
+  property holds for any UTF-8 string via byte-exact kid comparison —
+  so the policy lives in one place on the issuer side, where ambiguous
+  IDs become operator footguns rather than verifier bypasses.
+- **Signer-internal derivation (no secret in Node memory):** The MCP
+  hot path uses `atlas-signer sign --derive-from-workspace <ws>`,
+  which derives the per-tenant secret inside the signer process and
+  signs without ever emitting it. The TS server never holds the
+  per-tenant signing key. Bundle assembly uses `atlas-signer
+  derive-pubkey` (public key only, secret never crosses the subprocess
+  boundary). The `derive-key` subcommand — which DOES emit the secret —
+  is reserved for ceremonies (rotation, key inspection) and gated by
+  the same production gate.
+- **Adversary tests:** 8 adversary cases in
+  `crates/atlas-trust-core/tests/per_tenant_keys_adversary.rs`:
+  per-tenant kid passes strict + lenient; legacy kid rejected in
+  strict; cross-workspace forgery rejected (bob's events submitted as
+  alice's); per-tenant-with-wrong-workspace rejected even when the
+  signature itself is structurally valid; mixed legacy + per-tenant
+  rejected in strict; per-tenant evidence row absent in lenient.
+
+### Residual risks (V1.9)
+
+- **Master-seed exfiltration is full compromise.** HKDF is one-way
+  per-`info`, so leaking workspace A's derived secret doesn't help an
+  attacker forge for workspace B. Leaking the *master seed* derives
+  every workspace's key — full compromise. V1.10 closes this with
+  HSM/TPM sealing.
+- **Lenient-mode downgrade.** A V1.9 verifier in lenient mode accepts
+  both legacy and per-tenant bundles. An attacker who can downgrade a
+  workspace's bundle to legacy form bypasses per-tenant isolation.
+  Strict mode (`require_per_tenant_keys = true`) is the real V1.9
+  security boundary.
+- **Bundle migration during rotation is not transactional.** The
+  `rotate-pubkey-bundle` subcommand reads from stdin and writes to
+  stdout — atomic file replace and inter-operator concurrency are the
+  caller's responsibility. See `docs/OPERATOR-RUNBOOK.md` for the
+  ceremony.
+- **`DEV_MASTER_SEED` ships with the source.** Until V1.10 supplies a
+  sealed-seed loader, any production deployment is responsible for
+  replacing the constant before building. The production gate
+  (`ATLAS_PRODUCTION=1`) blocks accidental use of the dev seed in
+  production but does not by itself supply a real one.
 
 ---
 

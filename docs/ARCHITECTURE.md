@@ -1,4 +1,4 @@
-# Atlas — System Architecture (V1.7)
+# Atlas — System Architecture (V1.9)
 
 This document is the system-design reference for Atlas. It describes the
 trust property the system exists to enforce, the data model that carries
@@ -6,8 +6,11 @@ it, the components that produce and consume that data, and the explicit
 boundaries between V1 (deterministic signing + verification), V1.5
 (offline-complete anchoring via mock-Rekor issuer + pinned log pubkey —
 shipped), V1.6 (live Sigstore Rekor v1 submission — shipped), V1.7
-(anchor-chain tip-rotation + Sigstore shard roster — shipped), and V2
-(full COSE_Sign1, Cedar policy enforcement, SPIFFE attestation).
+(anchor-chain tip-rotation + Sigstore shard roster — shipped), V1.8
+(precision-preserving anchor JSON pipeline + Sigstore-deferred
+coverage carve-out — shipped), V1.9 (per-tenant Atlas anchoring keys
+via HKDF-SHA256 — shipped), and V2 (full COSE_Sign1, Cedar policy
+enforcement, SPIFFE attestation).
 
 It is written for three audiences:
 
@@ -361,7 +364,72 @@ time T against a pinned log pubkey. V1.6 adds the option of live Sigstore
 Rekor v1 submission to give production audit trails public visibility while
 keeping verification fully offline.
 
-### 7.3 Constant-time hash equality
+### 7.3 Per-tenant anchoring keys (V1.9 — shipped)
+
+V1.5–V1.8 signed every event with one of three globally-shared
+Ed25519 keypairs (agent / human / anchor). A compromise of any of
+those three keys forged events for *every* workspace at once. V1.9
+removes that single-key blast radius for *workspace* keys: the
+issuer derives a per-workspace Ed25519 keypair from a single master
+seed via HKDF-SHA256 (RFC 5869), with the workspace_id bound into
+the HKDF `info` parameter:
+
+```text
+info       = "atlas-anchor-v1:" || workspace_id
+key_bytes  = HKDF-SHA256(salt = None, ikm = master_seed, info, len = 32)
+signing    = ed25519_dalek::SigningKey::from_bytes(&key_bytes)
+```
+
+Each workspace's public key appears in `PubkeyBundle.keys` under a
+kid of shape `atlas-anchor:{workspace_id}`. The verifier consumes
+the public key from the bundle and never sees the master seed —
+re-derivation is an issuer-side capability only. Compromise of one
+workspace's signing key does not compromise other workspaces (HKDF
+is one-way per-info).
+
+The kid prefix is pinned in `atlas_trust_core::per_tenant::PER_TENANT_KID_PREFIX`
+(verifier-side) and mirrored in `apps/atlas-mcp-server/src/lib/keys.ts::PER_TENANT_KID_PREFIX`
+(issuer-side). The issuer-side HKDF info-prefix (`atlas-anchor-v1:`)
+is intentionally distinct from the verifier-side kid prefix
+(`atlas-anchor:`) to keep the cryptographic-domain tag decoupled from
+the wire-format identifier.
+
+**Strict mode.** `VerifyOptions::require_per_tenant_keys` (default
+false for backwards compatibility) demands every event's `kid` equal
+`format!("atlas-anchor:{trace.workspace_id}")`. Mixed legacy +
+per-tenant kids are rejected. Lenient mode accepts both. V1.5–V1.8
+bundles continue to verify in lenient mode. Strict mode is the V1.9
+security boundary.
+
+**Production gate.** All V1.9 per-tenant subcommands
+(`derive-key`, `derive-pubkey`, `rotate-pubkey-bundle`, and
+`sign --derive-from-workspace`) refuse to run when
+`ATLAS_PRODUCTION=1` is set. The `DEV_MASTER_SEED` is a
+source-committed dev constant; V1.10 closes this with HSM/TPM
+sealing of the master seed.
+
+**Signer-internal derivation.** The MCP hot path uses
+`atlas-signer sign --derive-from-workspace <ws>`, which derives the
+per-tenant secret inside the signer process and signs without ever
+emitting it. Bundle assembly uses `atlas-signer derive-pubkey`
+(public key only). The TS server never holds the per-tenant signing
+key — there is no path through which a per-tenant secret enters Node
+heap during normal operation. The `derive-key` subcommand (which
+emits the secret) is reserved for ceremonies and gated by the same
+production gate.
+
+**Bundle rotation.** `atlas-signer rotate-pubkey-bundle --workspace <ws>`
+adds the per-tenant kid + pubkey to a `PubkeyBundle` read from stdin
+and emits the updated bundle on stdout. Idempotent: a re-run on an
+already-rotated bundle returns the bundle unchanged (existing pubkey
+is asserted to match the derivation; mismatch refuses to overwrite).
+The legacy SPIFFE kids are preserved so old traces continue to
+verify in lenient mode. See `docs/OPERATOR-RUNBOOK.md` for the
+ceremony, including atomic-replace and inter-operator concurrency
+responsibilities (which sit on the operator side — the signer reads
+stdin and writes stdout).
+
+### 7.4 Constant-time hash equality
 
 Both `pubkey_bundle_hash` and per-event `event_hash` comparisons go
 through `crate::ct::ct_eq_str`, which is `subtle::ConstantTimeEq` on
@@ -687,7 +755,7 @@ Headline:
 
 ---
 
-## 10. V1 / V1.5 / V1.6 / V2 boundaries
+## 10. V1 / V1.5 / V1.6 / V1.7 / V1.8 / V1.9 / V2 boundaries
 
 ### V1 — what ships now
 
@@ -766,6 +834,55 @@ Headline:
   `3_904_496_407_287_907_110`, `2_605_736_670_972_794_746`. Verifier accepts
   membership; same pubkey across shards, no cross-shard replay (C2SP origin
   embeds tree_id). Issuer still posts to active shard only.
+
+### V1.9 — per-tenant Atlas anchoring keys (shipped)
+
+- **HKDF-SHA256 derivation:** Per-workspace Ed25519 keypair derived from
+  a single master seed via `HKDF-SHA256(salt=None, ikm=master_seed,
+  info="atlas-anchor-v1:" || workspace_id, len=32)`. Compromise of one
+  workspace's signing key does not compromise other workspaces — HKDF
+  is one-way per-info.
+- **Kid shape:** Per-tenant keys appear in `PubkeyBundle.keys` under
+  `atlas-anchor:{workspace_id}`. Prefix pinned in
+  `atlas_trust_core::per_tenant::PER_TENANT_KID_PREFIX` (verifier-side)
+  and mirrored in `apps/atlas-mcp-server/src/lib/keys.ts` (issuer-side).
+  Verifier-side kid prefix (`atlas-anchor:`) is intentionally distinct
+  from the issuer-side HKDF info-prefix (`atlas-anchor-v1:`) so the
+  cryptographic-domain tag stays decoupled from the wire-format
+  identifier.
+- **Strict mode:** `VerifyOptions::require_per_tenant_keys` (default
+  `false` for backwards compatibility) demands every event's `kid` equal
+  `format!("atlas-anchor:{trace.workspace_id}")`. Mixed legacy +
+  per-tenant kids are rejected. V1.5–V1.8 bundles continue to verify in
+  lenient mode.
+- **Production gate:** All V1.9 per-tenant subcommands (`derive-key`,
+  `derive-pubkey`, `rotate-pubkey-bundle`, `sign --derive-from-workspace`)
+  refuse to run when `ATLAS_PRODUCTION=1` is set. The `DEV_MASTER_SEED`
+  is a source-committed dev constant; V1.10 closes this with HSM/TPM
+  sealing.
+- **Signer-internal derivation:** MCP hot path uses
+  `atlas-signer sign --derive-from-workspace <ws>` — secret material is
+  derived inside the signer process and never crosses the TS↔Rust
+  boundary. Bundle assembly uses `atlas-signer derive-pubkey` (public
+  key only). The `derive-key` subcommand (which emits the secret) is
+  ceremony-only and gated by the production gate.
+- **Rotate-pubkey-bundle ceremony:** `atlas-signer rotate-pubkey-bundle
+  --workspace <ws>` reads a `PubkeyBundle` from stdin and emits the
+  bundle with the per-tenant kid + pubkey added. Idempotent: re-runs
+  on an already-rotated bundle return the bundle unchanged (existing
+  pubkey asserted to match the derivation; mismatch refuses to
+  overwrite). Atomic-replace and inter-operator concurrency are
+  operator-side responsibilities — see `docs/OPERATOR-RUNBOOK.md`.
+- **Workspace-id ingress validation:** `atlas-signer::keys::validate_workspace_id`
+  restricts workspace_ids to ASCII printable bytes (0x21..0x7E) and
+  forbids the `:` delimiter character. The verifier remains lenient by
+  design (the trust property holds for any UTF-8 string via byte-equal
+  kid compare) — hygiene lives at the issuer ingress where ambiguous
+  IDs become observability holes.
+- **Pinned pubkey goldens:** `workspace_pubkeys_are_pinned` test pins
+  the derived public keys for two fixed workspace_ids against the
+  `DEV_MASTER_SEED`, so any unintended change to the HKDF info-prefix
+  or master seed trips CI before customer impact.
 
 ### V2 — full COSE + policy + SPIFFE
 

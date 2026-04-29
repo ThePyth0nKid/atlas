@@ -110,18 +110,32 @@ workspace's `events.jsonl`.
 
 ---
 
-## V1.5 / V1.6 / V1.7 boundaries
+## V1.5 / V1.6 / V1.7 / V1.8 / V1.9 boundaries
 
-- **Signing keys are deterministic test keys** (matching the bank-demo
-  keys in `crates/atlas-signer/examples/seed_bank_demo.rs`). The MCP
-  server passes them to the signer via stdin (`--secret-stdin`); the
-  legacy `--secret-hex` argv flag remains in the binary for the
-  bank-demo example only and emits a deprecation warning. V2 ships
-  TPM/HSM-sealed keys; both flags are removed at the build level.
+- **Per-tenant Atlas anchoring keys (V1.9).** Each workspace gets its
+  own Ed25519 signing key derived from a single master seed via
+  HKDF-SHA256 (info=`"atlas-anchor-v1:" || workspace_id`). Public keys
+  appear in `PubkeyBundle.keys` under kid shape
+  `atlas-anchor:{workspace_id}`. The MCP hot path uses
+  `atlas-signer sign --derive-from-workspace <ws>` so per-tenant
+  secrets never cross the TS↔Rust boundary; bundle assembly uses
+  `atlas-signer derive-pubkey` (public key only). V1.5–V1.8 SPIFFE
+  kids continue to verify in lenient mode; strict mode
+  (`require_per_tenant_keys`) demands per-tenant kids matching the
+  trace's `workspace_id`. The dev `DEV_MASTER_SEED` is gated behind
+  `ATLAS_PRODUCTION=1` (refuses derive-key, derive-pubkey,
+  rotate-pubkey-bundle, and `sign --derive-from-workspace` when set).
+  V1.10 closes this with HSM/TPM sealing of the master seed. Bundle
+  rotation: `atlas-signer rotate-pubkey-bundle --workspace <ws>` —
+  see [../../docs/OPERATOR-RUNBOOK.md](../../docs/OPERATOR-RUNBOOK.md).
+- **Signing keys (V1 legacy).** The three globally-shared SPIFFE
+  keys (agent / human / anchor) in `src/lib/keys.ts` remain present
+  for V1.5–V1.8 backwards compatibility and the bank-demo example.
+  Their hex secrets are passed to the signer via stdin
+  (`--secret-stdin`); the `--secret-hex` argv flag emits a
+  deprecation warning.
 - **Persistence is JSONL on local disk.** V2 ships pluggable storage
   (Postgres, S3, FalkorDB).
-- **No multi-tenant key isolation in V1.5.** V2 ships per-tenant key
-  policies and bundle-rotation workers.
 - **Anchoring (V1.5 mock-Rekor, V1.6 live Sigstore, V1.7 chain extension).**
   `atlas_anchor_bundle` issues anchors via the in-process mock-Rekor by
   default (V1.5, no network call). Setting the `rekor_url` field or
