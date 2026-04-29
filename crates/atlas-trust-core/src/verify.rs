@@ -13,6 +13,7 @@ use crate::cose::build_signing_input;
 use crate::ed25519::verify_signature;
 use crate::error::TrustResult;
 use crate::hashchain::{check_event_hashes, check_parent_links, compute_tips};
+use crate::per_tenant::per_tenant_kid_for;
 use crate::pubkey_bundle::PubkeyBundle;
 use crate::trace_format::{AnchorEntry, AnchorKind, AtlasTrace};
 
@@ -24,6 +25,9 @@ use crate::trace_format::{AnchorEntry, AnchorKind, AtlasTrace};
 /// mode to require every DAG-tip to be anchored. V1.7 adds the analogous
 /// chain-strict flag: lenient by default (V1.5/V1.6 traces with no
 /// `anchor_chain` continue to verify), strict mode requires the chain.
+/// V1.9 adds per-tenant-keys strictness: legacy SPIFFE kids pass lenient,
+/// strict mode requires every event to be signed by a workspace-derived
+/// kid of shape `atlas-anchor:{workspace_id}`.
 #[derive(Debug, Clone, Default)]
 pub struct VerifyOptions {
     /// If true, every `trace.dag_tips` entry must have a matching
@@ -36,6 +40,24 @@ pub struct VerifyOptions {
     /// every entry in `trace.anchors`. Defaults to false so V1.5/V1.6
     /// bundles continue to verify under V1.7 builds.
     pub require_anchor_chain: bool,
+
+    /// V1.9: if true, every `AtlasEvent.signature.kid` must equal
+    /// `format!("atlas-anchor:{}", trace.workspace_id)` — i.e. each
+    /// event must be signed by the workspace-specific HKDF-derived
+    /// keypair. Legacy SPIFFE kids (`spiffe://atlas/agent/...`,
+    /// `spiffe://atlas/human/...`, `spiffe://atlas/system/...`) fail
+    /// this check.
+    ///
+    /// Defaults to false so V1.5–V1.8 bundles continue to verify under
+    /// V1.9 builds. Auditors who require post-V1.9 single-tenant-key-
+    /// blast-radius isolation enable this flag.
+    ///
+    /// Trust-trade-off note: lenient mode accepts BOTH legacy and
+    /// per-tenant kids. An attacker who can downgrade a workspace's
+    /// bundle from per-tenant back to legacy form bypasses per-tenant
+    /// isolation. Strict mode is the real security boundary; document
+    /// the gap when communicating about V1.9 to auditors.
+    pub require_per_tenant_keys: bool,
 }
 
 /// Full verification result, suitable for showing in a UI / CLI.
@@ -275,6 +297,65 @@ pub fn verify_trace_with(
             ok: false,
             detail: msg,
         });
+    }
+
+    // 6b. Per-tenant key kid coverage (V1.9, strict-mode only).
+    //
+    // Lenient mode (default): legacy SPIFFE kids and per-tenant kids
+    // both pass — the upstream `event-signatures` check has already
+    // verified each signature against whatever pubkey the bundle
+    // provides for that kid. The trust property holds.
+    //
+    // Strict mode (`opts.require_per_tenant_keys = true`): every
+    // event's `signature.kid` must equal the per-tenant kid for the
+    // trace's `workspace_id`, i.e. `atlas-anchor:{workspace_id}`. Any
+    // legacy kid fails. This is the V1.9 single-key-blast-radius
+    // boundary — an auditor who insists on per-tenant isolation gets a
+    // hard failure on V1.5–V1.8 bundles or any V1.9 trace that smuggled
+    // a legacy kid through.
+    //
+    // Note we do NOT require all events to share the same per-tenant
+    // kid — the per-event kid check is sufficient. Every event must
+    // match the workspace's expected kid; mixing kids from different
+    // workspaces in one trace is therefore impossible under strict
+    // mode (the kids that don't match `trace.workspace_id` fail).
+    if opts.require_per_tenant_keys {
+        let expected_kid = per_tenant_kid_for(&trace.workspace_id);
+        let mismatched: Vec<&str> = trace
+            .events
+            .iter()
+            .filter_map(|ev| {
+                if ev.signature.kid == expected_kid {
+                    None
+                } else {
+                    Some(ev.event_id.as_str())
+                }
+            })
+            .collect();
+        if mismatched.is_empty() {
+            evidence.push(VerifyEvidence {
+                check: "per-tenant-keys".to_string(),
+                ok: true,
+                detail: format!(
+                    "all {} event(s) signed by per-tenant kid '{}'",
+                    trace.events.len(),
+                    expected_kid,
+                ),
+            });
+        } else {
+            let msg = format!(
+                "strict mode: {} event(s) not signed by per-tenant kid '{}': {:?}",
+                mismatched.len(),
+                expected_kid,
+                mismatched,
+            );
+            errors.push(msg.clone());
+            evidence.push(VerifyEvidence {
+                check: "per-tenant-keys".to_string(),
+                ok: false,
+                detail: msg,
+            });
+        }
     }
 
     // 7. Anchor check (V1.5).

@@ -15,6 +15,7 @@ pub mod ed25519;
 pub mod cose;
 pub mod ct;
 pub mod hashchain;
+pub mod per_tenant;
 pub mod pubkey_bundle;
 pub mod trace_format;
 pub mod verify;
@@ -28,6 +29,7 @@ pub use trace_format::{
 pub use verify::{VerifyOutcome, VerifyEvidence, VerifyOptions, verify_trace, verify_trace_with};
 pub use pubkey_bundle::PubkeyBundle;
 pub use anchor::{chain_head_for, ANCHOR_CHAIN_DOMAIN};
+pub use per_tenant::{parse_per_tenant_kid, per_tenant_kid_for, PER_TENANT_KID_PREFIX};
 
 /// Schema version this build of the crate produces and accepts.
 pub const SCHEMA_VERSION: &str = "atlas-trace-v1";
