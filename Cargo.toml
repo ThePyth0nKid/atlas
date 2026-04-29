@@ -25,6 +25,10 @@ blake3 = "1.5"
 # (Rekor signs checkpoints with ECDSA P-256 over RFC 6962 SHA-256 trees).
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "pkcs8", "std"] }
 sha2 = "0.10"
+# HKDF-SHA256 (RFC 5869). V1.9 issuer-side per-tenant Ed25519 derivation
+# from a single master seed. Verifier never imports this — the verifier
+# sees only derived pubkeys via the PubkeyBundle.
+hkdf = "0.12"
 
 # Serde
 serde = { version = "1.0", features = ["derive"] }

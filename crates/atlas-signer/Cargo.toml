@@ -29,6 +29,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Rekor's own signing scheme; verifier-side is unambiguous).
 p256 = { workspace = true }
 sha2 = { workspace = true }
+# V1.9: HKDF-SHA256 for per-tenant Ed25519 workspace-key derivation
+# (info = "atlas-anchor-v1:" + workspace_id). RFC 5869.
+hkdf = { workspace = true }
 
 [dev-dependencies]
 # Mock Rekor server for the integration test of the Sigstore issuer flow.

@@ -1,27 +1,66 @@
 //! `atlas-signer` — server-side event signer + canonical-hash helper.
 //!
-//! Four subcommands:
+//! Subcommands:
 //!
-//!   sign         — Build a canonical signing-input from CLI args, sign with
-//!                  Ed25519, emit a fully-formed `AtlasEvent` JSON on stdout.
+//!   sign                  — Build a canonical signing-input from CLI args,
+//!                           sign with Ed25519, emit a fully-formed
+//!                           `AtlasEvent` JSON on stdout.
 //!
-//!   bundle-hash  — Read a `PubkeyBundle` JSON document on stdin, emit its
-//!                  blake3 deterministic-hash hex on stdout. This is the
-//!                  *single* canonicalisation source for pubkey-bundle hashes
-//!                  — TS and any other client must shell out here rather than
-//!                  re-implement the canonical JSON format.
+//!   bundle-hash           — Read a `PubkeyBundle` JSON document on stdin,
+//!                           emit its blake3 deterministic-hash hex on
+//!                           stdout. The *single* canonicalisation source
+//!                           for pubkey-bundle hashes — TS and any other
+//!                           client must shell out here rather than
+//!                           re-implement the canonical JSON format.
 //!
-//!   anchor       — Read an `AnchorBatchInput` JSON document on stdin, build
-//!                  a Merkle tree, sign the checkpoint with the dev mock-Rekor
-//!                  key, emit `[AnchorEntry]` JSON on stdout. V1.6 swaps the
-//!                  mock issuer for a real Rekor POST behind `--rekor-url`.
+//!   anchor                — Read an `AnchorBatchInput` JSON document on
+//!                           stdin, build a Merkle tree, sign the
+//!                           checkpoint with the dev mock-Rekor key, emit
+//!                           `[AnchorEntry]` JSON on stdout. V1.6 swaps
+//!                           the mock issuer for a real Rekor POST behind
+//!                           `--rekor-url`.
 //!
-//!   chain-export — Read a workspace's `anchor-chain.jsonl` content on stdin,
-//!                  recompute the chain head via `chain_head_for`, validate
-//!                  the full chain via `verify_anchor_chain`, and emit a
-//!                  wire-format `AnchorChain { history, head }` JSON document
-//!                  on stdout. Single source of canonicalisation for the
-//!                  chain head — the MCP TS-side never recomputes heads.
+//!   chain-export          — Read a workspace's `anchor-chain.jsonl`
+//!                           content on stdin, recompute the chain head
+//!                           via `chain_head_for`, validate the full
+//!                           chain via `verify_anchor_chain`, and emit a
+//!                           wire-format `AnchorChain { history, head }`
+//!                           JSON document on stdout. Single source of
+//!                           canonicalisation for the chain head — the
+//!                           MCP TS-side never recomputes heads.
+//!
+//!   derive-key            — V1.9. Derive the per-tenant Ed25519
+//!                           identity for `--workspace` from the master
+//!                           seed via HKDF-SHA256. Emits the canonical
+//!                           kid (`atlas-anchor:{workspace}`), the
+//!                           base64url-no-pad public key, AND the hex
+//!                           secret on stdout as JSON. Use sparingly —
+//!                           this is the only path where the derived
+//!                           secret crosses the signer process boundary,
+//!                           so it should be reserved for ceremonies
+//!                           (key inspection, manual `sign --secret-stdin`
+//!                           drives) rather than the hot write path.
+//!
+//!   derive-pubkey         — V1.9. Same derivation as `derive-key` but
+//!                           emits ONLY {kid, pubkey_b64url} — the secret
+//!                           never leaves the signer. The MCP server
+//!                           uses this to assemble per-workspace
+//!                           PubkeyBundles without ever materialising
+//!                           the workspace's signing key in TS heap.
+//!
+//!   rotate-pubkey-bundle  — V1.9. Read a `PubkeyBundle` on stdin, add
+//!                           the per-tenant kid + pubkey for the named
+//!                           workspace via HKDF derivation, emit the
+//!                           updated bundle on stdout. Idempotent: a
+//!                           re-run on an already-rotated bundle returns
+//!                           the bundle unchanged. Operator ceremony for
+//!                           upgrading legacy V1.5–V1.8 bundles in
+//!                           place; the legacy SPIFFE kids are
+//!                           preserved so old traces continue to verify
+//!                           in lenient mode. The signer reads from stdin
+//!                           and writes to stdout — atomic file replace
+//!                           and inter-operator concurrency are the
+//!                           caller's responsibility (see OPERATOR-RUNBOOK).
 //!
 //! Why two commands instead of two binaries? Because the trust property
 //! (single source of canonicalisation) is enforced by code path, not by
@@ -29,15 +68,34 @@
 //! "TS-side ↔ Rust-side" boundary narrow: the MCP server resolves one
 //! binary, then dispatches by subcommand.
 //!
-//! Secret-key handling: the `sign` subcommand prefers `--secret-stdin`
-//! (read 64 hex chars from stdin) over `--secret-hex` (CLI argv). The
-//! argv path is retained for backwards compatibility with the bank-demo
-//! example only and emits a stderr deprecation warning. Argv secrets
-//! appear in `/proc/<pid>/cmdline`, `ps aux`, and shell history; stdin
-//! does not.
+//! Secret-key handling: the `sign` subcommand has three secret-source
+//! modes, each mutually exclusive:
+//!
+//!   * `--secret-stdin` — read 64 hex chars from stdin (preferred for
+//!     legacy SPIFFE kids on the production path).
+//!   * `--secret-hex <hex>` — argv path. DEPRECATED — argv values
+//!     appear in `/proc/<pid>/cmdline`, `ps aux`, and shell history.
+//!     Retained only for the bank-demo example.
+//!   * `--derive-from-workspace <ws>` — V1.9. The signer derives the
+//!     per-tenant secret internally via HKDF and signs without ever
+//!     emitting the secret. This is the hot path for V1.9 per-tenant
+//!     events: the MCP server passes the workspace_id and the kid; no
+//!     secret material crosses the subprocess boundary.
+//!
+//! Exactly one of the three must be supplied — silent fall-through to a
+//! built-in default is refused (V1.8 used a 0x2A-byte sentinel default
+//! for `--secret-hex`; V1.9 retires it because the resulting "valid
+//! signature, but with the wrong key" outcome was a footgun in CI logs).
+//!
+//! V1.9 production gate: the per-tenant subcommands (`derive-key`,
+//! `derive-pubkey`, `rotate-pubkey-bundle`, `sign --derive-from-workspace`)
+//! refuse to run when `ATLAS_PRODUCTION=1` because the master seed is
+//! a source-committed dev constant. V1.10 will replace the gate with a
+//! sealed-seed loader.
 
 mod anchor;
 mod chain;
+mod keys;
 mod rekor_client;
 
 use atlas_trust_core::{
@@ -49,6 +107,7 @@ use atlas_trust_core::{
 use base64::Engine;
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
+use serde::Serialize;
 use std::io::{self, Read};
 use std::process::ExitCode;
 
@@ -84,6 +143,39 @@ enum Command {
     /// without re-implementing the canonical-bytes path the verifier
     /// uses for `chain_head_for`.
     ChainExport,
+    /// V1.9: Derive the per-tenant Ed25519 identity for a workspace
+    /// from the master seed via HKDF-SHA256. Emits {kid,
+    /// pubkey_b64url, secret_hex} JSON on stdout. Use only for
+    /// ceremonies; routine signing should use `sign
+    /// --derive-from-workspace`, which does not expose the secret.
+    DeriveKey(DeriveKeyArgs),
+    /// V1.9: Same derivation as `derive-key` but emits only {kid,
+    /// pubkey_b64url} — the secret never leaves this process. Used by
+    /// the MCP server to assemble per-workspace `PubkeyBundle`s.
+    DerivePubkey(DeriveKeyArgs),
+    /// V1.9: Add the per-tenant kid + pubkey for `--workspace` to a
+    /// `PubkeyBundle` read from stdin, emit the updated bundle on
+    /// stdout. Idempotent.
+    RotatePubkeyBundle(RotatePubkeyBundleArgs),
+}
+
+#[derive(clap::Args)]
+struct DeriveKeyArgs {
+    /// Workspace identifier — bound into the HKDF info parameter as
+    /// `"atlas-anchor-v1:{workspace}"`. Two workspaces with different
+    /// IDs derive independent keypairs from the same master seed.
+    #[arg(long)]
+    workspace: String,
+}
+
+#[derive(clap::Args)]
+struct RotatePubkeyBundleArgs {
+    /// Workspace identifier whose per-tenant kid should be added to
+    /// the bundle. Re-running with an already-rotated bundle is a
+    /// no-op (the existing pubkey is asserted to match the
+    /// derivation, then returned as-is).
+    #[arg(long)]
+    workspace: String,
 }
 
 #[derive(clap::Args, Default)]
@@ -134,16 +226,24 @@ struct SignArgs {
     #[arg(long)]
     payload: Option<String>,
 
-    /// 32-byte hex-encoded secret key, passed via stdin (PREFERRED). If set,
-    /// the signer reads exactly 64 hex chars from stdin and ignores any
-    /// `--secret-hex` value.
+    /// 32-byte hex-encoded secret key, passed via stdin (PREFERRED).
+    /// If set, the signer reads exactly 64 hex chars from stdin.
     #[arg(long, default_value_t = false)]
     secret_stdin: bool,
 
-    /// 32-byte hex-encoded secret key, passed via argv (DEPRECATED — leaks
-    /// to OS process listing). Use `--secret-stdin` in production.
-    #[arg(long, default_value = "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a")]
-    secret_hex: String,
+    /// 32-byte hex-encoded secret key, passed via argv (DEPRECATED —
+    /// leaks to OS process listing). Use `--secret-stdin` for legacy
+    /// SPIFFE kids and `--derive-from-workspace` for per-tenant kids.
+    #[arg(long)]
+    secret_hex: Option<String>,
+
+    /// V1.9: derive the per-tenant Ed25519 secret internally for the
+    /// named workspace and sign with it. Mutually exclusive with
+    /// `--secret-stdin` and `--secret-hex`. The derived secret never
+    /// crosses the subprocess boundary; this is the V1.9 hot path for
+    /// per-tenant events.
+    #[arg(long)]
+    derive_from_workspace: Option<String>,
 }
 
 fn b64url_no_pad_encode(bytes: &[u8]) -> String {
@@ -157,7 +257,147 @@ fn main() -> ExitCode {
         Some(Command::BundleHash) => run_bundle_hash(),
         Some(Command::Anchor(args)) => run_anchor(args),
         Some(Command::ChainExport) => run_chain_export(),
+        Some(Command::DeriveKey(args)) => run_derive_key(args),
+        Some(Command::DerivePubkey(args)) => run_derive_pubkey(args),
+        Some(Command::RotatePubkeyBundle(args)) => run_rotate_pubkey_bundle(args),
         None => run_sign(cli.legacy_sign),
+    }
+}
+
+/// JSON shape emitted by `derive-key`. Mirrors `keys::PerTenantIdentity`
+/// with `serde_json` derive — kept distinct from the Rust struct so the
+/// wire format is locked even if the internal type evolves.
+#[derive(Serialize)]
+struct DeriveKeyOutput {
+    /// Canonical per-tenant kid (`atlas-anchor:{workspace}`).
+    kid: String,
+    /// 32-byte Ed25519 pubkey, base64url-no-pad.
+    pubkey_b64url: String,
+    /// 32-byte secret, hex (64 chars). The caller pipes this back via
+    /// `sign --secret-stdin` — never via argv.
+    secret_hex: String,
+}
+
+fn run_derive_key(args: DeriveKeyArgs) -> ExitCode {
+    if let Err(e) = keys::production_gate() {
+        eprintln!("derive-key: {e}");
+        return ExitCode::from(2);
+    }
+    if let Err(e) = keys::validate_workspace_id(&args.workspace) {
+        eprintln!("derive-key: invalid --workspace: {e}");
+        return ExitCode::from(2);
+    }
+    let identity = keys::per_tenant_identity(&args.workspace);
+    let output = DeriveKeyOutput {
+        kid: identity.kid,
+        pubkey_b64url: identity.pubkey_b64url,
+        secret_hex: identity.secret_hex,
+    };
+    match serde_json::to_string_pretty(&output) {
+        Ok(s) => {
+            println!("{s}");
+            ExitCode::from(0)
+        }
+        Err(e) => {
+            eprintln!("derive-key: emit failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// JSON shape emitted by `derive-pubkey`. Distinct from `DeriveKeyOutput`
+/// because the secret intentionally never leaves this process — the wire
+/// format omits `secret_hex` so a future `--include-secret` flag would
+/// have to add it explicitly rather than the schema growing it silently.
+#[derive(Serialize)]
+struct DerivePubkeyOutput {
+    kid: String,
+    pubkey_b64url: String,
+}
+
+/// V1.9: Same HKDF derivation as `run_derive_key` but emits only the
+/// public material. The MCP server uses this to assemble per-workspace
+/// `PubkeyBundle`s without ever materialising the workspace's signing
+/// key in TS heap.
+fn run_derive_pubkey(args: DeriveKeyArgs) -> ExitCode {
+    if let Err(e) = keys::production_gate() {
+        eprintln!("derive-pubkey: {e}");
+        return ExitCode::from(2);
+    }
+    if let Err(e) = keys::validate_workspace_id(&args.workspace) {
+        eprintln!("derive-pubkey: invalid --workspace: {e}");
+        return ExitCode::from(2);
+    }
+    let identity = keys::per_tenant_identity(&args.workspace);
+    let output = DerivePubkeyOutput {
+        kid: identity.kid,
+        pubkey_b64url: identity.pubkey_b64url,
+    };
+    match serde_json::to_string_pretty(&output) {
+        Ok(s) => {
+            println!("{s}");
+            ExitCode::from(0)
+        }
+        Err(e) => {
+            eprintln!("derive-pubkey: emit failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run_rotate_pubkey_bundle(args: RotatePubkeyBundleArgs) -> ExitCode {
+    if let Err(e) = keys::production_gate() {
+        eprintln!("rotate-pubkey-bundle: {e}");
+        return ExitCode::from(2);
+    }
+    if let Err(e) = keys::validate_workspace_id(&args.workspace) {
+        eprintln!("rotate-pubkey-bundle: invalid --workspace: {e}");
+        return ExitCode::from(2);
+    }
+    let mut buf = String::new();
+    if let Err(e) = io::stdin().read_to_string(&mut buf) {
+        eprintln!("rotate-pubkey-bundle: failed to read stdin: {e}");
+        return ExitCode::from(2);
+    }
+    let mut bundle = match PubkeyBundle::from_json(buf.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("rotate-pubkey-bundle: invalid PubkeyBundle JSON: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let identity = keys::per_tenant_identity(&args.workspace);
+
+    // Idempotency: if the kid already exists, the existing pubkey MUST
+    // match what the derivation produces. A mismatch means either the
+    // master seed has rotated (operator must use a fresh bundle) or the
+    // bundle was tampered with. Either way, refuse to silently overwrite.
+    if let Some(existing) = bundle.keys.get(&identity.kid) {
+        if existing != &identity.pubkey_b64url {
+            eprintln!(
+                "rotate-pubkey-bundle: kid {} already present with a DIFFERENT pubkey \
+                 (have={}, derived={}). The master seed may have rotated; refusing to \
+                 silently overwrite.",
+                identity.kid, existing, identity.pubkey_b64url,
+            );
+            return ExitCode::from(2);
+        }
+    }
+
+    bundle
+        .keys
+        .insert(identity.kid.clone(), identity.pubkey_b64url.clone());
+
+    match serde_json::to_string_pretty(&bundle) {
+        Ok(s) => {
+            println!("{s}");
+            ExitCode::from(0)
+        }
+        Err(e) => {
+            eprintln!("rotate-pubkey-bundle: emit failed: {e}");
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -283,39 +523,84 @@ fn run_sign(args: SignArgs) -> ExitCode {
         }
     };
 
-    // Prefer stdin secret. Falls back to argv only if --secret-stdin not set.
-    // The argv default (0x2A * 32) is intentionally distinct from any of
-    // the bank-demo dev keys so silent fall-through to the default produces
-    // signatures that fail verification immediately rather than mimicking
-    // a real key.
-    let secret_hex = if args.secret_stdin {
-        let mut buf = String::new();
-        if let Err(e) = io::stdin().read_to_string(&mut buf) {
-            eprintln!("--secret-stdin: failed to read stdin: {e}");
-            return ExitCode::from(2);
-        }
-        buf.trim().to_string()
-    } else {
+    // V1.9: 3-way exclusive secret-source selection. Exactly one of
+    // `--derive-from-workspace`, `--secret-stdin`, or `--secret-hex` must
+    // be set. Silent fall-through to a built-in default is refused — V1.8
+    // had a 0x2A-byte sentinel default which produced "valid signature
+    // under the wrong key" outcomes that masked CI bugs.
+    let mode_count = [
+        args.derive_from_workspace.is_some(),
+        args.secret_stdin,
+        args.secret_hex.is_some(),
+    ]
+    .iter()
+    .filter(|&&b| b)
+    .count();
+    if mode_count != 1 {
         eprintln!(
-            "WARNING: secret passed via --secret-hex (visible in process list). \
-             Use --secret-stdin in production."
+            "sign: exactly one secret source required, got {mode_count}. Use one of \
+             --derive-from-workspace=<ws> (V1.9 per-tenant), --secret-stdin (legacy SPIFFE \
+             kids on production), or --secret-hex=<hex> (DEPRECATED, dev only)."
         );
-        args.secret_hex
-    };
+        return ExitCode::from(2);
+    }
 
-    let secret_bytes = match hex::decode(&secret_hex) {
-        Ok(b) if b.len() == 32 => b,
-        Ok(_) => {
-            eprintln!("secret must decode to 32 bytes");
+    let signing_key: SigningKey = if let Some(ws) = args.derive_from_workspace.as_deref() {
+        // In-signer derivation: the secret never crosses the subprocess
+        // boundary. This is the V1.9 hot path for per-tenant events.
+        if let Err(e) = keys::production_gate() {
+            eprintln!("sign --derive-from-workspace: {e}");
             return ExitCode::from(2);
         }
-        Err(e) => {
-            eprintln!("secret invalid hex: {e}");
+        if let Err(e) = keys::validate_workspace_id(ws) {
+            eprintln!("sign --derive-from-workspace: invalid workspace: {e}");
             return ExitCode::from(2);
         }
+        // Defence-in-depth: the kid claimed in --kid must match the kid
+        // the verifier will recompute from `trace.workspace_id`. If the
+        // caller passes a per-tenant workspace but a legacy kid (or a
+        // per-tenant kid for a different workspace), the resulting event
+        // would silently fail strict-mode verification much later. Catch
+        // it here.
+        let expected_kid = format!("atlas-anchor:{ws}");
+        if kid != expected_kid {
+            eprintln!(
+                "sign --derive-from-workspace={ws}: --kid {kid:?} does not match the \
+                 derived per-tenant kid {expected_kid:?}. Pass --kid {expected_kid:?} \
+                 (or use --secret-stdin for legacy SPIFFE kids)."
+            );
+            return ExitCode::from(2);
+        }
+        keys::derive_workspace_signing_key_default(ws)
+    } else {
+        let secret_hex = if args.secret_stdin {
+            let mut buf = String::new();
+            if let Err(e) = io::stdin().read_to_string(&mut buf) {
+                eprintln!("--secret-stdin: failed to read stdin: {e}");
+                return ExitCode::from(2);
+            }
+            buf.trim().to_string()
+        } else {
+            eprintln!(
+                "WARNING: secret passed via --secret-hex (visible in process list). \
+                 Use --secret-stdin in production."
+            );
+            args.secret_hex.expect("mode_count check guarantees exactly one source")
+        };
+        let secret_bytes = match hex::decode(&secret_hex) {
+            Ok(b) if b.len() == 32 => b,
+            Ok(_) => {
+                eprintln!("secret must decode to 32 bytes");
+                return ExitCode::from(2);
+            }
+            Err(e) => {
+                eprintln!("secret invalid hex: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        let secret_array: [u8; 32] = secret_bytes.try_into().expect("len-checked above");
+        SigningKey::from_bytes(&secret_array)
     };
-    let secret_array: [u8; 32] = secret_bytes.try_into().expect("len-checked above");
-    let signing_key = SigningKey::from_bytes(&secret_array);
 
     let parents: Vec<String> = if args.parents.is_empty() {
         Vec::new()
