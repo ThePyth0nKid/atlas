@@ -25,6 +25,34 @@ import {
 
 const Hex64 = z.string().regex(/^[0-9a-f]{64}$/, "expected 64-char lowercase hex");
 const Base64UrlNoPad = z.string().regex(/^[A-Za-z0-9_-]+$/, "expected base64url-no-pad");
+/**
+ * Ed25519 32-byte public key in base64url-no-pad: exactly 43 chars.
+ *
+ * Why a length-pinned variant?
+ *
+ * The plain `Base64UrlNoPad` accepts any non-empty base64url-no-pad
+ * string. A signer regression that emits a truncated pubkey (e.g. 42
+ * chars from a buggy trim, or a short fixed string) would clear that
+ * regex and then silently land a junk key in `PubkeyBundle.keys` —
+ * the verifier would later fail signature checks against the bad
+ * pubkey and the operator would see "✗ event-signatures" rather than
+ * "✗ schema-validation at the boundary".
+ *
+ * Pinning to 43 chars at the trust boundary catches that regression
+ * here, with a clear "expected 43-char Ed25519 pubkey" error, before
+ * the bad pubkey is ever written to disk. 32 bytes encoded in
+ * base64url-no-pad is exactly `ceil(32 * 4 / 3) = 43` characters.
+ *
+ * Used in `DerivedIdentitySchema` and `DerivedPubkeySchema` (the
+ * V1.9 per-tenant derive paths). Legacy `EventSignatureSchema.sig`
+ * stays on `Base64UrlNoPad` because Ed25519 signatures are 64 bytes
+ * (86 chars) and there is no comparable regression vector for the
+ * signature wire field.
+ */
+const Base64UrlEd25519Pubkey = z
+  .string()
+  .length(43, "expected exactly 43 chars (Ed25519 pubkey, base64url-no-pad)")
+  .regex(/^[A-Za-z0-9_-]+$/, "expected base64url-no-pad alphabet");
 const IsoTimestamp = z.string().regex(
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/,
   "expected ISO-8601 UTC timestamp",
@@ -176,7 +204,7 @@ export const PerTenantKidSchema = z
 export const DerivedIdentitySchema = z
   .object({
     kid: PerTenantKidSchema,
-    pubkey_b64url: Base64UrlNoPad,
+    pubkey_b64url: Base64UrlEd25519Pubkey,
     secret_hex: Hex64,
   })
   .strict();
@@ -191,7 +219,7 @@ export const DerivedIdentitySchema = z
 export const DerivedPubkeySchema = z
   .object({
     kid: PerTenantKidSchema,
-    pubkey_b64url: Base64UrlNoPad,
+    pubkey_b64url: Base64UrlEd25519Pubkey,
   })
   .strict();
 

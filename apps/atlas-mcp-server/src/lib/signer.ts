@@ -87,11 +87,22 @@ export async function signEvent(args: SignArgs): Promise<AtlasEvent> {
   // HKDF and the secret never crosses this subprocess boundary.
   // `secretHex` is the legacy SPIFFE-kid path; the hex is piped via
   // stdin (never argv) to keep it out of the OS process listing.
-  const isDerive = "deriveFromWorkspace" in args && args.deriveFromWorkspace !== undefined;
-  const argv = isDerive
-    ? [...baseArgv, "--derive-from-workspace", args.deriveFromWorkspace as string]
-    : [...baseArgv, "--secret-stdin"];
-  const stdin = isDerive ? undefined : (args.secretHex as string);
+  //
+  // Narrow via the discriminated union directly. The pre-V1.10-warm-up
+  // form used a boolean `isDerive` flag plus `as string` casts because
+  // the boolean alone does not propagate type information into the
+  // branches. Hoisting the test into a proper `if` lets TS narrow
+  // `args.deriveFromWorkspace` to `string` in the truthy branch and
+  // `args.secretHex` to `string` in the falsy branch with no casts.
+  let argv: string[];
+  let stdin: string | undefined;
+  if (args.deriveFromWorkspace !== undefined) {
+    argv = [...baseArgv, "--derive-from-workspace", args.deriveFromWorkspace];
+    stdin = undefined;
+  } else {
+    argv = [...baseArgv, "--secret-stdin"];
+    stdin = args.secretHex;
+  }
 
   const { stdout, stderr, code } = await runProcess(bin, argv, stdin);
 

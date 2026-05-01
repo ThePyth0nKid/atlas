@@ -222,9 +222,16 @@ async function main(): Promise<void> {
   await fs.writeFile(ptBundlePath, JSON.stringify(ptBundle, null, 2), "utf8");
   log("v1.9-export", ptTracePath);
 
-  const ptVerify = spawnSync(verifierBin, ["verify-trace", ptTracePath, "-k", ptBundlePath], {
-    encoding: "utf8",
-  });
+  // Run the per-tenant verify with `--require-per-tenant-keys`. The
+  // smoke is the only end-to-end test the V1.9 strict-mode boundary
+  // has — running this leg in lenient mode would silently accept a
+  // future regression that emitted a legacy SPIFFE kid for a workspace
+  // that should have been per-tenant. Strict mode rejects that, here.
+  const ptVerify = spawnSync(
+    verifierBin,
+    ["verify-trace", ptTracePath, "-k", ptBundlePath, "--require-per-tenant-keys"],
+    { encoding: "utf8" },
+  );
   if (ptVerify.error) fail(`v1.9 verifier spawn failed: ${ptVerify.error.message}`);
   process.stdout.write(ptVerify.stdout);
   if (ptVerify.stderr) process.stderr.write(ptVerify.stderr);
@@ -232,7 +239,10 @@ async function main(): Promise<void> {
   if (!/✓ VALID|VALID/.test(ptVerify.stdout)) {
     fail("v1.9 verifier did not report VALID");
   }
-  log("v1.9-done", `✓ per-tenant trace verifies for ${WORKSPACE_PT}`);
+  if (!/strict mode/.test(ptVerify.stdout)) {
+    fail("v1.9 strict-mode advertisement missing — verifier may be running in lenient mode");
+  }
+  log("v1.9-done", `✓ per-tenant trace verifies for ${WORKSPACE_PT} (strict mode)`);
 
   log("done", "✓ end-to-end smoke OK — MCP write+anchor path verifies as VALID");
 }
