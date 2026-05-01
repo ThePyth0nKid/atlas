@@ -481,3 +481,251 @@ fn per_tenant_evidence_absent_when_lenient() {
         outcome.evidence
     );
 }
+
+/// Adversary: tampered `pubkey_bundle_hash` on an otherwise well-formed
+/// per-tenant trace. The kid passes the strict-mode shape check
+/// (`atlas-anchor:{workspace_id}`), but the trace's claimed bundle
+/// hash points at a different bundle than the one supplied at verify
+/// time. The pubkey-bundle-hash check must catch this in *both*
+/// modes — strict-mode kid agreement is not a substitute for bundle
+/// integrity, and a passing kid check must not paper over a tampered
+/// hash.
+///
+/// This is the "valid kid + tampered bundle" combination — if a
+/// future verifier ever short-circuited the bundle-hash check on the
+/// strength of a passing per-tenant check, this test would catch it.
+#[test]
+fn tampered_bundle_hash_with_valid_per_tenant_kid_rejected() {
+    let sk = SigningKey::from_bytes(&[16u8; 32]);
+    let (mut trace, bundle) = make_per_tenant_trace(&sk, "ws-tamper");
+
+    // Replace the (correct) bundle-hash with a clearly bogus value.
+    // 32 zero bytes hex-encoded — structurally valid (passes Hex64
+    // schema), semantically wrong (no bundle hashes to all-zero).
+    trace.pubkey_bundle_hash = "0".repeat(64);
+
+    // Lenient: pubkey-bundle-hash check fires.
+    let lenient = verify_trace(&trace, &bundle);
+    assert!(
+        !lenient.valid,
+        "lenient verify must reject tampered pubkey_bundle_hash; outcome: {:#?}",
+        lenient
+    );
+    assert!(
+        lenient
+            .errors
+            .iter()
+            .any(|e| e.contains("pubkey bundle mismatch")),
+        "expected pubkey bundle mismatch error; got: {:#?}",
+        lenient.errors
+    );
+
+    // Strict: same hash defence still fires. Strict mode adds checks,
+    // it does not replace existing ones.
+    let strict_opts = VerifyOptions {
+        require_per_tenant_keys: true,
+        ..VerifyOptions::default()
+    };
+    let strict = verify_trace_with(&trace, &bundle, &strict_opts);
+    assert!(
+        !strict.valid,
+        "strict verify must also reject tampered pubkey_bundle_hash; outcome: {:#?}",
+        strict
+    );
+    assert!(
+        strict
+            .errors
+            .iter()
+            .any(|e| e.contains("pubkey bundle mismatch")),
+        "strict mode must surface the same hash-mismatch error; got: {:#?}",
+        strict.errors
+    );
+}
+
+/// Adversary: zero-event trace presented under strict mode. The
+/// per-tenant-keys check iterates events; with no events to iterate,
+/// the check must complete without panic. Other invariants (DAG tips
+/// must point inside `events`, anchors must cover tips) determine
+/// whether the trace as a whole is valid — but the per-tenant pass
+/// itself must produce a deterministic, non-error outcome regardless.
+///
+/// Why this matters: a strict-mode verifier that crashes on edge-case
+/// inputs is worse than one that simply passes them. Auditors run
+/// strict mode against arbitrary traces; a panic on empty events is a
+/// DoS on the verifier and would erode operator trust in the strict
+/// flag.
+#[test]
+fn zero_event_trace_does_not_crash_strict_mode() {
+    let workspace = "ws-empty";
+    // Build an empty bundle pinning just the per-tenant kid (with a
+    // dummy key — there are no events to verify against it). This
+    // ensures the strict-mode kid-shape check has nothing to iterate
+    // and the bundle-hash check still computes deterministically.
+    let dummy_sk = SigningKey::from_bytes(&[17u8; 32]);
+    let kid = per_tenant_kid_for(workspace);
+    let bundle = bundle_with(&kid, &dummy_sk);
+    let bundle_hash = bundle.deterministic_hash().unwrap();
+
+    let trace = AtlasTrace {
+        schema_version: atlas_trust_core::SCHEMA_VERSION.to_string(),
+        generated_at: "2026-04-29T10:01:00Z".to_string(),
+        workspace_id: workspace.to_string(),
+        pubkey_bundle_hash: bundle_hash,
+        events: vec![],
+        dag_tips: vec![],
+        anchors: vec![],
+        policies: vec![],
+        filters: None,
+        anchor_chain: None,
+    };
+
+    // Lenient: empty trace is structurally valid (no events to fail).
+    // We assert `errors.is_empty()` too so that a future verifier
+    // change that adds a spurious "trace must contain at least one
+    // event" rejection lands on this test rather than slipping
+    // through with `valid = true` and a residual error list.
+    let lenient = verify_trace(&trace, &bundle);
+    assert!(
+        lenient.valid,
+        "empty trace should verify in lenient mode; errors: {:#?}",
+        lenient.errors
+    );
+    assert!(
+        lenient.errors.is_empty(),
+        "lenient verify of an empty trace must produce zero errors; got: {:#?}",
+        lenient.errors,
+    );
+
+    // Strict: still valid — the per-tenant check has nothing to
+    // reject. The evidence row should still appear (the check ran)
+    // and should be ok=true (vacuously: zero events, zero offenders).
+    // We pin both `valid` and `errors.is_empty()` so the "vacuous-ok"
+    // claim is load-bearing — a regression that, say, started
+    // rejecting empty-event traces under strict would fail here even
+    // if the per-tenant evidence row stayed ok.
+    let strict_opts = VerifyOptions {
+        require_per_tenant_keys: true,
+        ..VerifyOptions::default()
+    };
+    let strict = verify_trace_with(&trace, &bundle, &strict_opts);
+    assert!(
+        strict.valid,
+        "strict mode on a zero-event trace must not crash or reject; outcome: {:#?}",
+        strict
+    );
+    assert!(
+        strict.errors.is_empty(),
+        "strict mode on an empty trace must produce zero errors; got: {:#?}",
+        strict.errors,
+    );
+    assert!(
+        strict
+            .evidence
+            .iter()
+            .any(|ev| ev.check == "per-tenant-keys" && ev.ok),
+        "strict mode must emit per-tenant-keys evidence even for empty events; got: {:#?}",
+        strict.evidence,
+    );
+}
+
+/// Adversary: cross-bundle kid reuse. A per-tenant kid for workspace A
+/// (`atlas-anchor:ws-alice`) is reused inside workspace B's bundle and
+/// trace. The bundle is internally consistent (kid → key pair signs
+/// every event). Strict mode must reject because the trace's
+/// `workspace_id` is "ws-bob" but the events carry the alice-shaped
+/// kid.
+///
+/// This catches an operator-error scenario more than a forgery: someone
+/// edits a bundle by hand and pastes the wrong tenant's kid in. Without
+/// the strict check, the trace verifies (signatures are internally
+/// consistent), and the audit story silently lies about which tenant
+/// produced the events.
+#[test]
+fn cross_bundle_kid_reuse_rejected_in_strict_mode() {
+    let alice_kid = per_tenant_kid_for("ws-alice");
+    let sk = SigningKey::from_bytes(&[18u8; 32]);
+
+    // Construct a bundle pinning ALICE's kid (we're misusing it here)
+    // and a trace claiming workspace_id = "ws-bob". Sign every event
+    // under alice's kid using `sk` so signatures verify against the
+    // bundle. The point is: strict mode must spot the kid <->
+    // workspace_id mismatch, even though everything else is consistent.
+    let bundle = bundle_with(&alice_kid, &sk);
+    let bundle_hash = bundle.deterministic_hash().unwrap();
+    let event = build_signed_event(
+        &sk,
+        "ws-bob",
+        &alice_kid,
+        "01H_BOB_USES_ALICE",
+        "2026-04-29T10:00:00Z",
+        vec![],
+        serde_json::json!({"type": "node.create", "node": {"id": "leaked"}}),
+    );
+
+    let trace = AtlasTrace {
+        schema_version: atlas_trust_core::SCHEMA_VERSION.to_string(),
+        generated_at: "2026-04-29T10:01:00Z".to_string(),
+        workspace_id: "ws-bob".to_string(),
+        pubkey_bundle_hash: bundle_hash,
+        events: vec![event.clone()],
+        dag_tips: vec![event.event_hash.clone()],
+        anchors: vec![],
+        policies: vec![],
+        filters: None,
+        anchor_chain: None,
+    };
+
+    // Lenient: signatures verify (workspace_id=ws-bob is bound into
+    // the signing input and the bundle's kid agrees with what the
+    // event carries). The kid<->workspace pairing is not enforced.
+    //
+    // We assert *both* `valid == true` AND `errors.is_empty()` AND
+    // that the `event-signatures` evidence row is ok. A bare
+    // `valid == true` would still pass if a future refactor silently
+    // dropped the workspace_id binding from the signing input — the
+    // signature would verify against the wrong-workspace input and
+    // the test would stop policing the load-bearing
+    // workspace-binding invariant.
+    let lenient = verify_trace(&trace, &bundle);
+    assert!(
+        lenient.valid,
+        "lenient mode does not enforce kid<->workspace pairing; errors: {:#?}",
+        lenient.errors
+    );
+    assert!(
+        lenient.errors.is_empty(),
+        "lenient mode must produce zero errors here; got: {:#?}",
+        lenient.errors,
+    );
+    assert!(
+        lenient
+            .evidence
+            .iter()
+            .any(|ev| ev.check == "event-signatures" && ev.ok),
+        "lenient mode must record event-signatures evidence as ok; \
+         this guards the workspace_id-bound-into-signing-input invariant. \
+         got: {:#?}",
+        lenient.evidence,
+    );
+
+    // Strict: the kid `atlas-anchor:ws-alice` ≠ expected
+    // `atlas-anchor:ws-bob`. Reject and name the offender.
+    let strict_opts = VerifyOptions {
+        require_per_tenant_keys: true,
+        ..VerifyOptions::default()
+    };
+    let strict = verify_trace_with(&trace, &bundle, &strict_opts);
+    assert!(
+        !strict.valid,
+        "strict mode must reject cross-bundle kid reuse; outcome: {:#?}",
+        strict
+    );
+    assert!(
+        strict
+            .errors
+            .iter()
+            .any(|e| e.contains("01H_BOB_USES_ALICE") && e.contains("atlas-anchor:ws-bob")),
+        "strict error must name the offending event and the expected kid; got: {:#?}",
+        strict.errors
+    );
+}
