@@ -148,11 +148,11 @@ enum Command {
     /// pubkey_b64url, secret_hex} JSON on stdout. Use only for
     /// ceremonies; routine signing should use `sign
     /// --derive-from-workspace`, which does not expose the secret.
-    DeriveKey(DeriveKeyArgs),
+    DeriveKey(DeriveWorkspaceArgs),
     /// V1.9: Same derivation as `derive-key` but emits only {kid,
     /// pubkey_b64url} — the secret never leaves this process. Used by
     /// the MCP server to assemble per-workspace `PubkeyBundle`s.
-    DerivePubkey(DeriveKeyArgs),
+    DerivePubkey(DeriveWorkspaceArgs),
     /// V1.9: Add the per-tenant kid + pubkey for `--workspace` to a
     /// `PubkeyBundle` read from stdin, emit the updated bundle on
     /// stdout. Idempotent.
@@ -160,7 +160,7 @@ enum Command {
 }
 
 #[derive(clap::Args)]
-struct DeriveKeyArgs {
+struct DeriveWorkspaceArgs {
     /// Workspace identifier — bound into the HKDF info parameter as
     /// `"atlas-anchor-v1:{workspace}"`. Two workspaces with different
     /// IDs derive independent keypairs from the same master seed.
@@ -278,7 +278,7 @@ struct DeriveKeyOutput {
     secret_hex: String,
 }
 
-fn run_derive_key(args: DeriveKeyArgs) -> ExitCode {
+fn run_derive_key(args: DeriveWorkspaceArgs) -> ExitCode {
     if let Err(e) = keys::production_gate() {
         eprintln!("derive-key: {e}");
         return ExitCode::from(2);
@@ -319,7 +319,7 @@ struct DerivePubkeyOutput {
 /// public material. The MCP server uses this to assemble per-workspace
 /// `PubkeyBundle`s without ever materialising the workspace's signing
 /// key in TS heap.
-fn run_derive_pubkey(args: DeriveKeyArgs) -> ExitCode {
+fn run_derive_pubkey(args: DeriveWorkspaceArgs) -> ExitCode {
     if let Err(e) = keys::production_gate() {
         eprintln!("derive-pubkey: {e}");
         return ExitCode::from(2);
@@ -373,8 +373,15 @@ fn run_rotate_pubkey_bundle(args: RotatePubkeyBundleArgs) -> ExitCode {
     // match what the derivation produces. A mismatch means either the
     // master seed has rotated (operator must use a fresh bundle) or the
     // bundle was tampered with. Either way, refuse to silently overwrite.
-    if let Some(existing) = bundle.keys.get(&identity.kid) {
-        if existing != &identity.pubkey_b64url {
+    //
+    // The match-case is also reported to stderr so an operator running
+    // the rotation a second time gets a clear "no-op" signal instead of
+    // a silent success. Without this, "I re-ran rotate but nothing
+    // changed" is indistinguishable from "I re-ran rotate and it
+    // overwrote my edits" at the terminal.
+    let already_present = match bundle.keys.get(&identity.kid) {
+        Some(existing) if existing == &identity.pubkey_b64url => true,
+        Some(existing) => {
             eprintln!(
                 "rotate-pubkey-bundle: kid {} already present with a DIFFERENT pubkey \
                  (have={}, derived={}). The master seed may have rotated; refusing to \
@@ -383,11 +390,23 @@ fn run_rotate_pubkey_bundle(args: RotatePubkeyBundleArgs) -> ExitCode {
             );
             return ExitCode::from(2);
         }
-    }
+        None => false,
+    };
 
-    bundle
-        .keys
-        .insert(identity.kid.clone(), identity.pubkey_b64url.clone());
+    if already_present {
+        eprintln!(
+            "rotate-pubkey-bundle: no-op — kid {} already present with the derived pubkey",
+            identity.kid,
+        );
+    } else {
+        eprintln!(
+            "rotate-pubkey-bundle: added kid {} (pubkey {})",
+            identity.kid, identity.pubkey_b64url,
+        );
+        bundle
+            .keys
+            .insert(identity.kid.clone(), identity.pubkey_b64url.clone());
+    }
 
     match serde_json::to_string_pretty(&bundle) {
         Ok(s) => {

@@ -89,14 +89,46 @@ pub const PRODUCTION_GATE_ENV: &str = "ATLAS_PRODUCTION";
 /// invocation as production. Returns an error message suitable for
 /// stderr.
 ///
-/// The gate fires when `ATLAS_PRODUCTION=1`. Any other value (unset,
-/// empty, "0", "true") allows the dev seed — V1.9 dev/CI environments
-/// run with the env var unset; production rollouts set `=1` and wait
-/// for the V1.10 sealed-seed loader before re-enabling per-tenant
-/// commands.
+/// The gate fires only on the byte-exact value `"1"`. Any other value
+/// (unset, empty, `"0"`, `"true"`, `"yes"`, `"on"`, `"1 "` with
+/// trailing whitespace, …) allows the dev seed — V1.9 dev/CI
+/// environments run with the env var unset; production rollouts set
+/// `=1` and wait for the V1.10 sealed-seed loader before re-enabling
+/// per-tenant commands.
+///
+/// **Operator footgun (documented in `OPERATOR-RUNBOOK.md` §1):** the
+/// strict-`"1"` recognition is a deployment trap waiting for someone
+/// who reflexively writes `ATLAS_PRODUCTION=true` (a common K8s/Docker
+/// idiom). That value silently falls through and the dev seed signs.
+/// V1.10 will replace this gate with positive opt-in semantics; until
+/// then, deploy automation must verify the env literally equals `1`.
+///
+/// Implementation: forwards to `production_gate_with(|name|
+/// std::env::var(name).ok())`. Tests use the injection form to avoid
+/// mutating the process environment from inside a parallel cargo
+/// runner (cargo defaults to a thread pool, so `std::env::set_var`
+/// between tests is a data race). The injection seam also foreshadows
+/// V1.10: the sealed-seed loader will inject a seed source the same
+/// way this gate injects an env source.
 pub fn production_gate() -> Result<(), String> {
-    match std::env::var(PRODUCTION_GATE_ENV).as_deref() {
-        Ok("1") => Err(format!(
+    production_gate_with(|name| std::env::var(name).ok())
+}
+
+/// Test-injection form of `production_gate`. Takes an env reader (a
+/// pure closure mapping a variable name to its optional value) so test
+/// code can drive the gate without touching the global process env.
+///
+/// Public-but-`pub(crate)`-spirit: keep this on the binary's surface
+/// for future in-crate callers (the V1.10 HSM loader will reuse the
+/// same injection style for its seed-source lookup) while signalling
+/// that the gate is the canonical entry point — external embedders
+/// should call `production_gate`, not this one.
+pub fn production_gate_with<F>(env: F) -> Result<(), String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match env(PRODUCTION_GATE_ENV).as_deref() {
+        Some("1") => Err(format!(
             "{PRODUCTION_GATE_ENV}=1 set, but atlas-signer is using the source-committed \
              DEV_MASTER_SEED. V1.9 has no sealed-seed loader; refusing to derive per-tenant \
              keys against a public dev seed. V1.10 closes this with HSM/TPM sealing — until \
@@ -105,6 +137,26 @@ pub fn production_gate() -> Result<(), String> {
         _ => Ok(()),
     }
 }
+
+/// Maximum byte length of a `workspace_id`. Bounding the input here
+/// gives every downstream consumer a predictable size budget:
+///
+///   * the per-tenant kid (`atlas-anchor:` + workspace_id) is at most
+///     `13 + 256 = 269` bytes, well under any realistic PKCS#11
+///     `info`-parameter ceiling and PubkeyBundle key-name limit;
+///   * a malicious or buggy caller cannot insert a 10 MB key into the
+///     `PubkeyBundle` keys map (cheap-DoS surface flagged in V1.9
+///     review); and
+///   * V1.10's HSM derive call gets a definite upper bound on the
+///     `info` material it has to forward to the device.
+///
+/// 256 bytes is intentionally generous (UUIDs, structured tenant
+/// names like `bank-hagedorn:prod:eu-west`, even hash-prefixed names
+/// fit comfortably) but small enough to fail loudly on accidentally-
+/// large input. If a real-world deployment needs longer IDs, raise the
+/// constant deliberately and bump documentation; do not hot-patch
+/// callers around it.
+pub const WORKSPACE_ID_MAX_BYTES: usize = 256;
 
 /// Validate a `workspace_id` for use in HKDF derivation and per-tenant
 /// kid construction.
@@ -115,8 +167,10 @@ pub fn production_gate() -> Result<(), String> {
 /// place to enforce ingress hygiene, because that is where ambiguous or
 /// confusable IDs become operator footguns and observability holes.
 ///
-/// We accept ASCII printable bytes (0x21..=0x7E) and reject:
+/// We accept ASCII printable bytes (0x21..=0x7E) up to
+/// `WORKSPACE_ID_MAX_BYTES` and reject:
 ///   * empty strings (no legitimate per-tenant kid names the empty workspace);
+///   * strings longer than `WORKSPACE_ID_MAX_BYTES` (cheap DoS surface);
 ///   * any byte outside the ASCII-printable range (control chars, NUL,
 ///     DEL, non-ASCII — defence against Unicode confusables); and
 ///   * the byte `:` (the kid prefix delimiter — workspace_ids
@@ -126,6 +180,14 @@ pub fn production_gate() -> Result<(), String> {
 pub fn validate_workspace_id(workspace_id: &str) -> Result<(), String> {
     if workspace_id.is_empty() {
         return Err("workspace_id must be non-empty".to_string());
+    }
+    if workspace_id.len() > WORKSPACE_ID_MAX_BYTES {
+        return Err(format!(
+            "workspace_id is {} bytes; the cap is {WORKSPACE_ID_MAX_BYTES}. Real-world \
+             tenant identifiers are short — a longer value usually indicates an upstream \
+             bug or an attempt to insert an oversized PubkeyBundle entry.",
+            workspace_id.len(),
+        ));
     }
     for (i, b) in workspace_id.bytes().enumerate() {
         if !(0x21..=0x7E).contains(&b) {
@@ -147,7 +209,24 @@ pub fn validate_workspace_id(workspace_id: &str) -> Result<(), String> {
 /// Domain-separation prefix prepended to the workspace_id when forming
 /// the HKDF `info` parameter. See module doc for why this is a
 /// versioned tag.
-const HKDF_INFO_PREFIX: &str = "atlas-anchor-v1:";
+///
+/// `pub` because V1.10's HSM-backed loader (in a sibling crate) needs
+/// to assemble the same `info` string before submitting an HKDF derive
+/// call to the device. Re-implementing the prefix in the HSM crate
+/// would split the cryptographic-domain tag across two source-of-truth
+/// sites — a drift surface the V1.9 design intentionally avoided.
+///
+/// **Future-prefix invariant.** Any new domain prefix added later
+/// (e.g. `atlas-policy-v1:`, `atlas-witness-v1:`) MUST NOT produce an
+/// `info` string that is a prefix of any pre-existing one for any
+/// workspace_id. Two info strings where one is a prefix of the other
+/// produce different HKDF outputs (HKDF-Expand reads the info bytes
+/// verbatim with no separator), but the safety margin is conceptual:
+/// ensure the namespaces are visibly disjoint at the literal-prefix
+/// level so a careful reader can rule out collisions by inspection.
+/// Bumping the `-vN` suffix when changing the algorithm is the
+/// standard rotation hatch.
+pub const HKDF_INFO_PREFIX: &str = "atlas-anchor-v1:";
 
 /// Derive a per-workspace Ed25519 signing key from `master_seed` and
 /// `workspace_id` via HKDF-SHA256.
@@ -177,25 +256,50 @@ pub fn derive_workspace_signing_key(
 /// Convenience: derive the per-workspace signing key using the
 /// crate-default `DEV_MASTER_SEED`. Production code MUST switch to
 /// `derive_workspace_signing_key` with a sealed-key handle.
-pub fn derive_workspace_signing_key_default(workspace_id: &str) -> SigningKey {
+///
+/// `pub(crate)` so the dispatch gate in `main.rs` is the only entry
+/// point. V1.10 will route per-tenant secret material through a
+/// `MasterSeedHkdf` trait; consumers outside this crate should never
+/// have a way to bypass the gate by calling the dev-seed convenience
+/// directly.
+pub(crate) fn derive_workspace_signing_key_default(workspace_id: &str) -> SigningKey {
     derive_workspace_signing_key(&DEV_MASTER_SEED, workspace_id)
 }
 
 /// Per-tenant identity for a workspace: the canonical kid the verifier
 /// expects in `EventSignature.kid` plus the URL-safe-no-pad base64 of
 /// the public key for embedding in the `PubkeyBundle`.
-#[derive(Debug, Clone)]
-pub struct PerTenantIdentity {
+///
+/// `Debug` is implemented manually below so accidental `dbg!()` or
+/// `tracing` calls do not print `secret_hex` to logs.
+#[derive(Clone)]
+pub(crate) struct PerTenantIdentity {
     /// `format!("atlas-anchor:{workspace_id}")` — the per-tenant kid
     /// the verifier expects under strict mode.
-    pub kid: String,
+    pub(crate) kid: String,
     /// 32-byte Ed25519 public key, base64url-no-pad encoded — wire
     /// format for `PubkeyBundle.keys`.
-    pub pubkey_b64url: String,
+    pub(crate) pubkey_b64url: String,
     /// 32-byte secret as 64-char hex — fed to `atlas-signer sign
     /// --secret-stdin` (production) or `derive-key` JSON output (dev).
-    /// Treat as sensitive; never log.
-    pub secret_hex: String,
+    /// Treat as sensitive; never log. The `Debug` impl below redacts
+    /// this field; do not derive `Debug` automatically.
+    pub(crate) secret_hex: String,
+}
+
+/// Manual `Debug` impl that redacts `secret_hex`. The derived `Debug`
+/// would print the raw 64-char hex in any `dbg!(identity)` or
+/// `tracing::debug!(?identity)` site — exactly the leak path V1.9
+/// security review flagged. We keep `kid` and `pubkey_b64url` visible
+/// because they are public material and useful for diagnostics.
+impl std::fmt::Debug for PerTenantIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PerTenantIdentity")
+            .field("kid", &self.kid)
+            .field("pubkey_b64url", &self.pubkey_b64url)
+            .field("secret_hex", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Derive the public-facing `PerTenantIdentity` for `workspace_id`.
@@ -203,7 +307,12 @@ pub struct PerTenantIdentity {
 /// Wraps `derive_workspace_signing_key_default` and stitches the
 /// canonical kid + base64url pubkey + hex secret into one record. The
 /// MCP server consumes this via the `derive-key` JSON output.
-pub fn per_tenant_identity(workspace_id: &str) -> PerTenantIdentity {
+///
+/// `pub(crate)` for the same reason as `derive_workspace_signing_key_default`:
+/// the binary's CLI dispatch is the only legitimate caller, and V1.10
+/// adds a sibling `atlas-signer-hsm` crate that will provide its own
+/// gated entry point rather than reaching into this one.
+pub(crate) fn per_tenant_identity(workspace_id: &str) -> PerTenantIdentity {
     use base64::Engine;
     let signing_key = derive_workspace_signing_key_default(workspace_id);
     let pubkey_bytes = signing_key.verifying_key().to_bytes();
@@ -309,13 +418,6 @@ mod tests {
         let alice = pubkey("alice");
         let default = pubkey("ws-mcp-default");
 
-        if DEFAULT_PUBKEY_B64URL == "__DEFAULT_PIN_PLACEHOLDER__" {
-            panic!(
-                "ws-mcp-default pubkey pin placeholder needs to be replaced with: {default}\n\
-                 (alice pubkey for cross-check: {alice})"
-            );
-        }
-
         assert_eq!(
             alice, ALICE_PUBKEY_B64URL,
             "V1.9 derivation drift for workspace 'alice'. If intentional, \
@@ -393,6 +495,33 @@ mod tests {
     }
 
     #[test]
+    fn validate_workspace_id_accepts_at_max_length() {
+        // The cap is inclusive: a workspace_id of exactly
+        // `WORKSPACE_ID_MAX_BYTES` bytes is accepted. One byte beyond
+        // the cap is rejected (see next test).
+        let at_max = "a".repeat(WORKSPACE_ID_MAX_BYTES);
+        assert!(
+            validate_workspace_id(&at_max).is_ok(),
+            "expected workspace_id of exactly {WORKSPACE_ID_MAX_BYTES} bytes to be accepted",
+        );
+    }
+
+    #[test]
+    fn validate_workspace_id_rejects_oversized() {
+        // One byte beyond the cap. The DoS surface flagged in V1.9
+        // review was a 10 MB workspace_id producing a 10 MB
+        // PubkeyBundle entry; we test the boundary because the
+        // boundary is what catches off-by-one regressions, not a 10 MB
+        // string in CI.
+        let too_long = "a".repeat(WORKSPACE_ID_MAX_BYTES + 1);
+        let err = validate_workspace_id(&too_long).unwrap_err();
+        assert!(
+            err.contains("cap"),
+            "error must mention the cap so an operator can grep for it; got {err:?}",
+        );
+    }
+
+    #[test]
     fn validate_workspace_id_rejects_non_ascii() {
         // Defends against Unicode confusables: two visually-identical
         // names with different code points derive different keys but
@@ -405,38 +534,97 @@ mod tests {
         }
     }
 
+    /// Helper: build an env reader that returns `value` for `key` and
+    /// `None` for everything else. Keeps the test bodies tight and
+    /// makes the data-vs-policy separation visible.
+    fn env_with(key: &'static str, value: Option<&'static str>) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            if name == key { value.map(|s| s.to_string()) } else { None }
+        }
+    }
+
+    // The pre-V1.10-warm-up tests for this gate flipped the process env
+    // via `unsafe { std::env::set_var }`. Cargo defaults to a thread
+    // pool per test binary, so two such tests racing in the same
+    // module corrupt each other's view of the variable. The injection
+    // form below is race-free and also pre-builds the V1.10 seam: when
+    // the HSM loader needs to inject its own seed source, it will use
+    // the same closure pattern.
+
     #[test]
-    fn production_gate_blocks_when_env_set() {
-        // We must avoid clobbering whatever the host environment has
-        // set. Use a scoped guard with a nested-test serialisation
-        // strategy is overkill; the test is fine if the env is briefly
-        // toggled — test threads in cargo are independent processes per
-        // module by default but to be safe we inspect first and restore.
-        let prev = std::env::var(PRODUCTION_GATE_ENV).ok();
-        // SAFETY: process-wide environment mutation. Tests in this
-        // module run sequentially because the cargo default is one
-        // thread per test binary file when --test-threads is left
-        // implicit on this crate's small surface, and the production
-        // gate has no other consumers in this binary.
-        unsafe {
-            std::env::set_var(PRODUCTION_GATE_ENV, "1");
-        }
-        let result = production_gate();
-        match prev {
-            Some(v) => unsafe { std::env::set_var(PRODUCTION_GATE_ENV, v) },
-            None => unsafe { std::env::remove_var(PRODUCTION_GATE_ENV) },
-        }
+    fn production_gate_blocks_when_env_set_to_one() {
+        let result = production_gate_with(env_with(PRODUCTION_GATE_ENV, Some("1")));
         assert!(result.is_err(), "production gate must reject ATLAS_PRODUCTION=1");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("DEV_MASTER_SEED"),
+            "error must name the constant the operator needs to grep for; got {msg:?}",
+        );
     }
 
     #[test]
     fn production_gate_allows_when_env_unset() {
-        let prev = std::env::var(PRODUCTION_GATE_ENV).ok();
-        unsafe { std::env::remove_var(PRODUCTION_GATE_ENV); }
-        let result = production_gate();
-        if let Some(v) = prev {
-            unsafe { std::env::set_var(PRODUCTION_GATE_ENV, v); }
-        }
+        let result = production_gate_with(env_with(PRODUCTION_GATE_ENV, None));
         assert!(result.is_ok(), "production gate must allow when env unset");
+    }
+
+    #[test]
+    fn production_gate_allows_when_env_empty() {
+        // Empty value is treated identically to unset — only the
+        // literal "1" trips the gate. V1.9 design choice: a
+        // misconfigured pipeline that emits `ATLAS_PRODUCTION=` (with
+        // no value) should not silently behave like production-gated;
+        // it should behave like dev. V1.10 inverts this entirely
+        // (positive opt-in), so this test pins the V1.9 behaviour
+        // before the inversion lands.
+        let result = production_gate_with(env_with(PRODUCTION_GATE_ENV, Some("")));
+        assert!(result.is_ok(), "empty ATLAS_PRODUCTION must not trip the V1.9 gate");
+    }
+
+    #[test]
+    fn production_gate_allows_truthy_strings_other_than_one() {
+        // Conservative-by-V1.9-design: only "1" trips the gate. The
+        // OPERATOR-RUNBOOK warns prominently that "true", "yes", "on"
+        // do NOT trip it today; documenting that contract via test so
+        // a future "be liberal in what you accept" patch trips CI
+        // before reaching production.
+        for v in ["0", "true", "yes", "on", "production", "TRUE", "1 "] {
+            let result = production_gate_with(env_with(PRODUCTION_GATE_ENV, Some(v)));
+            assert!(
+                result.is_ok(),
+                "value {v:?} must not trip the V1.9 gate (only literal \"1\" does)",
+            );
+        }
+    }
+
+    #[test]
+    fn production_gate_default_uses_process_env() {
+        // Sanity: the public `production_gate()` is the
+        // `production_gate_with(std::env::var)` wrapper. We don't
+        // mutate the env here — we just confirm the wrapper compiles
+        // and returns something. The actual policy is covered by the
+        // injection-form tests above.
+        let _ = production_gate();
+    }
+
+    #[test]
+    fn per_tenant_identity_debug_redacts_secret() {
+        // Defence: any `dbg!(identity)` or `tracing::debug!(?identity)`
+        // site must NOT leak `secret_hex`. The manual `Debug` impl
+        // emits "<redacted>" in place of the raw hex; we assert the
+        // redacted marker is present AND the secret hex is absent.
+        let identity = per_tenant_identity("alice");
+        let dbg_out = format!("{identity:?}");
+        assert!(
+            dbg_out.contains("<redacted>"),
+            "Debug must mark secret_hex as redacted; got {dbg_out:?}",
+        );
+        assert!(
+            !dbg_out.contains(&identity.secret_hex),
+            "Debug must NOT contain the raw secret_hex; got {dbg_out:?}",
+        );
+        // Public material stays visible for diagnostics:
+        assert!(dbg_out.contains(&identity.kid));
+        assert!(dbg_out.contains(&identity.pubkey_b64url));
     }
 }
