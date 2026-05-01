@@ -379,13 +379,18 @@ makes no network call.
   boundary). The `derive-key` subcommand — which DOES emit the secret —
   is reserved for ceremonies (rotation, key inspection) and gated by
   the same production gate.
-- **Adversary tests:** 8 adversary cases in
+- **Adversary tests:** 11 adversary cases in
   `crates/atlas-trust-core/tests/per_tenant_keys_adversary.rs`:
   per-tenant kid passes strict + lenient; legacy kid rejected in
   strict; cross-workspace forgery rejected (bob's events submitted as
   alice's); per-tenant-with-wrong-workspace rejected even when the
   signature itself is structurally valid; mixed legacy + per-tenant
-  rejected in strict; per-tenant evidence row absent in lenient.
+  rejected in strict; per-tenant evidence row absent in lenient;
+  tampered bundle hash with valid per-tenant kid still rejected
+  (strict-mode kid acceptance must not bypass bundle integrity);
+  zero-event trace under strict does not crash and emits a vacuous-ok
+  evidence row; cross-bundle kid reuse rejected (alice's kid pasted
+  into ws-bob's bundle).
 
 ### Residual risks (V1.9)
 
@@ -409,6 +414,35 @@ makes no network call.
   replacing the constant before building. The production gate
   (`ATLAS_PRODUCTION=1`) blocks accidental use of the dev seed in
   production but does not by itself supply a real one.
+- **Master-seed rotation invalidates every historical
+  `pubkey_bundle_hash`.** A workspace's per-tenant pubkey is a
+  deterministic function of `(master_seed, workspace_id)`. Rotating
+  the master seed produces a new pubkey for every workspace, which
+  means every previously-issued `PubkeyBundle` derives to a different
+  `deterministic_hash` after the rotation, which means every
+  historical trace's `pubkey_bundle_hash` field no longer matches the
+  bundle the verifier would build today. **Auditors verifying
+  pre-rotation traces must verify them against the
+  pre-rotation pubkey bundle** — the rotation does not break those
+  traces' trust properties, but it does break drop-in re-verification
+  against a today-built bundle. Operators who rotate must archive the
+  pre-rotation `PubkeyBundle` alongside any pre-rotation trace they
+  intend to honour for audit, and ensure auditors receive the
+  bundle-of-issuance, not the bundle-of-now. V1.10's sealed-seed loader
+  inherits this property: rotating the *sealed* seed has the same
+  effect as rotating the source-committed dev seed.
+- **The production gate is opt-out, not opt-in.** V1.9 ships
+  `production_gate()` as a *negative* guard — it blocks per-tenant
+  signing only when `ATLAS_PRODUCTION=1` is explicitly set. A
+  production deployment that forgets to set the env var will run
+  happily with the source-committed `DEV_MASTER_SEED` and emit signed
+  events whose pubkeys an auditor can re-derive from public source.
+  This is the dangerous default-state today, and operators should
+  treat *unset* `ATLAS_PRODUCTION` as a misconfiguration to fail
+  closed against, not an "off-by-default safe" condition. V1.10
+  inverts the gate to a positive opt-in (`ATLAS_PRODUCTION=1` becomes
+  the *required* signal that the operator has wired a sealed seed),
+  closing this footgun.
 
 ---
 

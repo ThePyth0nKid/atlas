@@ -20,26 +20,85 @@ seed is source-committed for reproducibility of dev/CI builds and is
 **not** a production secret. V1.10 closes this with HSM/TPM sealing
 of the master seed.
 
+> **DANGEROUS DEFAULT — read this before running in production.**
+>
+> The V1.9 gate is *opt-out*, not opt-in. If `ATLAS_PRODUCTION` is
+> **unset** (or set to anything other than the literal `1`), every
+> per-tenant subcommand will run happily against the source-committed
+> `DEV_MASTER_SEED`. An attacker who can read public source can
+> re-derive every workspace's signing key.
+>
+> **Only the literal byte string `1` trips the gate.** This is a
+> deployment trap if your automation follows the common Docker /
+> Kubernetes idiom of `ENV=true`:
+>
+>   * `ATLAS_PRODUCTION=1` — gate **fires**, per-tenant subcommands refuse;
+>   * `ATLAS_PRODUCTION=true` — gate **silently does not fire**, dev seed signs;
+>   * `ATLAS_PRODUCTION=yes` — gate **silently does not fire**, dev seed signs;
+>   * `ATLAS_PRODUCTION=on` — gate **silently does not fire**, dev seed signs;
+>   * `ATLAS_PRODUCTION="1 "` (trailing whitespace) — gate **silently does not fire**;
+>   * unset — gate **silently does not fire**, dev seed signs.
+>
+> Wire your deploy automation to assert the value is exactly `1` (no
+> trimming, no truthy-coercion). V1.10 inverts these semantics to
+> positive opt-in and removes the literal-string trap.
+>
+> **Unset or non-literal `ATLAS_PRODUCTION` in a production deployment
+> is a misconfiguration.** Treat it like an unset DB password: the
+> deployment should fail closed at startup, not silently keep
+> running. V1.9 does not enforce this for you — operators must wire
+> a deploy-time check that `ATLAS_PRODUCTION` is byte-exactly `1` on
+> every signer host before traffic flows.
+>
+> **V1.9 has no production-safe path.** Even with `ATLAS_PRODUCTION=1`
+> set, V1.9 cannot serve true production traffic — the gate refuses
+> per-tenant signing because there is no sealed seed source yet.
+> Setting the gate is a *forward-compatibility* step (the same env
+> var carries V1.10's positive-opt-in semantics) and a *failure-mode*
+> guarantee (fail-loud refusal vs silent dev-seed leakage), not a
+> green-light to take real traffic. Wait for V1.10's sealed-seed
+> loader before pointing real users at the signer.
+
 To prevent accidental use of the dev seed in production, every V1.9
-per-tenant subcommand refuses to run when `ATLAS_PRODUCTION=1`:
+per-tenant subcommand refuses to run *when* `ATLAS_PRODUCTION=1`:
 
 - `atlas-signer derive-key --workspace <ws>`
 - `atlas-signer derive-pubkey --workspace <ws>`
 - `atlas-signer rotate-pubkey-bundle --workspace <ws>`
 - `atlas-signer sign --derive-from-workspace <ws>`
 
+The gate's purpose is to make the V1.9 dev seed impossible to use
+*by accident in a production environment that has been correctly
+configured*. The gate is **not** a guarantee that production is
+configured correctly.
+
 ```bash
 # In production environments — set this on the signer host:
 export ATLAS_PRODUCTION=1
+# atlas-signer per-tenant subcommands will now refuse to run with
+# the dev seed. Wire a real seed source (V1.10) before flipping.
 ```
 
-When V1.10 ships, the production-gate switch flips: `ATLAS_PRODUCTION=1`
-will activate the sealed-master-seed loader (HSM/TPM/cloud-KMS), and
-the per-tenant subcommands will run against the sealed handle instead
-of the dev seed. Operators should set `ATLAS_PRODUCTION=1` now in
-production and accept the refusal — the alternative (running the
-dev seed in production) is the unsafe path the gate exists to
-prevent.
+### V1.10 inversion (planned)
+
+When V1.10 ships, the production-gate semantics flip from negative
+guard to positive opt-in:
+
+- `ATLAS_PRODUCTION=1` becomes the **required** signal that the
+  operator has wired a sealed master seed (HSM/TPM/cloud-KMS).
+  Without it, the per-tenant subcommands refuse to run *at all* in
+  any context that the binary recognises as non-dev.
+- The dev path remains available in CI and local dev, gated by
+  build-time feature flag or an explicit `ATLAS_DEV_SEED=1` opt-in,
+  with loud stderr warnings on every invocation.
+- The "unset env var" failure mode disappears: operators must affirm
+  the seed source rather than affirm the absence of the dev source.
+
+Operators should set `ATLAS_PRODUCTION=1` *now* in production and
+accept the V1.9 refusal — the alternative (running the dev seed in
+production) is the unsafe path the gate exists to prevent. The same
+env var will keep working under V1.10 with the inverted semantics,
+so the runbook step is forward-compatible.
 
 ---
 
