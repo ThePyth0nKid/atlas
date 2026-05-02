@@ -32,6 +32,51 @@ sha2 = { workspace = true }
 # V1.9: HKDF-SHA256 for per-tenant Ed25519 workspace-key derivation
 # (info = "atlas-anchor-v1:" + workspace_id). RFC 5869.
 hkdf = { workspace = true }
+# V1.10: structured errors for the MasterSeedHkdf trait so sealed-seed
+# impls (PKCS#11, TPM, cloud-KMS) can categorise failures uniformly.
+thiserror = { workspace = true }
+# V1.10 wave 2 hardening: zeroize PIN bytes, the 32-byte HKDF output
+# returned by the HSM, and intermediate `[u8; 32]` key arrays before
+# their drops hit the allocator. Defends against memory-disclosure
+# attack classes (heap dumps, swap, freed-page reuse) on the signer
+# host. The seed itself never enters Atlas address space in HSM mode,
+# but the *derived* per-tenant 32-byte input to ed25519-dalek does —
+# that is what gets scrubbed here.
+zeroize = { workspace = true }
+
+# V1.10 wave 2: PKCS#11 v2.40 + v3.0 + v3.2 bindings for the sealed-seed
+# loader in `crate::hsm::pkcs11`. Optional + feature-gated so the crate
+# still builds in environments without a PKCS#11 module (WASM verifier
+# builds, doc-only CI), in which case the stub backend returns
+# `MasterSeedError::Unavailable` at run time. We pin the latest 0.12
+# series:
+#   * 0.11 introduced [`Mechanism::HkdfDerive`] / [`HkdfParams`]
+#     (PR #310 "Add mechanisms for simple key derivations") — the
+#     load-bearing primitive for byte-equivalent HKDF inside the HSM.
+#   * 0.12 marks `Session: Send` and decouples it from the `Pkcs11`
+#     lifetime, which lets us hold the authenticated session behind a
+#     `Mutex` for the lifetime of `Pkcs11MasterSeedHkdf` without
+#     fighting the borrow checker on every per-tenant derive.
+# CKM_HKDF_DERIVE is a v3.0 mechanism; SoftHSM2 ≥ 2.6 and all major
+# commercial HSMs (YubiHSM2, Nitrokey HSM 2, AWS CloudHSM, Thales
+# Luna) support it. The PRF stays SHA-256 to byte-match the dev impl.
+cryptoki = { version = "0.12", optional = true }
+
+[features]
+# Default off so the crate compiles in any workspace context (e.g.
+# wasm-only builds, lints, doc-only CI). Operators who want the
+# sealed-seed PKCS#11 path enable the feature explicitly via
+# `--features hsm`. Without this feature the crate still compiles
+# but the PKCS#11 stub returns `MasterSeedError::Unavailable` from
+# every operation so misconfigured deployments fail with a clear
+# remediation message.
+default = []
+
+# Enable the PKCS#11 sealed-seed backend. Pulls in cryptoki and exposes
+# the real `crate::hsm::pkcs11::Pkcs11MasterSeedHkdf` impl; without it,
+# the stub in `hsm::pkcs11` (under `#[cfg(not(feature = "hsm"))]`) takes
+# its place and fails closed.
+hsm = ["dep:cryptoki"]
 
 [dev-dependencies]
 # Mock Rekor server for the integration test of the Sigstore issuer flow.

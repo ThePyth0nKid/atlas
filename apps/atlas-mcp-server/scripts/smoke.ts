@@ -45,6 +45,16 @@ function fail(msg: string): never {
 }
 
 async function main(): Promise<void> {
+  // V1.10 gate inversion: per-tenant signer subcommands now require
+  // positive opt-in via `ATLAS_DEV_MASTER_SEED=1` (formerly the
+  // ATLAS_PRODUCTION negative opt-out). The smoke is test
+  // infrastructure simulating a properly-configured dev environment;
+  // we set the var here so child spawns of `atlas-signer` inherit it
+  // and the gate allows the dev seed. Real dev workflows (`pnpm dev`)
+  // must export this var explicitly — see apps/atlas-mcp-server/README.md
+  // and docs/OPERATOR-RUNBOOK.md §1 for the V1.9→V1.10 migration.
+  process.env.ATLAS_DEV_MASTER_SEED = "1";
+
   // 1. Sanity: signer binary is on disk
   const signer = resolveSignerBinary();
   if (!signer) {

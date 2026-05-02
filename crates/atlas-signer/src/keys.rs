@@ -58,6 +58,7 @@ use atlas_trust_core::per_tenant_kid_for;
 use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 /// V1.9 dev master seed. Production MUST replace this with a sealed
 /// secret (HSM/TPM/cloud-KMS) before going live; see
@@ -79,10 +80,15 @@ pub const DEV_MASTER_SEED: [u8; 32] = *b"atlas-master-seed-v1-dev-001-00\n";
 /// failure (production, staging touching real customer data, audit
 /// rehearsals against the real key roster).
 ///
-/// V1.9 has no sealed-seed loader yet — `production_gate` returns an
-/// error so the binary refuses every per-tenant subcommand instead of
-/// silently using the public dev key. V1.10 will replace this gate
-/// with an `ATLAS_MASTER_SEED_PATH` loader.
+/// V1.9 had no sealed-seed loader, so `production_gate` returned an
+/// error to refuse every per-tenant subcommand instead of silently
+/// using the public dev key. V1.10 wave 2 ships the sealed-seed loader
+/// at [`crate::hsm`]; the canonical V1.10 entry point is
+/// [`master_seed_loader`], which dispatches to the PKCS#11 backend
+/// when the HSM env trio is set and otherwise falls through to the
+/// V1.10 wave-1 [`master_seed_gate`] (positive opt-in for the dev
+/// seed). `production_gate` survives as the V1.9 paranoia layer
+/// nested inside [`master_seed_gate_with`].
 pub const PRODUCTION_GATE_ENV: &str = "ATLAS_PRODUCTION";
 
 /// Refuse to use `DEV_MASTER_SEED` if the environment marks this
@@ -93,8 +99,9 @@ pub const PRODUCTION_GATE_ENV: &str = "ATLAS_PRODUCTION";
 /// (unset, empty, `"0"`, `"true"`, `"yes"`, `"on"`, `"1 "` with
 /// trailing whitespace, …) allows the dev seed — V1.9 dev/CI
 /// environments run with the env var unset; production rollouts set
-/// `=1` and wait for the V1.10 sealed-seed loader before re-enabling
-/// per-tenant commands.
+/// `=1` and configure the V1.10 wave-2 sealed-seed loader
+/// (`ATLAS_HSM_PKCS11_LIB` / `ATLAS_HSM_SLOT` / `ATLAS_HSM_PIN_FILE`,
+/// see [`crate::hsm`]) to re-enable per-tenant commands.
 ///
 /// **Operator footgun (documented in `OPERATOR-RUNBOOK.md` §1):** the
 /// strict-`"1"` recognition is a deployment trap waiting for someone
@@ -110,6 +117,16 @@ pub const PRODUCTION_GATE_ENV: &str = "ATLAS_PRODUCTION";
 /// between tests is a data race). The injection seam also foreshadows
 /// V1.10: the sealed-seed loader will inject a seed source the same
 /// way this gate injects an env source.
+///
+/// **V1.10 status:** `production_gate` is no longer the binary's
+/// hot-path entry point. [`master_seed_gate`] subsumes it as the
+/// canonical V1.10 gate (calling `production_gate_with` internally
+/// for the V1.9 paranoia layer). The no-arg form survives for
+/// V1.9 backwards compat and as a stable point that external
+/// embedders (and the in-tree V1.10 `crate::hsm` loader's preflight)
+/// can depend on. Now part of the lib's public surface, so a
+/// missing-call lint no longer fires here — the `#[expect(dead_code)]`
+/// shim from V1.9 was dropped during the V1.10 lib refactor.
 pub fn production_gate() -> Result<(), String> {
     production_gate_with(|name| std::env::var(name).ok())
 }
@@ -130,12 +147,160 @@ where
     match env(PRODUCTION_GATE_ENV).as_deref() {
         Some("1") => Err(format!(
             "{PRODUCTION_GATE_ENV}=1 set, but atlas-signer is using the source-committed \
-             DEV_MASTER_SEED. V1.9 has no sealed-seed loader; refusing to derive per-tenant \
-             keys against a public dev seed. V1.10 closes this with HSM/TPM sealing — until \
-             then, run with {PRODUCTION_GATE_ENV} unset only in dev/CI."
+             DEV_MASTER_SEED. Refusing to derive per-tenant keys against a public dev seed. \
+             V1.10 wave 2 ships a sealed-seed loader at crate::hsm — configure the env trio \
+             (ATLAS_HSM_PKCS11_LIB, ATLAS_HSM_SLOT, ATLAS_HSM_PIN_FILE) and rebuild with \
+             --features hsm. See docs/OPERATOR-RUNBOOK.md §1 for the import ceremony."
         )),
         _ => Ok(()),
     }
+}
+
+/// V1.10 positive-opt-in environment variable. The dev master seed
+/// is now opt-in: an operator must set this variable to a recognised
+/// truthy value before any per-tenant subcommand will sign.
+///
+/// Recognised truthy values (case-insensitive, with leading/trailing
+/// ASCII whitespace tolerated):
+///   * `"1"`, `"true"`, `"yes"`, `"on"`
+///
+/// Anything else — including the env var being unset, empty, or set
+/// to `"0"`, `"false"`, `"no"`, `"off"`, or any other string — fails
+/// the gate. This is the inverse of [`PRODUCTION_GATE_ENV`]: V1.9
+/// asked operators to opt OUT of the dev seed (`ATLAS_PRODUCTION=1`
+/// blocks); V1.10 asks them to opt IN (`ATLAS_DEV_MASTER_SEED=1`
+/// allows). The default is now production-safe.
+pub const DEV_MASTER_SEED_OPT_IN_ENV: &str = "ATLAS_DEV_MASTER_SEED";
+
+/// V1.10 master-seed gate. Returns the [`MasterSeedHkdf`] impl this
+/// invocation should use, or an error message suitable for stderr.
+///
+/// **Layered checks (defence-in-depth):**
+///   1. **V1.9 paranoia:** if `ATLAS_PRODUCTION=1`, refuse the dev
+///      seed regardless of any V1.10 opt-in. An operator who
+///      explicitly says "this is production" overrides everything;
+///      this preserves V1.9 deployment safety habits across the
+///      V1.9→V1.10 transition.
+///   2. **V1.10 positive opt-in:** require `ATLAS_DEV_MASTER_SEED`
+///      to be a recognised truthy value (`1`, `true`, `yes`, `on`,
+///      case-insensitive). Anything else refuses.
+///   3. **Sealed-seed lookup (V1.10 wave 2, shipped):** lives in
+///      [`master_seed_loader`]. When the HSM env trio
+///      (`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`)
+///      is set, the loader returns
+///      [`crate::hsm::pkcs11::Pkcs11MasterSeedHkdf`] instead of
+///      `DevMasterSeedHkdf` and the gate's layers 1–2 are not
+///      consulted (no dev-seed code path). HSM init failure is fatal
+///      — there is no silent fallback to the dev seed.
+///
+/// **Why not auto-detect a sealed seed source?** Explicit opt-in
+/// surfaces the choice in the operator's deploy manifest. An
+/// implicit "if HSM is present, use HSM; else dev seed" would be a
+/// silent fallback the next deployment review would have to verify.
+/// The trait dispatch is selected by env, not by feature detection.
+///
+/// **Why a strict allow-list of truthy values?** V1.9 had a
+/// documented operator footgun: `ATLAS_PRODUCTION=true` silently
+/// allowed the dev seed (only literal `"1"` blocked). V1.10 inverts
+/// the polarity AND the allow-list logic so the safe direction is
+/// the default direction: a typo on opt-in still refuses, instead
+/// of silently allowing.
+///
+/// Returns `Ok(DevMasterSeedHkdf)` on success — this gate is the
+/// dev-seed branch only and intentionally returns the concrete dev
+/// impl. The wider runtime dispatch (HSM trio → PKCS#11 backend, env
+/// trio absent → dev gate) lives in [`master_seed_loader`], which
+/// returns `Box<dyn MasterSeedHkdf>` and reaches `master_seed_gate`
+/// only on the dev branch. The split keeps the dev path
+/// monomorphised (cheaper in tests, clearer in error messages) while
+/// the binary's hot path goes through the trait-object loader.
+pub fn master_seed_gate() -> Result<DevMasterSeedHkdf, String> {
+    master_seed_gate_with(|name| std::env::var(name).ok())
+}
+
+/// Test-injection form of [`master_seed_gate`]. Takes an env reader
+/// (a pure closure mapping a variable name to its optional value)
+/// so test code can drive the gate without touching the global
+/// process env.
+///
+/// Same injection style as [`production_gate_with`]; reuses the
+/// same closure shape so V1.10 callers can supply a single env
+/// source for both the V1.9 paranoia check and the V1.10 opt-in.
+pub fn master_seed_gate_with<F>(env: F) -> Result<DevMasterSeedHkdf, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    // Layer 1: V1.9 paranoia. If the operator says this is
+    // production, refuse the dev seed regardless of opt-in.
+    production_gate_with(&env)?;
+
+    // Layer 2: V1.10 positive opt-in.
+    let raw = env(DEV_MASTER_SEED_OPT_IN_ENV).unwrap_or_default();
+    let normalised = raw.trim().to_ascii_lowercase();
+    match normalised.as_str() {
+        "1" | "true" | "yes" | "on" => Ok(DevMasterSeedHkdf),
+        _ => Err(format!(
+            "{DEV_MASTER_SEED_OPT_IN_ENV} not set to a recognised truthy value \
+             (got {raw:?}). V1.10 inverts the V1.9 gate: the source-committed \
+             DEV_MASTER_SEED now requires positive opt-in. Set \
+             {DEV_MASTER_SEED_OPT_IN_ENV}=1 (or true/yes/on, case-insensitive) \
+             in dev/CI environments. Production should use the V1.10 wave-2 \
+             sealed-seed loader: configure the env trio \
+             (ATLAS_HSM_PKCS11_LIB, ATLAS_HSM_SLOT, ATLAS_HSM_PIN_FILE) and \
+             rebuild with --features hsm. See docs/OPERATOR-RUNBOOK.md §1 \
+             for the V1.9→V1.10 migration and the HSM import ceremony."
+        )),
+    }
+}
+
+/// V1.10 wave 2 master-seed loader. Returns the [`MasterSeedHkdf`]
+/// impl this invocation should use — either the PKCS#11 sealed-seed
+/// loader (when the HSM env trio is set) or the dev seed (after the
+/// V1.10 wave-1 gate clears). The return is `Box<dyn MasterSeedHkdf>`
+/// so the binary's per-tenant subcommands route uniformly through the
+/// existing `_via` helpers regardless of which backend is active.
+///
+/// **Dispatch order:**
+///   1. **HSM trio first.** If any of `ATLAS_HSM_PKCS11_LIB`,
+///      `ATLAS_HSM_SLOT`, or `ATLAS_HSM_PIN_FILE` is set, the operator
+///      intends sealed-seed mode. Partial trios are a hard error
+///      (`HsmConfig::from_env` refuses, surfacing the operator's
+///      intent in the error message); full trios attempt
+///      [`Pkcs11MasterSeedHkdf::open`](crate::hsm::pkcs11::Pkcs11MasterSeedHkdf::open).
+///   2. **Dev seed second.** With no HSM trio set, fall through to
+///      the V1.10 wave-1 [`master_seed_gate`] — which itself refuses
+///      unless the operator has positively opted into the dev seed
+///      via `ATLAS_DEV_MASTER_SEED=1`.
+///
+/// **Why HSM-first?** An operator who has set up a sealed-seed deploy
+/// expects the loader to use it. Falling through to the dev seed when
+/// HSM init fails would be the silent-fallback class V1.10 is closing.
+/// Sealed-seed init failure is fatal here — the operator must fix the
+/// HSM config or unset the trio, not silently sign with a dev key.
+pub fn master_seed_loader() -> Result<Box<dyn MasterSeedHkdf>, String> {
+    master_seed_loader_with(|name| std::env::var(name).ok())
+}
+
+/// Test-injection form of [`master_seed_loader`]. Takes an env reader
+/// closure — same shape as [`master_seed_gate_with`] and
+/// [`crate::hsm::config::HsmConfig::from_env`] — so a single env source
+/// drives both the HSM trio parse and the dev-seed gate.
+pub fn master_seed_loader_with<F>(env: F) -> Result<Box<dyn MasterSeedHkdf>, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    // Layer 1: HSM trio. If any of the three env vars is set, we
+    // commit to sealed-seed mode; partial trios refuse via
+    // `HsmConfig::from_env`.
+    if let Some(cfg) = crate::hsm::config::HsmConfig::from_env(&env)? {
+        let pkcs11 = crate::hsm::pkcs11::Pkcs11MasterSeedHkdf::open(cfg)
+            .map_err(|e| format!("HSM open failed: {e}"))?;
+        return Ok(Box::new(pkcs11));
+    }
+
+    // Layer 2: dev seed via the V1.10 wave-1 gate.
+    let dev = master_seed_gate_with(&env)?;
+    Ok(Box::new(dev))
 }
 
 /// Maximum byte length of a `workspace_id`. Bounding the input here
@@ -241,6 +406,16 @@ pub const HKDF_INFO_PREFIX: &str = "atlas-anchor-v1:";
 /// requested output length exceeds `255 * 32 = 8160` bytes; we ask for
 /// 32, so the call cannot fail. The `expect` documents that
 /// invariant rather than silently swallowing an error path.
+///
+/// **V1.10 routing:** the production path now goes through
+/// [`MasterSeedHkdf`] via [`derive_workspace_signing_key_via`]. This
+/// explicit-seed leaf is retained for (a) the rotation test
+/// (`different_master_seeds_yield_different_keys`), (b) the pinned-
+/// pubkey golden tests, (c) the V1.10 wave-2 import-ceremony tests
+/// in `crate::hsm` (verify the HSM-derived key matches the
+/// software-derived key for a known seed), and (d) future audit
+/// tooling that wants to drive arbitrary seeds without instantiating
+/// a trait impl. Public surface in the V1.10 lib refactor.
 pub fn derive_workspace_signing_key(
     master_seed: &[u8; 32],
     workspace_id: &str,
@@ -253,17 +428,178 @@ pub fn derive_workspace_signing_key(
     SigningKey::from_bytes(&key_bytes)
 }
 
-/// Convenience: derive the per-workspace signing key using the
-/// crate-default `DEV_MASTER_SEED`. Production code MUST switch to
-/// `derive_workspace_signing_key` with a sealed-key handle.
+/// Abstraction over the V1.9 HKDF-SHA256 master-seed derivation
+/// surface. V1.9 backs this with [`DevMasterSeedHkdf`] (in-memory
+/// [`DEV_MASTER_SEED`]); V1.10 wave 2 adds
+/// [`crate::hsm::pkcs11::Pkcs11MasterSeedHkdf`] (gated behind the
+/// `hsm` feature) that performs the HKDF inside an HSM/TPM token
+/// without ever exposing the seed to host memory.
 ///
-/// `pub(crate)` so the dispatch gate in `main.rs` is the only entry
-/// point. V1.10 will route per-tenant secret material through a
-/// `MasterSeedHkdf` trait; consumers outside this crate should never
-/// have a way to bypass the gate by calling the dev-seed convenience
-/// directly.
+/// **Trust property.** The trait deliberately exposes only one
+/// operation: "given an `info` parameter, return 32 bytes of HKDF
+/// output." It does NOT expose the seed itself, an extract step, or
+/// a "give me a copy of the master key" method. Implementations are
+/// the only place the seed lives, and the trait surface is the only
+/// way out — sealed-key impls (PKCS#11, TPM, cloud-KMS) honour that
+/// boundary by performing the entire derivation inside the device.
+///
+/// **Send + Sync.** Required so the V1.10 MCP-server side can hold a
+/// `Arc<dyn MasterSeedHkdf>` across async tasks. The trait is also
+/// dyn-safe (no generics, no `Self` returns, no `async fn`) so call
+/// sites can dispatch dev-vs-sealed at runtime via `Box<dyn ...>`.
+///
+/// **Why not return `[u8; 32]`?** The `&mut [u8; 32]` form lets a
+/// caller place the buffer in stack frame storage it controls
+/// (e.g. wrapped in `Zeroizing`) without the trait method having to
+/// know about the wrapper type. The dev impl below still copies
+/// through `SigningKey::from_bytes`, but the V1.10 sealed loaders
+/// gain explicit lifetime control over the derived bytes.
+pub trait MasterSeedHkdf: Send + Sync {
+    /// Run HKDF-Expand over the implementation's master seed (with
+    /// `salt = None`) using `info` as the domain-separation
+    /// parameter, writing exactly 32 bytes into `out`.
+    ///
+    /// On error, the contents of `out` are unspecified — the caller
+    /// MUST NOT use them. Implementations SHOULD zero `out` before
+    /// returning an error if they wrote partial output, but the
+    /// contract above lets simple impls skip the zeroize step.
+    fn derive_for(
+        &self,
+        info: &[u8],
+        out: &mut [u8; 32],
+    ) -> Result<(), MasterSeedError>;
+}
+
+/// Error returned by [`MasterSeedHkdf`]. Categorises the three
+/// failure modes the V1.10 wave-2 sealed-seed loader produces —
+/// `Locked` (HSM PIN missing or session not authenticated),
+/// `Unavailable` (token absent, driver missing, network HSM
+/// unreachable), and `DeriveFailed` (the device returned an error
+/// during the derive call).
+///
+/// The dev impl never returns an error in practice (in-memory
+/// HKDF-Expand of 32 bytes cannot fail — the only failure mode of
+/// `hkdf::Hkdf::expand` is requesting more than `255 * HashLen`
+/// bytes), but propagation through the same error type keeps every
+/// call site uniform.
+///
+/// `#[non_exhaustive]` so the V1.10 PKCS#11 impl can introduce more
+/// granular variants (e.g. `PinExpired`, `TokenRemoved`) without a
+/// SemVer break of downstream consumers.
+///
+/// V1.10 lib refactor: the per-variant `#[expect(dead_code)]` shim
+/// from V1.9 was dropped. The enum is part of the public lib API
+/// now; rustc no longer fires dead-code on `pub` enum variants in a
+/// library, so the lint expectation would be unfulfilled. The
+/// V1.10 wave-2 PKCS#11 backend (`crate::hsm::pkcs11`) constructs
+/// `Locked` and `Unavailable` in its error mapping.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum MasterSeedError {
+    /// Sealed-key store reachable but locked. Operator-recoverable
+    /// (login, supply PIN, re-authenticate session).
+    #[error("master seed source locked: {0}")]
+    Locked(String),
+    /// Sealed-key store unreachable. Usually a deployment misconfig
+    /// (driver path wrong, token slot empty, network HSM down).
+    #[error("master seed source unavailable: {0}")]
+    Unavailable(String),
+    /// HKDF-Expand or device-derive call returned an error. The
+    /// V1.10 PKCS#11 impl maps PKCS#11 RV codes here; the dev impl
+    /// uses this for the (impossible) HKDF-Expand-too-long case.
+    #[error("master seed HKDF derivation failed: {0}")]
+    DeriveFailed(String),
+}
+
+/// Dev-only [`MasterSeedHkdf`] impl wrapping the source-committed
+/// [`DEV_MASTER_SEED`].
+///
+/// This was the V1.9 production path. V1.10 wave 2 replaces it at the
+/// call site with [`crate::hsm::pkcs11::Pkcs11MasterSeedHkdf`] when
+/// the HSM env trio is set; [`master_seed_loader`] handles the
+/// dispatch so the binary never sees the dev seed in HSM mode.
+/// [`production_gate`] continues to refuse the dev seed when
+/// `ATLAS_PRODUCTION=1`, layered inside [`master_seed_gate_with`] —
+/// so even with the HSM trio absent, the dev impl can never reach
+/// a production per-tenant signing path.
+///
+/// Zero-sized: cloning and copying are free; the impl is stateless
+/// because the seed lives in the static [`DEV_MASTER_SEED`] constant.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DevMasterSeedHkdf;
+
+impl MasterSeedHkdf for DevMasterSeedHkdf {
+    fn derive_for(
+        &self,
+        info: &[u8],
+        out: &mut [u8; 32],
+    ) -> Result<(), MasterSeedError> {
+        let hk = Hkdf::<Sha256>::new(None, &DEV_MASTER_SEED);
+        hk.expand(info, out).map_err(|e| {
+            // `hkdf::InvalidLength` only fires when the requested
+            // output exceeds 8160 bytes, which a 32-byte fixed buffer
+            // cannot do. Map to `DeriveFailed` for completeness so the
+            // call site never has to handle a panic path.
+            MasterSeedError::DeriveFailed(format!("HKDF-Expand: {e}"))
+        })
+    }
+}
+
+/// Trait-routed counterpart of [`derive_workspace_signing_key`].
+/// Assembles the V1.9 HKDF info string (`"atlas-anchor-v1:" ||
+/// workspace_id`) and delegates the 32-byte derive to the supplied
+/// [`MasterSeedHkdf`].
+///
+/// V1.10's sealed-seed plumbing routes through this function so the
+/// HSM impl plugs in via `derive_workspace_signing_key_via(&hsm,
+/// workspace_id)` without the call sites needing to know whether the
+/// seed is in-memory or sealed inside a token.
+///
+/// `H: ?Sized` so callers can pass either an owned impl
+/// (`&DevMasterSeedHkdf`) or a trait object (`&dyn MasterSeedHkdf`,
+/// e.g. when the seed source is selected at runtime). Generic-by-
+/// default keeps the dev path monomorphised for the pinned-pubkey
+/// golden tests; runtime dispatch is opt-in via the trait-object
+/// coercion at the call site.
+pub fn derive_workspace_signing_key_via<H: MasterSeedHkdf + ?Sized>(
+    hkdf: &H,
+    workspace_id: &str,
+) -> Result<SigningKey, MasterSeedError> {
+    let info = format!("{HKDF_INFO_PREFIX}{workspace_id}");
+    // `Zeroizing<[u8; 32]>` scrubs the per-tenant derived seed on every
+    // exit path (Ok, Err, panic). `SigningKey::from_bytes` clones the
+    // bytes into the dalek-internal scalar; once we return, the only
+    // copy of this material lives inside the `SigningKey`, which has its
+    // own zeroize-on-drop semantics. Without the wrapper, the 32-byte
+    // stack array would be left as freed memory after the function
+    // returns — recoverable from a stack-trace in a core dump.
+    let mut key_bytes: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+    hkdf.derive_for(info.as_bytes(), &mut key_bytes)?;
+    Ok(SigningKey::from_bytes(&key_bytes))
+}
+
+/// Test-only convenience: derive the per-workspace signing key
+/// using the crate-default [`DEV_MASTER_SEED`] via the
+/// [`MasterSeedHkdf`] trait, with no gate check.
+///
+/// V1.9 had `derive_workspace_signing_key_default` on the binary's
+/// hot path (gated by `production_gate`). V1.10 inverts the gate to
+/// positive opt-in via [`master_seed_gate`]; the binary now selects
+/// the trait impl through the gate and calls
+/// [`derive_workspace_signing_key_via`] directly. This convenience
+/// remains for the in-crate test harness (golden vectors, signature
+/// round-trips, validate_workspace_id smoke).
+///
+/// `#[cfg(test)]` enforces the test-only intent at the type
+/// system: the function does not exist in non-test builds, so
+/// no caller can accidentally reach for it from binary code and
+/// bypass the gate.
+#[cfg(test)]
 pub(crate) fn derive_workspace_signing_key_default(workspace_id: &str) -> SigningKey {
-    derive_workspace_signing_key(&DEV_MASTER_SEED, workspace_id)
+    derive_workspace_signing_key_via(&DevMasterSeedHkdf, workspace_id).expect(
+        "DevMasterSeedHkdf cannot fail: in-memory HKDF-Expand of 32 bytes is well \
+         within the 8160-byte ceiling",
+    )
 }
 
 /// Per-tenant identity for a workspace: the canonical kid the verifier
@@ -272,19 +608,26 @@ pub(crate) fn derive_workspace_signing_key_default(workspace_id: &str) -> Signin
 ///
 /// `Debug` is implemented manually below so accidental `dbg!()` or
 /// `tracing` calls do not print `secret_hex` to logs.
+///
+/// **Visibility (V1.10 lib refactor):** `pub` so the binary in
+/// `src/main.rs` (now a separate crate from the library) can construct
+/// the JSON output shapes for `derive-key` / `derive-pubkey` /
+/// `rotate-pubkey-bundle`. The `Debug` redaction is the only sensitive-
+/// field guard; consumers that emit the struct over a wire MUST drop
+/// `secret_hex` explicitly (the `derive-pubkey` JSON shape does this).
 #[derive(Clone)]
-pub(crate) struct PerTenantIdentity {
+pub struct PerTenantIdentity {
     /// `format!("atlas-anchor:{workspace_id}")` — the per-tenant kid
     /// the verifier expects under strict mode.
-    pub(crate) kid: String,
+    pub kid: String,
     /// 32-byte Ed25519 public key, base64url-no-pad encoded — wire
     /// format for `PubkeyBundle.keys`.
-    pub(crate) pubkey_b64url: String,
+    pub pubkey_b64url: String,
     /// 32-byte secret as 64-char hex — fed to `atlas-signer sign
     /// --secret-stdin` (production) or `derive-key` JSON output (dev).
     /// Treat as sensitive; never log. The `Debug` impl below redacts
     /// this field; do not derive `Debug` automatically.
-    pub(crate) secret_hex: String,
+    pub secret_hex: String,
 }
 
 /// Manual `Debug` impl that redacts `secret_hex`. The derived `Debug`
@@ -302,28 +645,49 @@ impl std::fmt::Debug for PerTenantIdentity {
     }
 }
 
-/// Derive the public-facing `PerTenantIdentity` for `workspace_id`.
+/// Trait-routed counterpart of `per_tenant_identity`.
 ///
-/// Wraps `derive_workspace_signing_key_default` and stitches the
-/// canonical kid + base64url pubkey + hex secret into one record. The
-/// MCP server consumes this via the `derive-key` JSON output.
+/// Derives the workspace signing key via the supplied
+/// [`MasterSeedHkdf`] and stitches the canonical kid + base64url
+/// pubkey + hex secret into one record. The MCP server consumes
+/// this via the `derive-key` JSON output.
 ///
-/// `pub(crate)` for the same reason as `derive_workspace_signing_key_default`:
-/// the binary's CLI dispatch is the only legitimate caller, and V1.10
-/// adds a sibling `atlas-signer-hsm` crate that will provide its own
-/// gated entry point rather than reaching into this one.
-pub(crate) fn per_tenant_identity(workspace_id: &str) -> PerTenantIdentity {
+/// V1.10 binary call sites pair this with [`master_seed_gate`] to
+/// enforce positive opt-in for the dev seed; the gate selects the
+/// `DevMasterSeedHkdf` impl (or, after Task #10, a sealed-seed
+/// PKCS#11 impl) and hands it here.
+///
+/// Returns `Result` because the trait is fallible — a sealed-seed
+/// impl can return `MasterSeedError::Locked`/`Unavailable` mid-call.
+/// The dev impl never errors in practice, but propagating the
+/// `Result` keeps every per-tenant call site honest about V1.10
+/// failure modes.
+pub fn per_tenant_identity_via<H: MasterSeedHkdf + ?Sized>(
+    hkdf: &H,
+    workspace_id: &str,
+) -> Result<PerTenantIdentity, MasterSeedError> {
     use base64::Engine;
-    let signing_key = derive_workspace_signing_key_default(workspace_id);
+    let signing_key = derive_workspace_signing_key_via(hkdf, workspace_id)?;
     let pubkey_bytes = signing_key.verifying_key().to_bytes();
     let pubkey_b64url =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey_bytes);
     let secret_hex = hex::encode(signing_key.to_bytes());
-    PerTenantIdentity {
+    Ok(PerTenantIdentity {
         kid: per_tenant_kid_for(workspace_id),
         pubkey_b64url,
         secret_hex,
-    }
+    })
+}
+
+/// Test-only convenience wrapping [`per_tenant_identity_via`] with
+/// the dev master-seed impl. Mirrors `derive_workspace_signing_key_default`'s
+/// `#[cfg(test)]` rationale: the function does not exist in non-test
+/// builds, so no caller can bypass the gate by calling it from
+/// binary code.
+#[cfg(test)]
+pub(crate) fn per_tenant_identity(workspace_id: &str) -> PerTenantIdentity {
+    per_tenant_identity_via(&DevMasterSeedHkdf, workspace_id)
+        .expect("DevMasterSeedHkdf cannot fail")
 }
 
 #[cfg(test)]
@@ -605,6 +969,503 @@ mod tests {
         // and returns something. The actual policy is covered by the
         // injection-form tests above.
         let _ = production_gate();
+    }
+
+    use crate::test_support::env_pairs;
+
+    // V1.10 master_seed_gate — positive opt-in semantics, layered on
+    // top of V1.9 ATLAS_PRODUCTION paranoia. The tests below pin both
+    // the security boundary (refuse-by-default, refuse-on-typo,
+    // refuse-when-production-flag-set) and the operator UX (accept
+    // common truthy spellings case-insensitively, tolerate stray
+    // whitespace from quoting/escaping in shell scripts).
+
+    #[test]
+    fn master_seed_gate_refuses_when_opt_in_unset() {
+        let result = master_seed_gate_with(env_pairs(&[]));
+        let err = result.expect_err("V1.10 default must refuse without explicit opt-in");
+        assert!(
+            err.contains(DEV_MASTER_SEED_OPT_IN_ENV),
+            "error must name the env var so operators can grep for it; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn master_seed_gate_refuses_when_opt_in_empty() {
+        let result =
+            master_seed_gate_with(env_pairs(&[(DEV_MASTER_SEED_OPT_IN_ENV, "")]));
+        assert!(
+            result.is_err(),
+            "empty {DEV_MASTER_SEED_OPT_IN_ENV} must NOT be treated as opt-in",
+        );
+    }
+
+    #[test]
+    fn master_seed_gate_refuses_falsy_values() {
+        // The strict allow-list is the V1.10 inversion of V1.9's
+        // strict-only-"1" footgun: now the safe direction (refuse)
+        // is the default, so misspellings or falsy values stay
+        // refused instead of silently allowing.
+        for v in ["0", "false", "no", "off", "FALSE", "False"] {
+            let result =
+                master_seed_gate_with(env_pairs(&[(DEV_MASTER_SEED_OPT_IN_ENV, v)]));
+            assert!(
+                result.is_err(),
+                "falsy value {v:?} must NOT trip V1.10 opt-in",
+            );
+        }
+    }
+
+    #[test]
+    fn master_seed_gate_refuses_typos_and_unknown_values() {
+        // V1.10 inversion explicitly: anything outside the allow-list
+        // refuses. A future "be liberal in what you accept" patch
+        // would degrade the security boundary; this test pins it.
+        for v in ["enabled", "yep", "please", "DevMasterSeed!", "1.0", "01"] {
+            let result =
+                master_seed_gate_with(env_pairs(&[(DEV_MASTER_SEED_OPT_IN_ENV, v)]));
+            assert!(
+                result.is_err(),
+                "unknown value {v:?} must NOT trip V1.10 opt-in",
+            );
+        }
+    }
+
+    #[test]
+    fn master_seed_gate_allows_recognised_truthy_values() {
+        for v in ["1", "true", "yes", "on"] {
+            let result =
+                master_seed_gate_with(env_pairs(&[(DEV_MASTER_SEED_OPT_IN_ENV, v)]));
+            assert!(
+                result.is_ok(),
+                "truthy value {v:?} must trip V1.10 opt-in",
+            );
+        }
+    }
+
+    #[test]
+    fn master_seed_gate_truthy_values_are_case_insensitive() {
+        // K8s/Docker manifests sometimes uppercase env values for
+        // visual consistency; accept TRUE/YES/ON/On/yEs as if they
+        // were the canonical lowercase spellings.
+        for v in ["TRUE", "True", "YES", "Yes", "ON", "On", "1", "yEs"] {
+            let result =
+                master_seed_gate_with(env_pairs(&[(DEV_MASTER_SEED_OPT_IN_ENV, v)]));
+            assert!(
+                result.is_ok(),
+                "case-variant {v:?} must trip V1.10 opt-in",
+            );
+        }
+    }
+
+    #[test]
+    fn master_seed_gate_tolerates_surrounding_whitespace() {
+        // A common deploy-script footgun is a stray space or trailing
+        // newline from a shell heredoc. V1.9's strict-"1" gate
+        // silently fell through on `"1 "` (trailing space); V1.10
+        // tolerates whitespace explicitly so the operator's intent
+        // is honoured rather than silently inverted.
+        for v in [" 1", "1 ", " true ", "\ttrue", "yes\n", " On\r\n"] {
+            let result =
+                master_seed_gate_with(env_pairs(&[(DEV_MASTER_SEED_OPT_IN_ENV, v)]));
+            assert!(
+                result.is_ok(),
+                "whitespace-padded {v:?} must trip V1.10 opt-in",
+            );
+        }
+    }
+
+    #[test]
+    fn master_seed_gate_atlas_production_overrides_opt_in() {
+        // Defence-in-depth: if the operator has set ATLAS_PRODUCTION=1
+        // (V1.9 sense — "this is production, refuse dev seed"), that
+        // refusal MUST stand even if ATLAS_DEV_MASTER_SEED=1 is also
+        // set. A misconfigured pipeline that ships both flags should
+        // not silently degrade to dev-seed signing.
+        let result = master_seed_gate_with(env_pairs(&[
+            (PRODUCTION_GATE_ENV, "1"),
+            (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+        ]));
+        let err = result.expect_err(
+            "ATLAS_PRODUCTION=1 must override the V1.10 opt-in (V1.9 paranoia layer)",
+        );
+        assert!(
+            err.contains(PRODUCTION_GATE_ENV),
+            "error must surface the V1.9 paranoia variant first; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn master_seed_gate_default_uses_process_env() {
+        // Sanity: `master_seed_gate()` wraps `master_seed_gate_with(
+        // std::env::var)`. We don't mutate the env here — we just
+        // confirm the wrapper compiles and returns something. The
+        // actual policy is covered by the injection-form tests above.
+        let _ = master_seed_gate();
+    }
+
+    #[test]
+    fn master_seed_gate_error_mentions_runbook() {
+        // Error must point operators at the migration doc so a
+        // V1.9→V1.10 upgrade has a clear remediation pathway.
+        let err = master_seed_gate_with(env_pairs(&[])).unwrap_err();
+        assert!(
+            err.contains("OPERATOR-RUNBOOK"),
+            "error should reference the runbook for V1.9→V1.10 migration; got {err:?}",
+        );
+    }
+
+    // V1.10 wave 2 — master_seed_loader dispatcher tests. Pin the
+    // dispatch order (HSM trio first, dev seed second) and the
+    // refusal semantics on the obvious operator footguns.
+
+    #[test]
+    fn master_seed_loader_falls_through_to_dev_when_no_hsm_trio() {
+        // Default-shape dev test: no HSM trio, dev opt-in set.
+        // The loader must succeed and hand back a usable trait
+        // object. Do NOT exercise pubkey derivation here — that's
+        // covered by the dev golden tests; this test only pins the
+        // dispatch outcome.
+        let loader = master_seed_loader_with(env_pairs(&[(
+            DEV_MASTER_SEED_OPT_IN_ENV,
+            "1",
+        )]));
+        assert!(loader.is_ok(), "loader must succeed when opt-in is set");
+    }
+
+    #[test]
+    fn master_seed_loader_dev_path_matches_dev_impl_byte_for_byte() {
+        // Defence-in-depth: the Box<dyn MasterSeedHkdf> the loader
+        // returns for the dev path MUST produce byte-identical
+        // output to the explicit `DevMasterSeedHkdf` impl. Catches
+        // a future regression where the dev branch accidentally
+        // wraps the impl in a layer that shadows the derivation.
+        let loader = master_seed_loader_with(env_pairs(&[(
+            DEV_MASTER_SEED_OPT_IN_ENV,
+            "1",
+        )]))
+        .expect("dev loader path must succeed");
+        for ws in ["alice", "ws-mcp-default", "BANK.HAGEDORN"] {
+            let via_loader = derive_workspace_signing_key_via(&*loader, ws)
+                .expect("loader output must derive");
+            let via_explicit = derive_workspace_signing_key_via(&DevMasterSeedHkdf, ws)
+                .expect("dev impl is infallible");
+            assert_eq!(
+                via_loader.to_bytes(),
+                via_explicit.to_bytes(),
+                "loader-routed and explicit-dev paths must agree byte-for-byte for {ws:?}",
+            );
+        }
+    }
+
+    /// Helper: extract the error message from a loader call that
+    /// MUST have failed. The Box<dyn MasterSeedHkdf> Ok variant
+    /// doesn't impl Debug (the trait itself doesn't require it),
+    /// so `.unwrap_err()` won't compile — explicit match it is.
+    fn loader_err<F>(env: F) -> String
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        match master_seed_loader_with(env) {
+            Ok(_) => panic!("expected loader to refuse, but it succeeded"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn master_seed_loader_refuses_when_no_hsm_and_no_dev_opt_in() {
+        // Default behaviour without any env: refuse. This is the V1.10
+        // safety property — no silent fallback to dev seed without an
+        // explicit positive opt-in.
+        let err = loader_err(env_pairs(&[]));
+        assert!(
+            err.contains(DEV_MASTER_SEED_OPT_IN_ENV),
+            "no-opt-in error must name the env var to grep for; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn master_seed_loader_refuses_partial_hsm_trio() {
+        // Operator footgun: a single HSM env var set without the
+        // others. The loader MUST refuse — silent fallback to dev
+        // seed would defeat the audit signal.
+        let err = loader_err(env_pairs(&[(
+            crate::hsm::config::PKCS11_LIB_ENV,
+            "/usr/lib/softhsm/libsofthsm2.so",
+        )]));
+        assert!(
+            err.contains("partial"),
+            "partial HSM trio must produce 'partial' error; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn master_seed_loader_refuses_unreachable_hsm_module() {
+        // HSM trio set but the module path doesn't exist. The
+        // loader MUST refuse with "HSM open failed" — NOT fall
+        // through to dev seed. Sealed-seed init failure is fatal:
+        // the operator's intent is clear (HSM mode), and silently
+        // signing with a dev key would be the V1.10-class
+        // silent-fallback regression.
+        //
+        // The module path must be absolute on the host OS so the
+        // V1.10 wave-2 absolute-path guard in `HsmConfig::from_env`
+        // doesn't fire ahead of the open-failure path. On Unix
+        // `/no/such/...` qualifies; on Windows we need a drive
+        // prefix.
+        #[cfg(windows)]
+        let module_path = "C:\\no\\such\\pkcs11\\module.dll";
+        #[cfg(not(windows))]
+        let module_path = "/no/such/pkcs11/module.so";
+
+        let pin_path = std::env::temp_dir().join("atlas-test-nonexistent-pin");
+        let err = loader_err(env_pairs(&[
+            (crate::hsm::config::PKCS11_LIB_ENV, module_path),
+            (crate::hsm::config::SLOT_ENV, "0"),
+            (
+                crate::hsm::config::PIN_FILE_ENV,
+                pin_path.to_str().unwrap(),
+            ),
+        ]));
+        assert!(
+            err.contains("HSM open failed"),
+            "unreachable HSM must surface 'HSM open failed' prefix so operators can grep \
+             for it in stderr; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn master_seed_loader_atlas_production_overrides_dev_opt_in() {
+        // Layered defence carries through to the loader: even with
+        // ATLAS_DEV_MASTER_SEED=1 set, ATLAS_PRODUCTION=1 still
+        // refuses the dev path. This pins the V1.9 paranoia layer's
+        // behaviour through the loader-dispatch wrapper.
+        let err = loader_err(env_pairs(&[
+            (PRODUCTION_GATE_ENV, "1"),
+            (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+        ]));
+        assert!(
+            err.contains(PRODUCTION_GATE_ENV),
+            "ATLAS_PRODUCTION=1 must override the dev opt-in even through the loader; \
+             got {err:?}",
+        );
+    }
+
+    #[test]
+    fn master_seed_loader_default_uses_process_env() {
+        // Sanity: the no-arg `master_seed_loader()` wraps
+        // `master_seed_loader_with(std::env::var)`. We don't mutate
+        // the env here — we just confirm the wrapper compiles.
+        let _ = master_seed_loader();
+    }
+
+    #[test]
+    fn per_tenant_identity_via_matches_no_arg_form() {
+        // Sanity: the trait-routed and convenience forms must agree
+        // when both run against `DevMasterSeedHkdf`. Catches a future
+        // refactor where the no-arg form drifts from the trait-routed
+        // form (e.g. someone re-implements the kid prefix in one
+        // place but not the other).
+        for ws in ["alice", "ws-mcp-default"] {
+            let direct = per_tenant_identity(ws);
+            let via = per_tenant_identity_via(&DevMasterSeedHkdf, ws)
+                .expect("dev impl is infallible");
+            assert_eq!(direct.kid, via.kid);
+            assert_eq!(direct.pubkey_b64url, via.pubkey_b64url);
+            assert_eq!(direct.secret_hex, via.secret_hex);
+        }
+    }
+
+    /// Compile-time guarantee that the trait surface stays
+    /// thread-shareable. V1.10's MCP server path will hold a
+    /// `Arc<dyn MasterSeedHkdf>` across async tasks; if a future
+    /// PKCS#11 impl accidentally introduces non-`Send`/`Sync` state
+    /// (e.g. an `Rc`), this assertion fires before the linker does.
+    #[test]
+    fn master_seed_hkdf_dev_impl_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<DevMasterSeedHkdf>();
+    }
+
+    /// The trait-routed dev path must produce byte-identical output
+    /// to the explicit-seed function when both run against
+    /// [`DEV_MASTER_SEED`]. This is the load-bearing invariant of
+    /// Task #8: introducing the trait abstraction MUST NOT change
+    /// any derived pubkey, or every existing PubkeyBundle on disk
+    /// becomes invalid the moment V1.10 lands.
+    #[test]
+    fn dev_hkdf_matches_explicit_seed_path() {
+        for ws in ["alice", "bob", "ws-mcp-default", "BANK.HAGEDORN"] {
+            let via_trait = derive_workspace_signing_key_via(&DevMasterSeedHkdf, ws)
+                .expect("dev impl is infallible");
+            let via_explicit = derive_workspace_signing_key(&DEV_MASTER_SEED, ws);
+            assert_eq!(
+                via_trait.to_bytes(),
+                via_explicit.to_bytes(),
+                "trait-routed and explicit-seed paths must agree byte-for-byte for {ws:?}",
+            );
+            assert_eq!(
+                via_trait.verifying_key().to_bytes(),
+                via_explicit.verifying_key().to_bytes(),
+                "derived pubkeys must match for {ws:?} — trait abstraction must not \
+                 reroute the algorithm",
+            );
+        }
+    }
+
+    /// `derive_workspace_signing_key_default` (the in-crate
+    /// dispatch entry point) must agree with the trait-routed path.
+    /// Catches a future regression where someone "optimises" the
+    /// default-routing function to bypass the trait — that would
+    /// silently ship a different code path to production than the
+    /// one V1.10 will plug HSM impls into.
+    #[test]
+    fn default_dispatch_agrees_with_trait_routed_path() {
+        for ws in ["alice", "ws-mcp-default"] {
+            let direct = derive_workspace_signing_key_default(ws);
+            let via_trait = derive_workspace_signing_key_via(&DevMasterSeedHkdf, ws)
+                .expect("dev impl is infallible");
+            assert_eq!(direct.to_bytes(), via_trait.to_bytes());
+        }
+    }
+
+    /// Mock impl that returns a configurable `MasterSeedError`. Used
+    /// to verify that `derive_workspace_signing_key_via` propagates
+    /// every error variant verbatim — V1.10's PKCS#11 impl will
+    /// emit these errors and the call site MUST surface them
+    /// without remapping (operators rely on the variant + message
+    /// for diagnosis).
+    struct FailingHkdf {
+        err: fn() -> MasterSeedError,
+    }
+
+    impl MasterSeedHkdf for FailingHkdf {
+        fn derive_for(
+            &self,
+            _info: &[u8],
+            _out: &mut [u8; 32],
+        ) -> Result<(), MasterSeedError> {
+            Err((self.err)())
+        }
+    }
+
+    #[test]
+    fn derive_via_propagates_locked_error() {
+        let hkdf = FailingHkdf {
+            err: || MasterSeedError::Locked("HSM PIN required".to_string()),
+        };
+        let err = derive_workspace_signing_key_via(&hkdf, "alice").unwrap_err();
+        assert!(
+            matches!(err, MasterSeedError::Locked(ref m) if m.contains("PIN")),
+            "Locked variant + message must propagate verbatim; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn derive_via_propagates_unavailable_error() {
+        let hkdf = FailingHkdf {
+            err: || {
+                MasterSeedError::Unavailable(
+                    "PKCS#11 token slot 0 empty".to_string(),
+                )
+            },
+        };
+        let err = derive_workspace_signing_key_via(&hkdf, "alice").unwrap_err();
+        assert!(
+            matches!(err, MasterSeedError::Unavailable(ref m) if m.contains("slot 0")),
+            "Unavailable variant + message must propagate verbatim; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn derive_via_propagates_derive_failed_error() {
+        let hkdf = FailingHkdf {
+            err: || {
+                MasterSeedError::DeriveFailed(
+                    "CKR_MECHANISM_INVALID".to_string(),
+                )
+            },
+        };
+        let err = derive_workspace_signing_key_via(&hkdf, "alice").unwrap_err();
+        assert!(
+            matches!(err, MasterSeedError::DeriveFailed(ref m) if m.contains("CKR_")),
+            "DeriveFailed variant + message must propagate verbatim; got {err:?}",
+        );
+    }
+
+    /// Mock impl that captures the `info` bytes the call sees, so we
+    /// can pin the exact wire-format string the V1.10 PKCS#11 impl
+    /// will receive. If anyone refactors the info-prefix assembly,
+    /// this test trips before the change reaches production.
+    struct CapturingHkdf {
+        captured: std::cell::RefCell<Vec<u8>>,
+    }
+
+    impl MasterSeedHkdf for CapturingHkdf {
+        fn derive_for(
+            &self,
+            info: &[u8],
+            out: &mut [u8; 32],
+        ) -> Result<(), MasterSeedError> {
+            *self.captured.borrow_mut() = info.to_vec();
+            // Fill with a deterministic non-zero pattern so
+            // SigningKey::from_bytes succeeds and the call site
+            // doesn't ratchet a mock-specific assertion.
+            out.fill(0x42);
+            Ok(())
+        }
+    }
+
+    // SAFETY note for the test pool: `CapturingHkdf` uses `RefCell`
+    // (not `Sync`), but we don't move it across threads here — the
+    // capture is done from the same thread that calls `derive_for`.
+    // The trait declares `Send + Sync`, so we hand-implement them as
+    // a no-op witness to satisfy the bound for *this single-threaded
+    // test only*. Production impls (`DevMasterSeedHkdf`, V1.10's
+    // PKCS#11 impl) are genuinely thread-safe.
+    unsafe impl Send for CapturingHkdf {}
+    unsafe impl Sync for CapturingHkdf {}
+
+    #[test]
+    fn derive_via_passes_full_info_string_with_prefix() {
+        let mock = CapturingHkdf {
+            captured: std::cell::RefCell::new(Vec::new()),
+        };
+        let _ = derive_workspace_signing_key_via(&mock, "alice").expect("mock returns Ok");
+        let info = mock.captured.into_inner();
+        assert_eq!(
+            info,
+            b"atlas-anchor-v1:alice".to_vec(),
+            "trait must receive the FULL HKDF info string (prefix + workspace_id), \
+             not the bare workspace_id — V1.10 HSM impls rely on receiving the \
+             pre-assembled domain-separation tag verbatim",
+        );
+    }
+
+    /// Runtime dispatch via `&dyn MasterSeedHkdf` must compile and
+    /// produce the same key as static dispatch. V1.10 will use this
+    /// form when the gate selects dev-vs-HSM at startup time and
+    /// stores the choice in a trait object.
+    #[test]
+    fn derive_via_works_through_dyn_dispatch() {
+        let dev: &dyn MasterSeedHkdf = &DevMasterSeedHkdf;
+        let via_dyn = derive_workspace_signing_key_via(dev, "alice")
+            .expect("dev impl is infallible");
+        let via_static = derive_workspace_signing_key_via(&DevMasterSeedHkdf, "alice")
+            .expect("dev impl is infallible");
+        assert_eq!(via_dyn.to_bytes(), via_static.to_bytes());
+    }
+
+    /// `MasterSeedError`'s `Display` impl must surface the inner
+    /// message so operator-facing logs are useful — without this,
+    /// the V1.10 PKCS#11 impl's `CKR_*` codes would disappear into
+    /// generic "master seed source locked" lines.
+    #[test]
+    fn master_seed_error_display_includes_inner_message() {
+        let e = MasterSeedError::Locked("PIN required".to_string());
+        let s = format!("{e}");
+        assert!(s.contains("PIN required"), "Display lost inner message: {s:?}");
+        assert!(s.contains("locked"), "Display lost variant tag: {s:?}");
     }
 
     #[test]

@@ -1,6 +1,6 @@
-# Atlas Verifier — Defended Attack Surface (V1.9)
+# Atlas Verifier — Defended Attack Surface (V1.10)
 
-This document describes what the V1.9 verifier (`atlas-trust-core`, exposed as
+This document describes what the V1.10 verifier (`atlas-trust-core`, exposed as
 `atlas-verify-cli` and `atlas-verify-wasm`) actually defends against. It is
 written for auditors and security reviewers who want to know "what does this
 verifier protect, and where are the limits" without reading Rust.
@@ -356,13 +356,18 @@ makes no network call.
   a workspace's bundle to legacy form bypasses per-tenant isolation.
   Strict mode is the real security boundary for V1.9-issued data;
   document the gap.
-- **Production gate:** All V1.9 per-tenant subcommands
-  (`derive-key`, `derive-pubkey`, `rotate-pubkey-bundle`, and
-  `sign --derive-from-workspace`) call `keys::production_gate()`,
-  which refuses to run when `ATLAS_PRODUCTION=1` is set. V1.9 has no
-  sealed-seed loader; the gate ensures a production environment cannot
-  silently sign with the source-committed dev master seed. V1.10 will
-  replace the gate with an `ATLAS_MASTER_SEED_PATH` loader.
+- **Production gate (V1.9 — superseded by V1.10):** All V1.9 per-tenant
+  subcommands (`derive-key`, `derive-pubkey`, `rotate-pubkey-bundle`, and
+  `sign --derive-from-workspace`) called `keys::production_gate()`, which
+  refused to run when `ATLAS_PRODUCTION=1` was set. V1.9 had no sealed-seed
+  loader; the gate ensured a production environment could not silently sign
+  with the source-committed dev master seed. The opt-out shape was a
+  footgun (residual #6 below): forgetting the env var let the dev seed
+  through. V1.10 supersedes this with a positive opt-in
+  `keys::master_seed_gate()` — see *Master-seed gate inversion (V1.10)*
+  below. The V1.9 paranoia check is preserved as the inner layer:
+  `ATLAS_PRODUCTION=1` still refuses the dev seed regardless of the V1.10
+  opt-in, so a deployment with both set still fails closed.
 - **Workspace_id ingress validation:** `keys::validate_workspace_id`
   rejects empty strings, non-ASCII-printable bytes (control chars,
   Unicode confusables), and the `:` delimiter. The verifier itself
@@ -409,11 +414,19 @@ makes no network call.
   stdout — atomic file replace and inter-operator concurrency are the
   caller's responsibility. See `docs/OPERATOR-RUNBOOK.md` for the
   ceremony.
-- **`DEV_MASTER_SEED` ships with the source.** Until V1.10 supplies a
-  sealed-seed loader, any production deployment is responsible for
-  replacing the constant before building. The production gate
-  (`ATLAS_PRODUCTION=1`) blocks accidental use of the dev seed in
-  production but does not by itself supply a real one.
+- **`DEV_MASTER_SEED` ships with the source.** V1.10 wave 2 ships the
+  sealed-seed loader (`crate::hsm::pkcs11::Pkcs11MasterSeedHkdf`,
+  PKCS#11 backend, gated behind the `hsm` Cargo feature). Production
+  deployments configure the HSM trio (`ATLAS_HSM_PKCS11_LIB`,
+  `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`) so the master seed lives
+  only inside the token; the source-committed constant is then
+  unreachable from the production code path. Dev/CI deployments that
+  cannot run an HSM continue to fall through to V1.10 wave 1's
+  positive opt-in (`ATLAS_DEV_MASTER_SEED=1` required to admit the
+  dev seed) layered on top of the V1.9 paranoia gate
+  (`ATLAS_PRODUCTION=1` still refuses the dev seed unconditionally).
+  See *Master-seed gate inversion (V1.10)* below for the gate's
+  audit semantics.
 - **Master-seed rotation invalidates every historical
   `pubkey_bundle_hash`.** A workspace's per-tenant pubkey is a
   deterministic function of `(master_seed, workspace_id)`. Rotating
@@ -431,18 +444,141 @@ makes no network call.
   bundle-of-issuance, not the bundle-of-now. V1.10's sealed-seed loader
   inherits this property: rotating the *sealed* seed has the same
   effect as rotating the source-committed dev seed.
-- **The production gate is opt-out, not opt-in.** V1.9 ships
-  `production_gate()` as a *negative* guard — it blocks per-tenant
-  signing only when `ATLAS_PRODUCTION=1` is explicitly set. A
-  production deployment that forgets to set the env var will run
-  happily with the source-committed `DEV_MASTER_SEED` and emit signed
-  events whose pubkeys an auditor can re-derive from public source.
-  This is the dangerous default-state today, and operators should
-  treat *unset* `ATLAS_PRODUCTION` as a misconfiguration to fail
-  closed against, not an "off-by-default safe" condition. V1.10
-  inverts the gate to a positive opt-in (`ATLAS_PRODUCTION=1` becomes
-  the *required* signal that the operator has wired a sealed seed),
-  closing this footgun.
+- **[CLOSED in V1.10] The production gate is opt-out, not opt-in.**
+  V1.9 shipped `production_gate()` as a *negative* guard — it blocked
+  per-tenant signing only when `ATLAS_PRODUCTION=1` was explicitly
+  set. A production deployment that forgot to set the env var would
+  run happily with the source-committed `DEV_MASTER_SEED` and emit
+  signed events whose pubkeys an auditor could re-derive from public
+  source. V1.10 wave 1 inverts this footgun: per-tenant subcommands
+  refuse to start unless `ATLAS_DEV_MASTER_SEED=1` is *positively
+  asserted*. A deployment that forgets the env var now fails closed
+  with an actionable error, not "happily signs with public-source
+  keys". The V1.9 `ATLAS_PRODUCTION=1` paranoia check is preserved as
+  the inner layer for defence-in-depth. See *Master-seed gate
+  inversion (V1.10)* below.
+
+---
+
+## Master-seed gate inversion (V1.10 — in scope)
+
+V1.10 wave 1 closes the V1.9 footgun where forgetting
+`ATLAS_PRODUCTION=1` silently allowed the source-committed
+`DEV_MASTER_SEED` to sign production traffic. The gate is now
+positive: per-tenant subcommands refuse to start unless an explicit
+dev opt-in is wired, *and* the V1.9 paranoia check still passes.
+
+- **Layered defence:** `keys::master_seed_gate()` calls
+  `production_gate_with()` first, so a deployment with
+  `ATLAS_PRODUCTION=1` refuses the dev seed regardless of the V1.10
+  opt-in. Only deployments with `ATLAS_PRODUCTION` unset *and*
+  `ATLAS_DEV_MASTER_SEED=1` set obtain a `DevMasterSeedHkdf`. All
+  four `(ATLAS_PRODUCTION × ATLAS_DEV_MASTER_SEED)` combinations are
+  enumerated in `docs/OPERATOR-RUNBOOK.md` §1 with the security
+  outcome.
+- **Strict allow-list, not "anything truthy":** The gate accepts the
+  values `1`, `true`, `yes`, `on` (ASCII case-insensitive,
+  surrounding whitespace tolerated) and refuses anything else,
+  including typos like `tru` / `yse` / `yeah` and adjacent values
+  like `2` / `-1` / `enabled`. Tested by
+  `master_seed_gate_refuses_typos_and_unknown_values`,
+  `master_seed_gate_allows_recognised_truthy_values`,
+  `master_seed_gate_truthy_values_are_case_insensitive`,
+  `master_seed_gate_tolerates_surrounding_whitespace`. Rationale:
+  V1.9's literal-`"1"` check would have silently rejected `"true"`
+  on the wrong side of the boundary; V1.10 picks the conservative
+  middle ground that mirrors operator mental models (the same
+  boolean-style values that systemd, Docker, and Kubernetes config
+  files accept) without admitting unbounded inputs.
+- **Trait-routed derivation:** Per-tenant subcommands now go through
+  `derive_workspace_signing_key_via<H: MasterSeedHkdf + ?Sized>` and
+  `per_tenant_identity_via<H>`. The `&dyn MasterSeedHkdf` dispatch
+  surface is dyn-safe (`&self`, no generics, no `Self` returns, no
+  `async fn`), and V1.10 wave 2 (shipped in this milestone) drops
+  in `Box<dyn MasterSeedHkdf>` from `master_seed_loader` for the
+  sealed-seed path without changing callers — every per-tenant
+  subcommand routes through the same `_via` helpers regardless of
+  backend. The buffer-out shape
+  (`derive_for(info, out: &mut [u8; 32])` rather than `-> [u8; 32]`)
+  is zeroize-friendly: sealed implementations can wipe scratch
+  space on error/drop without forcing a Drop wrapper around an
+  owned array.
+- **Pinned pubkey hashes preserved through abstraction:** The
+  `workspace_pubkeys_are_pinned` golden test continues to pass
+  against the trait-routed derivation; alice
+  (`HaADbOvQvGRNVJnGFLLjj-qxC-zwReufz-8dAbBu9aY`) and ws-mcp-default
+  (`_7VayPxHeadNxfSOw0p8E5LNXBNP2Mb-cOieCZRZq6M`) produce
+  byte-identical Ed25519 pubkeys to V1.9. The smoke pubkey-bundle
+  hashes (`0edbb1cfb191783a` / `80e85db603327c6e`) are unchanged.
+  Refactoring the derivation pipeline cannot silently rotate keys:
+  any byte drift trips the pin before reaching a customer.
+- **Trust property — the env var is a deployment audit signal.**
+  Auditors reviewing a deployment can request the env truth-table
+  snapshot (`env | grep ATLAS_`) and conclude with certainty
+  whether the process is signing under the source-committed dev
+  seed or under the V1.10 wave-2 PKCS#11 sealed seed. The HSM trio
+  (`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`)
+  is the deployment-time signature of sealed-seed mode; partial
+  trios refuse to start, so a host snapshot showing all three set
+  AND `ATLAS_DEV_MASTER_SEED` unset AND the binary built with
+  `--features hsm` is the production-ready signature.
+- **Adversary tests:** 21 new unit tests in
+  `crates/atlas-signer/src/keys.rs` cover the gate's allow-list,
+  layered V1.9 paranoia precedence (`ATLAS_PRODUCTION=1` overrides
+  even with `ATLAS_DEV_MASTER_SEED=1` set), error-message stability,
+  trait dispatch through `&dyn`, equivalence between the trait-routed
+  and explicit-seed paths, and Send+Sync witness on
+  `DevMasterSeedHkdf`. The MCP smoke test
+  (`pnpm --filter atlas-mcp-server smoke`) sets
+  `ATLAS_DEV_MASTER_SEED=1` once at the top of `main()` so CI
+  exercises the same gate operators do, and the bundle hashes
+  remain pinned at the same goldens as V1.9.
+
+### Residual risks after V1.10 wave 2
+
+V1.10 wave 2 (HSM PKCS#11 sealing) has shipped. The wave-1 residual
+risks below are now mitigated **for deployments that configure the
+HSM trio**; dev/CI deployments running with
+`ATLAS_DEV_MASTER_SEED=1` retain the V1.9-equivalent risk profile
+spelled out in *Master-seed exfiltration is full compromise* above.
+
+- **Dev seed remains source-committed for opt-in callers.** The HSM
+  loader is the production path; the dev impl is the explicit
+  fall-through when the HSM trio is unset and `ATLAS_DEV_MASTER_SEED=1`.
+  The gate cannot prevent an operator from deliberately running the
+  dev seed in a production-adjacent environment by setting the
+  opt-in — the opt-in env var is itself the audit signal that flags
+  such hosts.
+- **Master-seed exfiltration in HSM mode is bounded by the device.**
+  The wave-2 [`Pkcs11MasterSeedHkdf`](../crates/atlas-signer/src/hsm/pkcs11.rs)
+  performs HKDF inside the HSM via `CKM_HKDF_DERIVE` and reads back
+  only the 32-byte derived secret as an ephemeral
+  `CKO_SECRET_KEY`/`CKK_GENERIC_SECRET` object — destroyed on every
+  derive path so the derived bytes do not outlive the
+  `derive_for` call. The master seed itself never enters Atlas
+  address space. The residual risks are then the threat model
+  documented in `docs/OPERATOR-RUNBOOK.md` §2: physical HSM
+  compromise (token + PIN), malicious code injected into
+  `atlas-signer` during a session's lifetime, and HSM-driver
+  compromise. None of these are crypto-protocol weaknesses; they
+  are operational controls (filesystem ACLs, short-lived signer
+  invocations, vendor module signing).
+- **Dev-mode exfiltration is unchanged from V1.9.** A deployment
+  running with `ATLAS_DEV_MASTER_SEED=1` and no HSM trio reads
+  `DEV_MASTER_SEED` directly; anyone with read access to process
+  memory of a derive-key / sign call sees the per-tenant Ed25519
+  secret in the clear. This is by design — dev/CI deployments are
+  not production-tenant-bearing.
+- **Production-readiness preflight is partial.** The HSM-first
+  dispatch in `master_seed_loader` makes init failure fatal (no
+  silent fallback to dev seed when the trio is set), which is the
+  load-bearing audit guarantee. A separate orthogonal lint —
+  refusing to start when `ATLAS_PRODUCTION=1` is set with neither
+  the HSM trio nor `ATLAS_DEV_MASTER_SEED=1` — is left as a
+  V1.10.1 preflight tightening; today the dev opt-in plus
+  `ATLAS_PRODUCTION=1` combination still refuses at the gate, so
+  the gap is "config yells with two distinct error messages" not
+  "config silently signs unsafely".
 
 ---
 

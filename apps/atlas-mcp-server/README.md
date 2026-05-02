@@ -98,7 +98,10 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`
   "mcpServers": {
     "atlas": {
       "command": "node",
-      "args": ["/absolute/path/to/atlas/apps/atlas-mcp-server/dist/index.js"]
+      "args": ["/absolute/path/to/atlas/apps/atlas-mcp-server/dist/index.js"],
+      "env": {
+        "ATLAS_DEV_MASTER_SEED": "1"
+      }
     }
   }
 }
@@ -108,10 +111,52 @@ After restarting Claude Desktop, the four `atlas_*` tools appear in the
 tool palette. Every tool call produces a signed event in the configured
 workspace's `events.jsonl`.
 
+The `ATLAS_DEV_MASTER_SEED=1` env entry is the V1.10 positive opt-in
+that admits the source-committed dev master seed (per-tenant
+subcommands refuse to start otherwise). For a production deployment,
+omit `ATLAS_DEV_MASTER_SEED`, build `atlas-signer` with
+`--features hsm`, and configure the V1.10 wave-2 sealed-seed trio
+(`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`)
+plus `ATLAS_PRODUCTION=1`. The HSM trio takes precedence over the
+dev gate: when set, the loader signs against the sealed master
+seed inside the HSM and the dev opt-in is unreachable. See
+[../../docs/OPERATOR-RUNBOOK.md](../../docs/OPERATOR-RUNBOOK.md)
+§2 for the import ceremony.
+
 ---
 
-## V1.5 / V1.6 / V1.7 / V1.8 / V1.9 boundaries
+## V1.5 / V1.6 / V1.7 / V1.8 / V1.9 / V1.10 boundaries
 
+- **Master-seed gate inversion (V1.10 wave 1).** Per-tenant
+  subcommands refuse to start unless `ATLAS_DEV_MASTER_SEED=1` is
+  explicitly set (and the V1.9 paranoia gate `ATLAS_PRODUCTION=1` is
+  *unset*, since that gate retains primacy). The V1.9 negative gate
+  has been replaced with a positive opt-in: forgetting the env var
+  now fails closed with an actionable error rather than silently
+  signing with the source-committed dev seed. **Local development
+  setup:** export `ATLAS_DEV_MASTER_SEED=1` once before `pnpm dev`
+  (or wire it into your shell profile / `.envrc`). The smoke test
+  (`pnpm --filter atlas-mcp-server smoke`) sets it programmatically
+  at the top of `main()`, so CI does not require operator
+  pre-configuration. The accepted truthy values are `1` / `true` /
+  `yes` / `on` (ASCII case-insensitive, surrounding whitespace
+  tolerated); any other value refuses the dev seed. See
+  [../../docs/OPERATOR-RUNBOOK.md](../../docs/OPERATOR-RUNBOOK.md)
+  §1 for the full truth table and security rationale.
+- **Sealed-seed loader (V1.10 wave 2, shipped).** The PKCS#11
+  backend at `crates/atlas-signer/src/hsm/` (gated behind the `hsm`
+  Cargo feature) closes the V1.9 master-seed residual risk.
+  Production deploys configure the HSM trio
+  (`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`)
+  and rebuild `atlas-signer` with `--features hsm`. HKDF-SHA256
+  runs *inside* the HSM via `CKM_HKDF_DERIVE`; the master seed
+  never enters Atlas address space. HSM init failure is fatal —
+  there is no silent fallback to the dev seed when the trio is
+  set. The MCP server itself does not need `--features hsm`; only
+  the spawned `atlas-signer` binary does. See
+  [../../docs/OPERATOR-RUNBOOK.md](../../docs/OPERATOR-RUNBOOK.md)
+  §2 for the SoftHSM2 import ceremony, threat model, and rotation
+  procedure.
 - **Per-tenant Atlas anchoring keys (V1.9).** Each workspace gets its
   own Ed25519 signing key derived from a single master seed via
   HKDF-SHA256 (info=`"atlas-anchor-v1:" || workspace_id`). Public keys
@@ -122,12 +167,9 @@ workspace's `events.jsonl`.
   `atlas-signer derive-pubkey` (public key only). V1.5–V1.8 SPIFFE
   kids continue to verify in lenient mode; strict mode
   (`require_per_tenant_keys`) demands per-tenant kids matching the
-  trace's `workspace_id`. The dev `DEV_MASTER_SEED` is gated behind
-  `ATLAS_PRODUCTION=1` (refuses derive-key, derive-pubkey,
-  rotate-pubkey-bundle, and `sign --derive-from-workspace` when set).
-  V1.10 closes this with HSM/TPM sealing of the master seed. Bundle
-  rotation: `atlas-signer rotate-pubkey-bundle --workspace <ws>` —
-  see [../../docs/OPERATOR-RUNBOOK.md](../../docs/OPERATOR-RUNBOOK.md).
+  trace's `workspace_id`. Bundle rotation:
+  `atlas-signer rotate-pubkey-bundle --workspace <ws>` — see
+  [../../docs/OPERATOR-RUNBOOK.md](../../docs/OPERATOR-RUNBOOK.md).
 - **Signing keys (V1 legacy).** The three globally-shared SPIFFE
   keys (agent / human / anchor) in `src/lib/keys.ts` remain present
   for V1.5–V1.8 backwards compatibility and the bank-demo example.

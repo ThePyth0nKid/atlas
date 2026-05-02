@@ -93,10 +93,13 @@
 //! a source-committed dev constant. V1.10 will replace the gate with a
 //! sealed-seed loader.
 
-mod anchor;
-mod chain;
-mod keys;
-mod rekor_client;
+// V1.10: the binary consumes `atlas-signer` as a library so the
+// V1.10 wave-2 sealed-seed loader (`atlas_signer::hsm`) shares the
+// [`keys::MasterSeedHkdf`] trait surface with the dev impl. The
+// library entry point is `src/lib.rs`; this binary is a thin CLI
+// wrapper. No behaviour change vs. V1.9 — the modules below are the
+// same code, re-rooted from `crate::keys::` to `atlas_signer::keys::`.
+use atlas_signer::{anchor, chain, keys};
 
 use atlas_trust_core::{
     cose::build_signing_input,
@@ -279,15 +282,24 @@ struct DeriveKeyOutput {
 }
 
 fn run_derive_key(args: DeriveWorkspaceArgs) -> ExitCode {
-    if let Err(e) = keys::production_gate() {
-        eprintln!("derive-key: {e}");
-        return ExitCode::from(2);
-    }
+    let hkdf = match keys::master_seed_loader() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("derive-key: {e}");
+            return ExitCode::from(2);
+        }
+    };
     if let Err(e) = keys::validate_workspace_id(&args.workspace) {
         eprintln!("derive-key: invalid --workspace: {e}");
         return ExitCode::from(2);
     }
-    let identity = keys::per_tenant_identity(&args.workspace);
+    let identity = match keys::per_tenant_identity_via(&*hkdf, &args.workspace) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("derive-key: per-tenant derive failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let output = DeriveKeyOutput {
         kid: identity.kid,
         pubkey_b64url: identity.pubkey_b64url,
@@ -320,15 +332,24 @@ struct DerivePubkeyOutput {
 /// `PubkeyBundle`s without ever materialising the workspace's signing
 /// key in TS heap.
 fn run_derive_pubkey(args: DeriveWorkspaceArgs) -> ExitCode {
-    if let Err(e) = keys::production_gate() {
-        eprintln!("derive-pubkey: {e}");
-        return ExitCode::from(2);
-    }
+    let hkdf = match keys::master_seed_loader() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("derive-pubkey: {e}");
+            return ExitCode::from(2);
+        }
+    };
     if let Err(e) = keys::validate_workspace_id(&args.workspace) {
         eprintln!("derive-pubkey: invalid --workspace: {e}");
         return ExitCode::from(2);
     }
-    let identity = keys::per_tenant_identity(&args.workspace);
+    let identity = match keys::per_tenant_identity_via(&*hkdf, &args.workspace) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("derive-pubkey: per-tenant derive failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
     let output = DerivePubkeyOutput {
         kid: identity.kid,
         pubkey_b64url: identity.pubkey_b64url,
@@ -346,10 +367,13 @@ fn run_derive_pubkey(args: DeriveWorkspaceArgs) -> ExitCode {
 }
 
 fn run_rotate_pubkey_bundle(args: RotatePubkeyBundleArgs) -> ExitCode {
-    if let Err(e) = keys::production_gate() {
-        eprintln!("rotate-pubkey-bundle: {e}");
-        return ExitCode::from(2);
-    }
+    let hkdf = match keys::master_seed_loader() {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("rotate-pubkey-bundle: {e}");
+            return ExitCode::from(2);
+        }
+    };
     if let Err(e) = keys::validate_workspace_id(&args.workspace) {
         eprintln!("rotate-pubkey-bundle: invalid --workspace: {e}");
         return ExitCode::from(2);
@@ -367,7 +391,13 @@ fn run_rotate_pubkey_bundle(args: RotatePubkeyBundleArgs) -> ExitCode {
         }
     };
 
-    let identity = keys::per_tenant_identity(&args.workspace);
+    let identity = match keys::per_tenant_identity_via(&*hkdf, &args.workspace) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("rotate-pubkey-bundle: per-tenant derive failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
 
     // Idempotency: if the kid already exists, the existing pubkey MUST
     // match what the derivation produces. A mismatch means either the
@@ -567,10 +597,16 @@ fn run_sign(args: SignArgs) -> ExitCode {
     let signing_key: SigningKey = if let Some(ws) = args.derive_from_workspace.as_deref() {
         // In-signer derivation: the secret never crosses the subprocess
         // boundary. This is the V1.9 hot path for per-tenant events.
-        if let Err(e) = keys::production_gate() {
-            eprintln!("sign --derive-from-workspace: {e}");
-            return ExitCode::from(2);
-        }
+        // V1.10 wave 2: master_seed_loader dispatches to PKCS#11 when
+        // the HSM trio is set, otherwise falls through to the V1.10
+        // wave-1 dev-seed gate.
+        let hkdf = match keys::master_seed_loader() {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("sign --derive-from-workspace: {e}");
+                return ExitCode::from(2);
+            }
+        };
         if let Err(e) = keys::validate_workspace_id(ws) {
             eprintln!("sign --derive-from-workspace: invalid workspace: {e}");
             return ExitCode::from(2);
@@ -590,7 +626,13 @@ fn run_sign(args: SignArgs) -> ExitCode {
             );
             return ExitCode::from(2);
         }
-        keys::derive_workspace_signing_key_default(ws)
+        match keys::derive_workspace_signing_key_via(&*hkdf, ws) {
+            Ok(sk) => sk,
+            Err(e) => {
+                eprintln!("sign --derive-from-workspace: per-tenant derive failed: {e}");
+                return ExitCode::from(2);
+            }
+        }
     } else {
         let secret_hex = if args.secret_stdin {
             let mut buf = String::new();

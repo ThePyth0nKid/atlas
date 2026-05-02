@@ -4,6 +4,12 @@ members = [
     "crates/atlas-trust-core",
     "crates/atlas-verify-cli",
     "crates/atlas-verify-wasm",
+    # V1.10 wave 2 note: the sealed-seed loader was originally a sibling
+    # `atlas-signer-hsm` crate, but Cargo's no-cycles rule prevented
+    # `atlas-signer`'s binary from dispatching to a sibling that itself
+    # depended on `atlas-signer` for the `MasterSeedHkdf` trait. The
+    # loader now lives in-tree at `crates/atlas-signer/src/hsm/` behind
+    # the `hsm` feature flag — same operator opt-in semantics, no cycle.
     "crates/atlas-signer",
 ]
 
@@ -29,6 +35,11 @@ sha2 = "0.10"
 # from a single master seed. Verifier never imports this — the verifier
 # sees only derived pubkeys via the PubkeyBundle.
 hkdf = "0.12"
+# V1.10 wave 2: scrub heap-resident secret material (PIN bytes, derived
+# 32-byte HKDF output, intermediate stack arrays) so neither core dumps
+# nor freed-allocator pages leak the seed. Used by atlas-signer's HSM
+# backend and the dispatcher that hands derived bytes to ed25519-dalek.
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
 
 # Serde
 serde = { version = "1.0", features = ["derive"] }
