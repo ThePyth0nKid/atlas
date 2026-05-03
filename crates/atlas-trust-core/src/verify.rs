@@ -75,6 +75,26 @@ pub struct VerifyOutcome {
     pub verifier_version: String,
 }
 
+impl VerifyOutcome {
+    /// True if any `witnesses` evidence row failed (`ok: false`).
+    ///
+    /// V1.13 wave C-1 surfaces witness verification failures as
+    /// `ok: false` evidence rows but does NOT push them to `errors` —
+    /// `valid` stays true (lenient mode). Wave C-2 will introduce
+    /// `opts.require_witness_threshold`; the strict-mode logic must
+    /// look at the witnesses evidence row, NOT at `errors`. This helper
+    /// gives C-2 a named API to call instead of the fragile inline
+    /// filter (`evidence.iter().any(|e| e.check == "witnesses" && !e.ok)`)
+    /// that would otherwise be scattered at the strict-mode site —
+    /// making it harder to wire the threshold up against the wrong
+    /// source.
+    pub fn has_witness_failures(&self) -> bool {
+        self.evidence
+            .iter()
+            .any(|e| e.check == "witnesses" && !e.ok)
+    }
+}
+
 /// A single piece of evidence (passed or failed) gathered during verification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyEvidence {
@@ -853,6 +873,84 @@ mod tests {
             ev.detail.contains("not in pinned roster"),
             "detail must surface the underlying failure reason: {}",
             ev.detail,
+        );
+    }
+
+    /// `has_witness_failures` returns false when there is no
+    /// witnesses-keyed evidence row at all (e.g. a trace without
+    /// `anchor_chain`, where the helper is never invoked).
+    #[test]
+    fn has_witness_failures_false_when_no_witness_evidence() {
+        let outcome = VerifyOutcome {
+            valid: true,
+            evidence: vec![],
+            errors: vec![],
+            verifier_version: "test".to_string(),
+        };
+        assert!(!outcome.has_witness_failures());
+    }
+
+    /// `has_witness_failures` returns false when the witnesses row
+    /// exists and passed (the lenient no-op disposition or all-verified).
+    #[test]
+    fn has_witness_failures_false_for_passing_witness_evidence() {
+        let outcome = VerifyOutcome {
+            valid: true,
+            evidence: vec![VerifyEvidence {
+                check: "witnesses".to_string(),
+                ok: true,
+                detail: "no witnesses presented (lenient mode passes)".to_string(),
+            }],
+            errors: vec![],
+            verifier_version: "test".to_string(),
+        };
+        assert!(!outcome.has_witness_failures());
+    }
+
+    /// `has_witness_failures` returns true when a witnesses row carries
+    /// `ok: false` — this is the signal Wave C-2 strict-mode will key
+    /// on to promote witness failures into `errors`.
+    #[test]
+    fn has_witness_failures_true_for_failing_witness_evidence() {
+        let outcome = VerifyOutcome {
+            valid: true,
+            evidence: vec![VerifyEvidence {
+                check: "witnesses".to_string(),
+                ok: false,
+                detail: "lenient: 0 of 1 witness sig(s) verified; ...".to_string(),
+            }],
+            errors: vec![],
+            verifier_version: "test".to_string(),
+        };
+        assert!(outcome.has_witness_failures());
+    }
+
+    /// Other failed checks (e.g. event-signatures, anchor-chain) must
+    /// NOT trigger `has_witness_failures` — the helper is
+    /// witness-specific by design (a strict-mode threshold check on
+    /// witnesses must not be tripped by an unrelated failure).
+    #[test]
+    fn has_witness_failures_ignores_non_witness_failures() {
+        let outcome = VerifyOutcome {
+            valid: false,
+            evidence: vec![
+                VerifyEvidence {
+                    check: "event-signatures".to_string(),
+                    ok: false,
+                    detail: "1 of 5 sigs failed".to_string(),
+                },
+                VerifyEvidence {
+                    check: "anchor-chain".to_string(),
+                    ok: false,
+                    detail: "1 chain error".to_string(),
+                },
+            ],
+            errors: vec!["sig fail".to_string(), "chain fail".to_string()],
+            verifier_version: "test".to_string(),
+        };
+        assert!(
+            !outcome.has_witness_failures(),
+            "non-witness failures must not trip the witness-specific helper",
         );
     }
 

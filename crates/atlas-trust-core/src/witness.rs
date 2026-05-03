@@ -199,15 +199,48 @@ pub struct WitnessVerifyOutcome {
 ///
 /// Counted-outcome shape lets the strict-mode caller (V1.13 Wave C-2)
 /// apply an M-of-N threshold without re-running the verification.
+///
+/// Duplicate-`witness_kid` defence: a witness slice with repeated
+/// `witness_kid` values has every occurrence (including the first)
+/// rejected as a failure — none is counted as verified. Rationale:
+/// under the C-2 M-of-N threshold, an issuer (or attacker controlling
+/// batch serialisation) could otherwise satisfy a 3-of-3 quorum by
+/// attaching the same signature three times under one commissioned key.
+/// Catching this at the per-batch verifier — rather than bolting it
+/// onto the threshold check later — keeps the trust property uniform
+/// across lenient and strict modes (operators see "duplicate
+/// witness_kid" in the lenient evidence row before strict mode is
+/// even enabled) and means a future threshold check can trust that
+/// `verified` already counts only kid-distinct cosignatures.
 pub fn verify_witnesses_against_roster(
     witnesses: &[WitnessSig],
     chain_head_hex: &str,
     roster: &[(&str, [u8; 32])],
 ) -> WitnessVerifyOutcome {
+    use std::collections::BTreeMap;
+
     let mut verified = 0usize;
     let mut failures = Vec::new();
 
+    // Pre-pass: count kid occurrences. BTreeMap (not HashMap) for
+    // deterministic ordering — keeps test/diagnostic output stable
+    // and removes a hash-DoS vector if the slice ever grows large.
+    let mut kid_counts: BTreeMap<&str, usize> = BTreeMap::new();
     for w in witnesses {
+        *kid_counts.entry(w.witness_kid.as_str()).or_insert(0) += 1;
+    }
+
+    for w in witnesses {
+        let count = *kid_counts
+            .get(w.witness_kid.as_str())
+            .expect("kid was inserted in pre-pass — invariant of the loop above");
+        if count > 1 {
+            failures.push(format!(
+                "{}: duplicate witness_kid (appears {} times in batch — at most one signature per kid is allowed)",
+                w.witness_kid, count,
+            ));
+            continue;
+        }
         match verify_witness_against_roster(w, chain_head_hex, roster) {
             Ok(()) => verified += 1,
             Err(e) => failures.push(format!("{}: {}", w.witness_kid, e)),
@@ -496,6 +529,99 @@ mod tests {
         assert_eq!(outcome.presented, 0);
         assert_eq!(outcome.verified, 0);
         assert!(outcome.failures.is_empty());
+    }
+
+    /// Two valid witnesses with distinct kids both verify — pins the
+    /// multi-witness happy path. Defends against an off-by-one where
+    /// only the first witness in the slice gets checked.
+    #[test]
+    fn verify_witnesses_outcome_two_valid_distinct_kids() {
+        let (sk_a, pk_a) = fixed_keypair(1);
+        let (sk_b, pk_b) = fixed_keypair(2);
+        let head = fixed_chain_head();
+        let roster: &[(&str, [u8; 32])] = &[("witness-a", pk_a), ("witness-b", pk_b)];
+
+        let witnesses = vec![
+            sign_witness(&sk_a, "witness-a", &head),
+            sign_witness(&sk_b, "witness-b", &head),
+        ];
+
+        let outcome = verify_witnesses_against_roster(&witnesses, &head, roster);
+        assert_eq!(outcome.presented, 2);
+        assert_eq!(outcome.verified, 2);
+        assert!(
+            outcome.failures.is_empty(),
+            "no failures expected: {:?}",
+            outcome.failures,
+        );
+    }
+
+    /// Duplicate `witness_kid` in the slice — every occurrence
+    /// (including the first) is rejected as a duplicate, none is
+    /// counted as verified. Defends Wave C-2's M-of-N threshold from
+    /// being satisfied by repeating one validly-signed sig N times
+    /// under a single commissioned key.
+    #[test]
+    fn verify_witnesses_outcome_duplicate_kid_rejected() {
+        let (sk, pk) = fixed_keypair(42);
+        let head = fixed_chain_head();
+        let roster: &[(&str, [u8; 32])] = &[("dup-kid", pk)];
+
+        // Three sigs, all CORRECTLY signed under the same kid — without
+        // duplicate detection this would yield verified == 3 and let an
+        // attacker with one commissioned key satisfy a 3-of-3 threshold.
+        let sig = sign_witness(&sk, "dup-kid", &head);
+        let witnesses = vec![sig.clone(), sig.clone(), sig];
+
+        let outcome = verify_witnesses_against_roster(&witnesses, &head, roster);
+        assert_eq!(outcome.presented, 3);
+        assert_eq!(
+            outcome.verified, 0,
+            "no duplicate-kid sig may count as verified, got {}",
+            outcome.verified,
+        );
+        assert_eq!(
+            outcome.failures.len(),
+            3,
+            "every duplicate occurrence must surface as a failure"
+        );
+        for f in &outcome.failures {
+            assert!(
+                f.contains("duplicate witness_kid"),
+                "failure must name the dup-kid reason: {f}",
+            );
+        }
+    }
+
+    /// Mixed slice: a duplicate-kid pair AND one distinct,
+    /// validly-signed witness. The unique witness still verifies; the
+    /// duplicates fail. Pins that duplicate detection is per-kid, not
+    /// per-slice (a dup-kid does NOT poison unrelated kids).
+    #[test]
+    fn verify_witnesses_outcome_duplicate_with_unique_other() {
+        let (sk_dup, pk_dup) = fixed_keypair(42);
+        let (sk_solo, pk_solo) = fixed_keypair(7);
+        let head = fixed_chain_head();
+        let roster: &[(&str, [u8; 32])] =
+            &[("dup-kid", pk_dup), ("solo-kid", pk_solo)];
+
+        let dup = sign_witness(&sk_dup, "dup-kid", &head);
+        let witnesses = vec![
+            dup.clone(),
+            dup,
+            sign_witness(&sk_solo, "solo-kid", &head),
+        ];
+
+        let outcome = verify_witnesses_against_roster(&witnesses, &head, roster);
+        assert_eq!(outcome.presented, 3);
+        assert_eq!(outcome.verified, 1, "only the unique-kid witness verifies");
+        assert_eq!(outcome.failures.len(), 2);
+        for f in &outcome.failures {
+            assert!(
+                f.starts_with("dup-kid:"),
+                "only the dup-kid should fail, got {f}",
+            );
+        }
     }
 
     #[test]
