@@ -1,4 +1,4 @@
-# Atlas — Operator Runbook (V1.10)
+# Atlas — Operator Runbook (V1.11)
 
 This document is the operator's reference for Atlas ceremonies that
 sit *outside* the agent-driven hot path: workspace key migration,
@@ -300,9 +300,24 @@ USER_PIN="$(your-secrets-manager get atlas/softhsm/user-pin)"
 
 # 1. Initialise a token in slot 0. The SO PIN protects the token
 #    object roster; the user PIN is what atlas-signer authenticates
-#    with at startup. softhsm2-util reads the PINs from argv, which
-#    is why we sourced them from a secrets manager rather than typing
-#    them inline — the *value* is now in env, not in shell history.
+#    with at startup.
+#
+#    softhsm2-util's init-token subcommand reads PINs from argv —
+#    sourcing the values from a secrets manager keeps them out of
+#    shell history, BUT the expanded values still land in
+#    /proc/<pid>/cmdline of the softhsm2-util process for the
+#    duration of the call. This is unavoidable with current
+#    softhsm2-util (no stdin/env PIN-input for init-token); the
+#    operational defences are:
+#      (a) run this ceremony on a single-tenant hardened host,
+#          NOT a multi-user system,
+#      (b) mount /proc with `hidepid=2,gid=<adm>` so non-owners
+#          cannot enumerate cmdlines (Linux ≥ 3.3),
+#      (c) accept that the exposure window is bounded — this is a
+#          one-shot init step, not a hot-path operation.
+#    The pkcs11-tool import in step 3 below reads the PIN from the
+#    environment (--pin-source env:VAR) so it does NOT have this
+#    exposure; the limitation is specifically softhsm2-util.
 softhsm2-util --init-token --slot 0 \
               --label atlas-prod \
               --so-pin "${SO_PIN}" \
@@ -319,13 +334,22 @@ head -c 32 /dev/urandom > "${SEED_FILE}"
 # 3. Import the seed under the canonical label. The `--type secrkey`
 #    + `--key-type GENERIC:32` selection produces the
 #    CKO_SECRET_KEY / CKK_GENERIC_SECRET combination atlas-signer
-#    expects. `--pin "${USER_PIN}"` reads from the env var rather
-#    than a literal. SoftHSM2's pkcs11-tool sets CKA_DERIVE=true by
-#    default on imported secret keys; verify with
-#    `pkcs11-tool ... --read-object` if your vendor differs.
+#    expects. The `--pin-source env:USER_PIN` form tells pkcs11-tool
+#    to read the PIN from the named environment variable rather
+#    than from argv — the literal PIN bytes therefore do NOT appear
+#    in /proc/<pid>/cmdline. (Compare step 1's softhsm2-util, which
+#    has no env-var input for init-token; this is why pkcs11-tool
+#    is the preferred surface wherever both options exist.) OpenSC
+#    pkcs11-tool ≥ 0.18 supports `--pin-source env:VAR`; older
+#    versions fall back to `--pin "${USER_PIN}"` with the same
+#    /proc exposure as softhsm2-util.
+#
+#    SoftHSM2's pkcs11-tool sets CKA_DERIVE=true by default on
+#    imported secret keys; verify with `pkcs11-tool ...
+#    --read-object` if your vendor differs.
 pkcs11-tool --module /usr/lib/softhsm/libsofthsm2.so \
             --slot 0 \
-            --login --pin "${USER_PIN}" \
+            --login --pin-source env:USER_PIN \
             --write-object "${SEED_FILE}" \
             --type secrkey \
             --key-type GENERIC:32 \
@@ -429,7 +453,7 @@ atlas-signer derive-pubkey --workspace canary-import-test
   default; document the active-token roster in the deployment
   manifest so an auditor can verify the redundancy claim.
 - **Recovery from token loss.** Equivalent to "master seed
-  compromise" in §6 — every per-tenant pubkey changes, every
+  compromise" in §7 — every per-tenant pubkey changes, every
   bundle hash changes, and every historical trace becomes
   unverifiable against the new bundle. Mitigated by (a) above.
 - **Rotation.** Generate a new seed, import under a *new* label
@@ -514,7 +538,331 @@ production seed.
 
 ---
 
-## 3. Workspace pubkey-bundle rotation ceremony
+## 3. wave-3 — HSM per-workspace sealed signer ceremony (V1.11)
+
+V1.10 wave 2 sealed the **master seed** inside the HSM but kept the
+per-workspace Ed25519 signing key derived in-process via HKDF — the
+derived 32-byte secret transited Atlas address space (in a
+`Zeroizing<[u8; 32]>` buffer) on every `sign` call. V1.11 Scope A
+wave-3 closes the residual risk by moving the per-tenant signing
+key itself into the HSM: per-workspace Ed25519 keypairs are
+generated via `CKM_EC_EDWARDS_KEY_PAIR_GEN`, persisted as
+`Token=true` with `Sensitive=true`, `Extractable=false`,
+`Derive=false`, and signing routes through `CKM_EDDSA(Ed25519)`.
+For an HSM-backed deployment that opts into wave-3, no per-tenant
+secret bytes ever reach Atlas address space — even transiently.
+
+> **wave-3 changes per-tenant pubkeys.** V1.9–V1.10 derived
+> per-tenant pubkeys deterministically from `(master_seed,
+> workspace_id)` via HKDF-SHA256. wave-3 generates the keypair
+> *inside* the HSM with hardware entropy; the resulting pubkeys are
+> NOT byte-equivalent to the V1.9–V1.10 derivation. Every active
+> workspace's `PubkeyBundle.keys[atlas-anchor:<ws>]` rotates on
+> first wave-3 sign. Operators MUST run §4 (`rotate-pubkey-bundle`)
+> for every active workspace as part of the wave-3 cutover, and MUST
+> ship the updated bundle to every verifier-side trust pin before
+> the cutover. A verifier holding the V1.10 pinned pubkey will
+> reject every wave-3 trace until it receives the new bundle — this
+> is the security property, not a bug.
+
+### Why wave-3 needs an explicit opt-in (not "trio implies wave-3")
+
+The V1.10 wave 2 dispatcher activated sealed-seed mode automatically
+when the HSM trio (`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`,
+`ATLAS_HSM_PIN_FILE`) was set, because wave-2 produces
+byte-equivalent per-tenant pubkeys to the V1.9 dev path. wave-3
+does NOT. If wave-3 activated automatically on the trio, a V1.10
+deployment that pinned per-tenant pubkeys in `PubkeyBundle.keys`
+would silently rotate every entry on its first wave-3 sign, and
+every verifier with a stale bundle would reject every event —
+without any opt-in handshake from the operator. The
+`ATLAS_HSM_WORKSPACE_SIGNER` env var is the operator's explicit
+acknowledgement that they accept the rotation event and have
+coordinated bundle rollout to verifiers.
+
+### What gets generated
+
+A per-workspace Ed25519 keypair (one keypair per `workspace_id`),
+under the canonical label
+`atlas-workspace-key-v1:<workspace_id>`. Both halves carry
+`CKA_ID = CKA_LABEL` so PKCS#11 §10.1.2's id-pairing rule binds
+them. The label prefix is fixed in code at
+[`WORKSPACE_LABEL_PREFIX`](../crates/atlas-signer/src/hsm/pkcs11_workspace.rs).
+
+| Object | Attribute | Value | Why |
+|---|---|---|---|
+| **public** | `CKA_CLASS` | `CKO_PUBLIC_KEY` | verify-only half, advertised in `PubkeyBundle` |
+| **public** | `CKA_KEY_TYPE` | `CKK_EC_EDWARDS` | Ed25519 |
+| **public** | `CKA_TOKEN` | `true` | persists across sessions |
+| **public** | `CKA_PRIVATE` | `false` | pubkey is public material |
+| **public** | `CKA_VERIFY` | `true` | enables `C_Verify` for self-test paths |
+| **public** | `CKA_EC_PARAMS` | Ed25519 OID printable | `1.3.101.112` (RFC 8410) |
+| **public** | `CKA_LABEL` | `atlas-workspace-key-v1:<ws>` | loader lookup |
+| **public** | `CKA_ID` | same bytes as label | pairs with private half |
+| **private** | `CKA_CLASS` | `CKO_PRIVATE_KEY` | the sealed scalar |
+| **private** | `CKA_KEY_TYPE` | `CKK_EC_EDWARDS` | Ed25519 |
+| **private** | `CKA_TOKEN` | `true` | persists across sessions |
+| **private** | `CKA_PRIVATE` | `true` | requires authenticated session |
+| **private** | `CKA_SIGN` | `true` | enables `C_Sign` under `CKM_EDDSA` |
+| **private** | `CKA_SENSITIVE` | `true` | refuse plaintext export |
+| **private** | `CKA_EXTRACTABLE` | `false` | scalar never leaves HSM |
+| **private** | `CKA_DERIVE` | `false` | blocks `C_DeriveKey` indirect-leak path |
+| **private** | `CKA_LABEL` | `atlas-workspace-key-v1:<ws>` | loader lookup |
+| **private** | `CKA_ID` | same bytes as label | pairs with public half |
+
+The `CKA_DERIVE=false` choice is defence-in-depth against an HSM
+default that allows a `Sensitive=true, Extractable=false` private
+key to serve as input to `C_DeriveKey` whose *output* may be
+exportable — an indirect way to leak the scalar that some vendor
+modules expose. Pinning `false` slams that door.
+
+### Procedure (SoftHSM2 example)
+
+The wave-3 ceremony has two phases: opt-in (one-shot per
+deployment) and per-workspace key generation (lazy, on first
+`derive-pubkey` / `sign --derive-from-workspace` call per
+`workspace_id`). The operator does NOT pre-generate keys —
+`atlas-signer` generates the keypair on demand the first time it
+encounters an unseen `workspace_id`, and finds the existing keypair
+on every subsequent call. This matches the wave-2 flow's
+"import-once-then-find" shape.
+
+**Pre-flight assumption.** §2 has already run: SoftHSM2 is
+installed, the token is initialised, the user PIN is staged in
+`/var/run/atlas/hsm.pin` with mode `0400`, and the master seed is
+sealed under `atlas-master-seed-v1`. wave-3 itself does NOT
+consume the master seed for signing, but §2 must be complete
+because (a) the HSM trio and token used for wave-3 keypair
+generation are the same token that holds the master seed, and
+(b) the wave-2 fallback layer (active when
+`ATLAS_HSM_WORKSPACE_SIGNER` is later unset) depends on it.
+
+> **STOP — irreversible decision.** Before you generate the first
+> per-workspace keypair, decide single-token vs. multi-token. Under
+> wave-3 each token's hardware entropy generates an independent
+> keypair, so two tokens cannot agree on the same per-workspace
+> pubkey. **Single-token** = accept total loss of every per-tenant
+> pubkey on token failure (no recovery path that preserves them).
+> **Multi-token shared-keys** = NOT supported under wave-3; stay on
+> wave-2 (unset `ATLAS_HSM_WORKSPACE_SIGNER`) if you need that
+> redundancy. Once step 2 below has generated the first keypair on
+> a token, reversing this decision requires destroying every
+> per-workspace keypair and re-running the bundle rotation
+> ceremony.
+
+```bash
+# 0. Verify wave-2 (§2) is operational. The wave-3 dispatcher
+#    requires the same HSM trio, so a wave-2-failing deployment
+#    will fail wave-3 the same way. The HSM trio
+#    (ATLAS_HSM_PKCS11_LIB / ATLAS_HSM_SLOT / ATLAS_HSM_PIN_FILE)
+#    is assumed exported from the §2 ceremony pre-flight; if you
+#    are running §3 in a fresh shell, re-export the trio first.
+atlas-signer derive-pubkey --workspace canary-wave2-witness
+# Expected: prints a base64url Ed25519 pubkey on stdout.
+
+# 1. Opt into wave-3. The opt-in is a positive env var assertion;
+#    leaving it unset (or setting it to a non-truthy value) routes
+#    through wave-2. Recognised truthy values are 1 / true / yes /
+#    on (ASCII case-insensitive, surrounding whitespace tolerated)
+#    — same allow-list as ATLAS_DEV_MASTER_SEED.
+export ATLAS_HSM_WORKSPACE_SIGNER=1
+
+# 2. Generate the per-workspace keypair by deriving the pubkey.
+#    First call generates; subsequent calls find the existing
+#    keypair via C_FindObjects on (CKA_CLASS, CKA_KEY_TYPE,
+#    CKA_LABEL).
+atlas-signer derive-pubkey --workspace alice
+# Expected: prints a NEW base64url Ed25519 pubkey — NOT
+# byte-equivalent to the V1.10 wave-2 derivation. Record this
+# value as the wave-3 pinned pubkey for `alice`.
+
+# 3. Repeat for every active workspace. Order does not matter; the
+#    keypairs are independent.
+atlas-signer derive-pubkey --workspace ws-mcp-default
+atlas-signer derive-pubkey --workspace bob
+# ...etc.
+
+# 4. Now run the bundle rotation (§4) once per workspace to
+#    advertise the wave-3 pubkeys in the workspace's PubkeyBundle.
+#    Until §4 runs, every verifier holding a V1.10 bundle will
+#    reject wave-3 events for that workspace — by design.
+```
+
+### Verifying the keys
+
+The verification has **four** stages, mirroring §2 (presence,
+attribute-correctness, smoke) and adding a wave-3 refusal check:
+
+```bash
+# Stage 1 — presence. Should show one pubkey object AND one
+# private-key object per workspace_id, all under
+# atlas-workspace-key-v1:<ws> labels.
+pkcs11-tool --module "${ATLAS_HSM_PKCS11_LIB}" \
+            --slot "${ATLAS_HSM_SLOT}" \
+            --login --pin-source "file:${ATLAS_HSM_PIN_FILE}" \
+            --list-objects
+
+# Stage 2 — attribute readback. For EACH per-workspace private-key
+# object, the default `--list-objects` output already prints the
+# security attributes. Confirm all of the following appear:
+#
+#   Expected attributes for `atlas-workspace-key-v1:<ws>` (private):
+#     Access:     sensitive, always sensitive, never extractable
+#                 ╰──┬───────╯  ╰─────┬──────╯  ╰──────┬─────────╯
+#                    │                │                │
+#                    │                │                └─ CKA_EXTRACTABLE: no
+#                    │                └─ historical guarantee
+#                    └─ CKA_SENSITIVE: yes
+#     Usage:      sign
+#                 └─ CKA_SIGN: yes (CKA_DERIVE deliberately absent)
+#
+# A vendor whose pkcs11-tool emits CKA_DERIVE=true for the private
+# key MUST be investigated — wave-3 explicitly sets Derive=false
+# at generation time, and a token reporting otherwise is either
+# (a) lying about the attribute (driver bug), or (b) the operator
+# is looking at an unrelated key. If (a), do NOT proceed: the
+# indirect-leak path via C_DeriveKey is open. Re-run §3 step 2
+# after fixing the vendor module.
+
+# Stage 3 — sign smoke. Verify atlas-signer can produce a signature
+# under each per-tenant key. The CLI does not surface a raw `sign`
+# subcommand for arbitrary input under wave-3; the smoke runs
+# end-to-end via the MCP smoke harness. The HSM trio is assumed
+# exported from §2 (the smoke binary inherits the parent shell's
+# environment); add `ATLAS_HSM_PKCS11_LIB=… ATLAS_HSM_SLOT=…
+# ATLAS_HSM_PIN_FILE=…` inline if running standalone.
+ATLAS_HSM_WORKSPACE_SIGNER=1 \
+    pnpm --filter atlas-mcp-server smoke
+
+# Stage 4 — derive-key MUST refuse. wave-3 sealed keys are
+# unexportable; the `derive-key` subcommand exists only for
+# wave-1 / wave-2 paths. Under wave-3 it refuses with exit code 2.
+# The refusal fires from a direct env-var read (NOT via the
+# dispatcher), so it triggers even if the HSM trio is incomplete —
+# the trio is not required for this stage.
+ATLAS_HSM_WORKSPACE_SIGNER=1 \
+    atlas-signer derive-key --workspace alice
+# Expected stderr: "derive-key: refused — wave-3 sealed
+# per-workspace signer is opted in via ATLAS_HSM_WORKSPACE_SIGNER..."
+# Expected exit: 2.
+#
+# An exit 0 here means the dispatcher did NOT enforce the wave-3
+# refusal — a security regression. Do not proceed; investigate.
+```
+
+### Backup, recovery, rotation
+
+- **Backup.** Per-workspace keypairs are generated with hardware
+  entropy and held with `Extractable=false`; PKCS#11 has no
+  portable export format for them. Operators wanting cross-token
+  redundancy must provision multiple tokens and run §3 step 2
+  against EACH token at the same time — a `derive-pubkey` call
+  against token A generates a *different* keypair than a parallel
+  call against token B, because the entropy comes from each device
+  independently. The deployment must therefore choose one of:
+    - **Single-token deployment** — accept that token loss
+      invalidates every per-tenant key. The wave-3 ceremony is
+      identical to a fresh provision.
+    - **Multi-token deployment with shared keys** — NOT supported
+      under wave-3's "generate inside the HSM" model. Operators
+      requiring this must stay on wave-2 (master-seed-sealed,
+      keys derived in-process), where the master seed CAN be
+      imported into multiple tokens at §2 step 3.
+- **Recovery from token loss.** Under wave-3 single-token, every
+  per-tenant pubkey changes on recovery (the new token generates
+  fresh keypairs). Equivalent to "master seed compromise" in §7
+  but worse — wave-3 has no "stay on the same key by re-importing
+  the same seed" path, because the keypair is generated, not
+  derived. Mitigation: take the multi-token decision at deploy
+  time, OR keep the wave-2 fallback available by NOT permanently
+  setting `ATLAS_HSM_WORKSPACE_SIGNER` in the system environment
+  (a deployment that flips wave-3 off by unsetting the env var
+  reverts to wave-2 derivation, recovering the V1.10 pubkeys).
+- **Rotation.** Generate fresh per-workspace keypairs by
+  destroying the existing pair (`pkcs11-tool --delete-object`
+  against both halves under
+  `atlas-workspace-key-v1:<ws>`) and re-running §3 step 2. The
+  next `derive-pubkey` call generates a new keypair under the
+  same label. Then re-run §4 (`rotate-pubkey-bundle`) for the
+  affected workspace and ship the updated bundle to verifiers.
+  Schedule rotations far apart — every rotation invalidates that
+  workspace's existing `pubkey_bundle_hash`, exactly like the
+  master-seed rotation in §2 but scoped to one workspace.
+
+### Threat model — what wave-3 sealing does and does not protect
+
+**Does protect (extends §2 wave-2 protections to per-tenant keys):**
+
+- Memory-disclosure attacks on the signer host (heap dumps, swap,
+  core dumps, debugger attachments) cannot exfiltrate the
+  per-tenant Ed25519 signing scalar. Signing runs **inside** the
+  HSM via `CKM_EDDSA`; only the 64-byte signature exits the
+  device. The scalar never enters Atlas address space — not even
+  in a `Zeroizing` buffer (the wave-2 residual). Compare to wave-2
+  where the HKDF-derived per-tenant scalar transited a
+  `Zeroizing<[u8; 32]>` for the lifetime of one `sign` call;
+  wave-3 closes that exposure.
+- `derive-key` is structurally refused under wave-3 — there is no
+  exportable form of the scalar to export.
+- Indirect leak via `C_DeriveKey` is blocked by
+  `CKA_DERIVE=false` on the private key (defence-in-depth against
+  a sealed key serving as base material to a derivation whose
+  output may be exportable).
+
+**Does not protect (same operational risks as §2 wave 2):**
+
+- HSM physical compromise. An attacker with physical possession
+  of the token AND the user PIN can call `C_Sign` against any
+  per-tenant key for the lifetime of that PIN. Mitigation matches
+  §2: PIN file in tmpfs, SO PIN in a separate secret manager,
+  rotate the PIN if exposure is suspected.
+- Malicious code running inside the signer process. The PKCS#11
+  session is held open for the lifetime of the binary; an
+  attacker who achieves code execution **inside** atlas-signer
+  can call `WorkspaceSigner::sign(workspace_id, msg)` arbitrarily
+  during that session's lifetime, signing whatever they like
+  under any per-tenant key. Mitigated by short-lived signer
+  invocations (the V1.5+ MCP-server pattern shells to atlas-signer
+  per event, so no long-lived session exists).
+- TOCTOU on the PKCS#11 module path. Same residual as §2's
+  wave-2 threat model (V1.10 absolute-path guard fires at
+  config-parse, but `dlopen(3)` is a separate syscall — an
+  attacker with write access to the absolute path or a parent
+  directory can swap the .so between checks). Filesystem ACLs
+  on `${ATLAS_HSM_PKCS11_LIB}` AND its parent directories remain
+  a *required* operational control under wave-3, identical to
+  §2's prescription.
+- HSM driver compromise. The PKCS#11 module runs in atlas-signer's
+  address space and has full access to every per-tenant key in
+  the session. Vendor module signing + filesystem ACLs are the
+  defences; there is no in-process sandbox between cryptoki and
+  the rest of the signer.
+- Cross-workspace replay across the same token. wave-3 binds the
+  signature to the canonical signing-input (which folds in
+  `workspace_id`, `event_id`, `ts`, `kid`, `parents`, `payload`),
+  so a signature under `ws-A`'s key does not verify under
+  `ws-B`'s pubkey — same trust property as V1.9. wave-3 does NOT
+  add a token-level access-control split between workspaces; an
+  attacker with code execution inside the signer can call any
+  workspace's signer the same way. Per-workspace token isolation
+  is an operational tier (one token per tenant, with separate
+  PINs) outside V1.11's scope.
+
+### Test mode
+
+CI exercises the full wave-3 path against SoftHSM2. The MCP smoke
+harness honours `ATLAS_HSM_WORKSPACE_SIGNER=1` alongside
+`ATLAS_TEST_HSM=1` to opt into the wave-3 dispatcher. The smoke
+produces deterministic-but-different bundle hashes from the wave-2
+goldens (per the "wave-3 changes per-tenant pubkeys" property
+above) and locks them as a separate pinned-hash set in the smoke
+test fixtures. Operators verifying the wave-3 ceremony before
+production cutover can run the smoke locally to confirm the
+dispatcher routes correctly before flipping the deployment flag.
+
+---
+
+## 4. Workspace pubkey-bundle rotation ceremony
 
 V1.5–V1.8 bundles were assembled from three globally-shared SPIFFE
 keypairs. V1.9 adds per-workspace Ed25519 keys under kid shape
@@ -601,7 +949,7 @@ concurrency are operator-side responsibilities:**
 
 ---
 
-## 4. Anchor-chain rotation ceremony
+## 5. Anchor-chain rotation ceremony
 
 V1.7 ships `atlas-signer rotate-chain --confirm <workspace>` for
 anchor-chain rotation. The new genesis batch's `previous_head`
@@ -636,7 +984,7 @@ running.
 
 ---
 
-## 5. Workspace-id hygiene
+## 6. Workspace-id hygiene
 
 `atlas-signer::keys::validate_workspace_id` restricts workspace_ids
 to ASCII printable bytes (0x21..0x7E), forbids the `:` delimiter
@@ -658,7 +1006,7 @@ mapping in a separate registry.
 
 ---
 
-## 6. Recovery scenarios
+## 7. Recovery scenarios
 
 ### Lost or corrupted pubkey bundle
 
@@ -732,14 +1080,16 @@ rotation strategy with the HSM threat model in mind.
 
 ---
 
-## 7. Quick reference
+## 8. Quick reference
 
 | Ceremony | Command | Idempotent | Atomic-replace required |
 |---|---|---|---|
+| HSM master-seed import (V1.10 wave 2 — see §2) | `pkcs11-tool ... --write-object <seed-file> --label atlas-master-seed-v1` | no (re-import overwrites) | n/a (HSM-side) |
+| HSM per-workspace key generation (V1.11 wave-3 — see §3) | `ATLAS_HSM_WORKSPACE_SIGNER=1 atlas-signer derive-pubkey --workspace <ws>` | yes (find-or-generate) | n/a (key lives in HSM) |
 | Migrate workspace bundle to V1.9 | `atlas-signer rotate-pubkey-bundle --workspace <ws>` | yes | yes (operator-side `mv`) |
 | Rotate anchor chain | `atlas-signer rotate-chain --confirm <workspace>` | no | yes (operator-side) |
 | Derive workspace pubkey for inspection | `atlas-signer derive-pubkey --workspace <ws>` | yes | n/a (read-only) |
-| Production-gate enforcement | set `ATLAS_PRODUCTION=1` | n/a | n/a |
+| Production-gate enforcement (V1.10 — deprecated, V1.12 removal) | set `ATLAS_PRODUCTION=1` | n/a | n/a |
 
 See [ARCHITECTURE.md §7.3](ARCHITECTURE.md) for the per-tenant key
 trust model and [SECURITY-NOTES.md](SECURITY-NOTES.md) for the full

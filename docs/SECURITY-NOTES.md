@@ -1,6 +1,6 @@
-# Atlas Verifier — Defended Attack Surface (V1.10)
+# Atlas Verifier — Defended Attack Surface (V1.11)
 
-This document describes what the V1.10 verifier (`atlas-trust-core`, exposed as
+This document describes what the V1.11 verifier (`atlas-trust-core`, exposed as
 `atlas-verify-cli` and `atlas-verify-wasm`) actually defends against. It is
 written for auditors and security reviewers who want to know "what does this
 verifier protect, and where are the limits" without reading Rust.
@@ -585,6 +585,154 @@ spelled out in *Master-seed exfiltration is full compromise* above.
   `ATLAS_PRODUCTION=1` combination still refuses at the gate, so
   the gap is "config yells with two distinct error messages" not
   "config silently signs unsafely".
+
+---
+
+## wave-3 — sealed per-workspace signer (V1.11 — in scope)
+
+V1.10 wave 2 sealed the master seed but kept the per-tenant
+Ed25519 scalar derived in-process via HKDF: every `sign` call
+materialised the scalar in a `Zeroizing<[u8; 32]>` buffer, used
+it to construct an `ed25519_dalek::SigningKey`, and zeroized on
+drop. The scalar's lifetime in Atlas address space was bounded
+to the `sign` call, but it was non-zero — a memory-disclosure
+attack that captured the heap during a `sign` invocation could
+in principle exfiltrate the per-tenant scalar. wave-3 closes
+this residual: per-workspace Ed25519 keypairs are generated
+inside the HSM via `CKM_EC_EDWARDS_KEY_PAIR_GEN`, persisted as
+`Sensitive=true, Extractable=false, Derive=false`, and signing
+routes through `CKM_EDDSA(Ed25519)`. Only the 64-byte signature
+exits the device. No per-tenant secret bytes ever enter Atlas
+address space when wave-3 is opted in.
+
+- **Layered with wave-2:** `workspace_signer_loader_with_writer`
+  in `crates/atlas-signer/src/workspace_signer.rs` dispatches
+  three layers in priority order: (1) wave-3 sealed signer,
+  activated by `ATLAS_HSM_WORKSPACE_SIGNER` truthy AND the HSM
+  trio set; (2) wave-2 sealed-seed signer, activated by the trio
+  alone; (3) dev signer, activated by `ATLAS_DEV_MASTER_SEED=1`.
+  Every layer fails closed if its prerequisites are partial —
+  wave-3 opted in with no trio refuses; trio set with the
+  PKCS#11 module failing to open refuses; the dispatcher never
+  silently downgrades to a weaker layer.
+- **Explicit opt-in, not "trio implies wave-3":** wave-3 changes
+  per-tenant pubkey derivation from HKDF-of-master-seed to
+  HSM-native key generation. The pubkeys are NOT byte-equivalent
+  to V1.10 wave-2. A V1.10 deployment that pinned per-tenant
+  pubkeys in `PubkeyBundle.keys` would silently rotate every
+  entry on first wave-3 sign if activation were automatic. The
+  `ATLAS_HSM_WORKSPACE_SIGNER` env var is the operator's explicit
+  acknowledgement of the rotation event; the operator is then
+  responsible for running the bundle rotation ceremony in
+  `docs/OPERATOR-RUNBOOK.md` §4 against every active workspace
+  before flipping the flag in production.
+- **`derive-key` is structurally refused under wave-3.** The
+  binary's `run_derive_key_or_refuse` checks
+  `ATLAS_HSM_WORKSPACE_SIGNER` directly (not via the dispatcher,
+  to avoid opening a PKCS#11 session for a subcommand that
+  exists only to export the scalar) and exits with code 2
+  whenever wave-3 is opted in. There is no exportable form of
+  the per-tenant scalar to export; refusing at the CLI surface
+  rather than letting the operator discover the unexportability
+  later is the V1.10 fail-closed pattern preserved into V1.11.
+- **Defence-in-depth via `CKA_DERIVE=false`.** PKCS#11 lets a
+  base key with `CKA_DERIVE=true` serve as input to
+  `C_DeriveKey` whose output may be exportable — an indirect
+  way to leak material from a `Sensitive=true,
+  Extractable=false` key. Some HSMs default to `CKA_DERIVE=true`
+  on freshly-generated EC private keys; wave-3 pins
+  `CKA_DERIVE=false` at generation time to slam that door shut.
+- **Trust property — the env truth-table extends.** Auditors
+  reviewing a deployment can request the env snapshot
+  (`env | grep ATLAS_`) and conclude with certainty which layer
+  is active: `ATLAS_HSM_WORKSPACE_SIGNER=1` + HSM trio set + the
+  binary built with `--features hsm` is the wave-3 signature;
+  trio set + opt-in unset is the wave-2 signature; neither is
+  the dev signature. Partial trios refuse to start, so a
+  contradictory snapshot is not possible at runtime.
+- **wave-3 invariant tests:** `crates/atlas-signer/src/workspace_signer.rs`
+  pins the dispatcher's three-layer dispatch order across nine
+  test scenarios: dev fallthrough, wave-2 fallthrough, wave-3
+  routing, trio-missing refusal under wave-3 opt-in, partial-trio
+  refusal under wave-3 opt-in, falsy-opt-in fallthrough, the
+  truthy allow-list match (`1`/`true`/`yes`/`on`), the
+  `ATLAS_PRODUCTION` deprecation-warning interaction with
+  wave-3, and the `derive-key`-refused-under-wave-3 trait
+  contract. The phase-A determinism witnesses
+  (`v1.11 wave-3 phase-a determinism witness`) lock the
+  byte-equivalence of the dev wave-3 path to V1.10's
+  HKDF-derived signatures — refactoring the trait surface
+  cannot silently rotate keys for the dev/CI deployments that
+  do NOT opt into wave-3.
+
+### Residual risks after V1.11 wave-3
+
+V1.11 wave-3 (HSM PKCS#11 per-workspace key sealing) has shipped.
+The wave-2 residual risk *"per-tenant scalar transits Atlas
+address space in a `Zeroizing` buffer"* is now mitigated **for
+deployments that opt into wave-3 with the HSM trio set**;
+wave-2 deployments (trio set, wave-3 opt-in unset) retain that
+residual; dev/CI deployments running with
+`ATLAS_DEV_MASTER_SEED=1` retain the V1.9-equivalent risk
+profile.
+
+- **wave-3 scope is "scalar inside HSM", not "tenant isolation
+  inside HSM".** A single HSM token can hold per-workspace
+  keypairs for many tenants under distinct
+  `atlas-workspace-key-v1:<ws>` labels. An attacker with code
+  execution **inside** atlas-signer can call
+  `WorkspaceSigner::sign(workspace_id, msg)` against any
+  `workspace_id` whose keypair has been generated on the token —
+  PKCS#11's session-level access control does not split per
+  CKA_LABEL. Per-workspace token isolation (one token per
+  tenant, with a distinct PIN per token) is an operational tier
+  outside V1.11's scope; the wave-3 trust property is "the
+  scalar never enters Atlas address space", not "an attacker
+  inside the signer cannot cross workspaces".
+- **Multi-token redundancy is incompatible with wave-3.** wave-2
+  supported "import the same master seed into multiple tokens",
+  enabling cross-token redundancy without invalidating
+  per-tenant pubkeys. wave-3 generates each keypair with the
+  device's own entropy, so two tokens cannot agree on a
+  per-workspace pubkey without exporting (which `Extractable=false`
+  forbids). Deployments requiring redundancy must either stay on
+  wave-2 OR accept that a fresh provision (= every per-tenant
+  pubkey rotates) is the recovery path. `docs/OPERATOR-RUNBOOK.md`
+  §3 documents this trade-off explicitly so it cannot be missed
+  at deployment time.
+- **Token loss under wave-3 invalidates more than wave-2.** Under
+  wave-2 a fresh token can re-import the original sealed seed
+  and re-derive the same per-tenant pubkeys (HKDF is
+  deterministic). Under wave-3 a fresh token generates fresh
+  keypairs; the V1.11 deployment that loses its wave-3 token
+  invalidates every per-tenant pubkey across every workspace
+  with no recovery path that preserves them. Operators who
+  cannot accept this trade-off should stay on wave-2; the
+  wave-3 dispatcher's opt-in flag is the load-bearing
+  acknowledgement.
+- **TOCTOU on the PKCS#11 module path is unchanged.** wave-3
+  opens the same `dlopen(3)` path as wave-2; the V1.10
+  absolute-path guard fires at config-parse, but filesystem
+  state at the absolute path is not held between parse and
+  `Pkcs11::new`. Filesystem ACLs on `${ATLAS_HSM_PKCS11_LIB}`
+  AND its parent directories remain a *required* operational
+  control under wave-3 (see `docs/OPERATOR-RUNBOOK.md` §3
+  threat model bullet, identical wording to §2's bullet).
+- **HSM driver compromise is unchanged.** The PKCS#11 module
+  runs in atlas-signer's address space and has full access to
+  every per-tenant key in the session. Vendor module signing
+  is the operational defence; wave-3 cannot mitigate this with
+  in-process controls. wave-3's improvement is bounded to
+  "memory-disclosure on the signer host no longer yields the
+  per-tenant scalar"; an attacker who controls the cryptoki
+  module at load time still controls what `C_Sign` does.
+- **`ATLAS_PRODUCTION` deprecation is in flight.** The V1.11 L-8
+  follow-up adds a deprecation warning when `ATLAS_PRODUCTION` is
+  set under any layer (wave-3, wave-2, or dev), targeting V1.12
+  removal. Deployments still using the V1.9-era paranoia layer
+  see the warning on every `atlas-signer` invocation and should
+  schedule the migration to "drop `ATLAS_PRODUCTION`, rely on
+  the V1.10+ positive-opt-in semantics" before the V1.12 cutover.
 
 ---
 
