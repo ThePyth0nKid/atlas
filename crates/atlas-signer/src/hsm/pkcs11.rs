@@ -100,9 +100,8 @@ pub struct Pkcs11MasterSeedHkdf {
     /// without removing the field — removing it would drop the
     /// context immediately after `open`, which `C_Finalize`s the
     /// module while the session is still open and produces a
-    /// use-after-free in cryptoki. Declared LAST in the struct so
-    /// it is dropped LAST: declaration order = drop order in Rust,
-    /// and the session must close before `C_Finalize` runs.
+    /// use-after-free in cryptoki. Drop ordering is documented at the
+    /// struct level above.
     _ctx: Pkcs11,
 }
 

@@ -87,11 +87,22 @@
 //! for `--secret-hex`; V1.9 retires it because the resulting "valid
 //! signature, but with the wrong key" outcome was a footgun in CI logs).
 //!
-//! V1.9 production gate: the per-tenant subcommands (`derive-key`,
-//! `derive-pubkey`, `rotate-pubkey-bundle`, `sign --derive-from-workspace`)
-//! refuse to run when `ATLAS_PRODUCTION=1` because the master seed is
-//! a source-committed dev constant. V1.10 will replace the gate with a
-//! sealed-seed loader.
+//! V1.10 master-seed gate (shipped, two waves):
+//!   * **Wave 1 — positive opt-in.** Per-tenant subcommands
+//!     (`derive-key`, `derive-pubkey`, `rotate-pubkey-bundle`,
+//!     `sign --derive-from-workspace`) refuse to start unless the
+//!     operator sets `ATLAS_DEV_MASTER_SEED=1` (truthy values:
+//!     `1`/`true`/`yes`/`on`, case-insensitive). The V1.9 paranoia
+//!     gate `ATLAS_PRODUCTION=1` retains primacy and overrides the
+//!     opt-in.
+//!   * **Wave 2 — sealed-seed loader.** Setting the HSM trio
+//!     (`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`)
+//!     dispatches to [`atlas_signer::hsm::pkcs11::Pkcs11MasterSeedHkdf`]
+//!     (gated behind the `hsm` Cargo feature). HKDF runs *inside* the
+//!     HSM token via `CKM_HKDF_DERIVE`; the master seed never enters
+//!     Atlas address space. HSM init failure is fatal — there is no
+//!     silent fallback to the dev seed when the trio is set. See
+//!     `docs/OPERATOR-RUNBOOK.md` §2 for the import ceremony.
 
 // V1.10: the binary consumes `atlas-signer` as a library so the
 // V1.10 wave-2 sealed-seed loader (`atlas_signer::hsm`) shares the

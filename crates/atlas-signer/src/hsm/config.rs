@@ -54,6 +54,12 @@ pub const PKCS11_LIB_ENV: &str = "ATLAS_HSM_PKCS11_LIB";
 pub const SLOT_ENV: &str = "ATLAS_HSM_SLOT";
 
 /// Environment variable that names the path to the PIN file.
+///
+/// Must be an *absolute* filesystem path (same path-confusion
+/// rationale as [`PKCS11_LIB_ENV`]). The PIN file should be mode
+/// 0400 and owned by the signer's runtime user; the loader does not
+/// re-check permission bits at read time, so the import ceremony is
+/// the only place that guarantee is set up.
 pub const PIN_FILE_ENV: &str = "ATLAS_HSM_PIN_FILE";
 
 /// CKA_LABEL of the master seed object inside the HSM token.
@@ -156,10 +162,26 @@ impl HsmConfig {
                 let slot_num: u64 = s.parse().map_err(|e| {
                     format!("{SLOT_ENV} value {s:?} is not a non-negative integer: {e}")
                 })?;
+                // Same library-hijack-class rationale as the module-
+                // path guard, weaker variant: a relative PIN file path
+                // resolves against the signer's CWD, so an attacker
+                // who controls the CWD can swap in their own PIN file
+                // and steer authentication to a token they control.
+                // Lower severity than the module-path case (no dlopen,
+                // no in-process malicious code), but the inconsistency
+                // would puzzle a security auditor.
+                let pin_file = PathBuf::from(p);
+                if !pin_file.is_absolute() {
+                    return Err(format!(
+                        "{PIN_FILE_ENV} value {p:?} must be an absolute path \
+                         (relative paths resolve against the signer's working \
+                         directory and are a path-confusion vector)",
+                    ));
+                }
                 Ok(Some(HsmConfig {
                     module_path,
                     slot: slot_num,
-                    pin_file: PathBuf::from(p),
+                    pin_file,
                 }))
             }
             _ => Err(format!(
@@ -315,6 +337,32 @@ mod tests {
         .unwrap_err();
         assert!(err.contains(PIN_FILE_ENV));
         assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn from_env_rejects_relative_pin_path() {
+        // Path-confusion defence on the PIN file: a relative pin file
+        // would resolve against the signer's CWD at startup, letting
+        // an attacker who influences the CWD swap in their own PIN
+        // file and authenticate to a token they control. Lower-risk
+        // than the module-path case but worth the consistency.
+        for relative in [
+            "hsm.pin",
+            "./hsm.pin",
+            "secrets/hsm.pin",
+        ] {
+            let err = HsmConfig::from_env(env_pairs(&[
+                (PKCS11_LIB_ENV, ABS_MODULE_SHORT),
+                (SLOT_ENV, "0"),
+                (PIN_FILE_ENV, relative),
+            ]))
+            .unwrap_err();
+            assert!(
+                err.contains(PIN_FILE_ENV) && err.contains("absolute"),
+                "relative pin path {relative:?} should be rejected with absolute-path message; \
+                 got {err:?}",
+            );
+        }
     }
 
     #[test]

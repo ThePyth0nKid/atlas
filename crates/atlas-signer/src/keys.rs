@@ -421,9 +421,16 @@ pub fn derive_workspace_signing_key(
     workspace_id: &str,
 ) -> SigningKey {
     let hk = Hkdf::<Sha256>::new(None, master_seed);
-    let mut key_bytes = [0u8; 32];
+    // Mirror the wrapping in `derive_workspace_signing_key_via`: the
+    // 32-byte HKDF output is per-tenant secret material; without
+    // `Zeroizing` it lingers on the stack frame after this function
+    // returns, recoverable from a core dump that captures stack pages.
+    // `SigningKey::from_bytes` clones into the dalek-internal scalar
+    // (which has its own zeroize-on-drop), so the wrapper here only
+    // needs to cover the local intermediate.
+    let mut key_bytes: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
     let info = format!("{HKDF_INFO_PREFIX}{workspace_id}");
-    hk.expand(info.as_bytes(), &mut key_bytes)
+    hk.expand(info.as_bytes(), &mut *key_bytes)
         .expect("HKDF-SHA256 expand of 32 bytes is well within the 8160-byte ceiling");
     SigningKey::from_bytes(&key_bytes)
 }
