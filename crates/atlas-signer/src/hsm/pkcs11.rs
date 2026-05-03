@@ -184,7 +184,22 @@ impl Pkcs11MasterSeedHkdf {
 /// Windows has no portable file-mode equivalent — ACL semantics are
 /// fundamentally different — and the runbook places production
 /// deployments on Linux/container hosts, so the check is `#[cfg(unix)]`.
-fn read_pin_file(config: &HsmConfig) -> Result<AuthPin, MasterSeedError> {
+///
+/// **Visibility.** `#[doc(hidden)] pub` (gated behind `#[cfg(feature
+/// = "hsm")]`) so the V1.11 wave-3 sealed per-workspace signer
+/// ([`crate::hsm::pkcs11_workspace`]) AND the wave-3 integration test
+/// (`tests/hsm_workspace_signer.rs`) can both reuse the hardened
+/// reader instead of growing byte-identical copies of the TOCTOU +
+/// mode-bit guard. Three copies would drift the moment one side added
+/// a check (e.g. owner-uid match) and the others did not — a silent
+/// regression of a security guarantee. The wave-2 integration test
+/// initially duplicated this reader without the mode-0400 guard,
+/// which was flagged in the V1.11 wave-3 Phase B security review
+/// (H-2); the fix is to share rather than duplicate. `#[doc(hidden)]`
+/// keeps it out of rustdoc so external consumers don't mistake it
+/// for a stable API surface.
+#[doc(hidden)]
+pub fn read_pin_file(config: &HsmConfig) -> Result<AuthPin, MasterSeedError> {
     use std::io::Read;
 
     // Open the file *first* so the subsequent metadata + read calls

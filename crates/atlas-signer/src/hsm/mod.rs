@@ -55,6 +55,9 @@ pub(crate) mod error;
 #[cfg(feature = "hsm")]
 pub mod pkcs11;
 
+#[cfg(feature = "hsm")]
+pub mod pkcs11_workspace;
+
 // Always-available stub so the master-seed loader can refer to the
 // type without needing the `hsm` feature. When the feature is on,
 // the real impl in [`pkcs11`] shadows this stub.
@@ -101,4 +104,79 @@ pub mod pkcs11 {
             ))
         }
     }
+}
+
+// V1.11 wave-3 Phase B counterpart of the wave-2 stub above. Same
+// fail-closed shape: build without `--features hsm`, get a struct
+// that compiles but refuses every operation with a remediation
+// message. The Phase-C dispatcher dispatches into this stub when
+// the binary was built without the feature, so a misconfigured
+// deployment surfaces a clear error instead of compiling away the
+// HSM path silently.
+#[cfg(not(feature = "hsm"))]
+pub mod pkcs11_workspace {
+    //! Stub PKCS#11 workspace-signer backend. Only compiled when
+    //! the `hsm` feature is OFF. Mirrors the wave-2
+    //! [`pkcs11`](super::pkcs11) stub: every operation returns
+    //! [`WorkspaceSignerError::Unavailable`](crate::workspace_signer::WorkspaceSignerError::Unavailable)
+    //! with a "rebuild with `--features hsm`" remediation hint.
+
+    use crate::hsm::config::HsmConfig;
+    use crate::workspace_signer::{WorkspaceSigner, WorkspaceSignerError};
+
+    /// Stub stand-in for the PKCS#11 wave-3 workspace signer.
+    /// Refuses every operation with a clear "compile with
+    /// `--features hsm`" remediation.
+    #[derive(Debug)]
+    pub struct Pkcs11WorkspaceSigner {
+        _config: HsmConfig,
+    }
+
+    impl Pkcs11WorkspaceSigner {
+        /// Stub constructor. Always returns
+        /// [`WorkspaceSignerError::Unavailable`] because the `hsm`
+        /// feature is not compiled in.
+        pub fn open(_config: HsmConfig) -> Result<Self, WorkspaceSignerError> {
+            Err(WorkspaceSignerError::Unavailable(
+                "atlas-signer built without the `hsm` feature; \
+                 rebuild with `--features hsm` to enable the wave-3 \
+                 sealed per-workspace signer"
+                    .to_string(),
+            ))
+        }
+    }
+
+    impl WorkspaceSigner for Pkcs11WorkspaceSigner {
+        fn sign(
+            &self,
+            _workspace_id: &str,
+            _signing_input: &[u8],
+        ) -> Result<[u8; 64], WorkspaceSignerError> {
+            Err(WorkspaceSignerError::Unavailable(
+                "Pkcs11WorkspaceSigner is a stub (hsm feature not enabled)"
+                    .to_string(),
+            ))
+        }
+
+        fn pubkey(
+            &self,
+            _workspace_id: &str,
+        ) -> Result<[u8; 32], WorkspaceSignerError> {
+            Err(WorkspaceSignerError::Unavailable(
+                "Pkcs11WorkspaceSigner is a stub (hsm feature not enabled)"
+                    .to_string(),
+            ))
+        }
+    }
+
+    // Compile-time `Send + Sync` fence — mirrors the real impl in
+    // [`super::pkcs11_workspace`]. The Phase-C dispatcher places the
+    // workspace signer behind `Arc<dyn WorkspaceSigner + Send + Sync>`,
+    // so a stub that silently lost either auto-trait would only fail
+    // at the dispatcher's use site (a worse error message than failing
+    // here at the type definition).
+    const _: () = {
+        const fn assert_send_sync<T: Send + Sync>() {}
+        let _ = assert_send_sync::<Pkcs11WorkspaceSigner>;
+    };
 }
