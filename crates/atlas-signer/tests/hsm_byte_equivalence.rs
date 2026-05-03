@@ -410,11 +410,42 @@ fn require_runtime_gate() -> Option<RuntimeEnv> {
     let slot = env::var("ATLAS_HSM_SLOT").ok().and_then(|s| s.parse::<u64>().ok());
     let pin_file = env::var("ATLAS_HSM_PIN_FILE").ok().map(std::path::PathBuf::from);
     match (module_path, slot, pin_file) {
-        (Some(m), Some(s), Some(p)) => Some(RuntimeEnv {
-            module_path: m,
-            slot: s,
-            pin_file: p,
-        }),
+        (Some(m), Some(s), Some(p)) => {
+            // Mirror `HsmConfig::from_env`'s absolute-path guard
+            // (`crates/atlas-signer/src/hsm/config.rs`). The production
+            // gate refuses relative paths to defend against a CWD-swap
+            // attack that would load an attacker-controlled `.so` (or
+            // PIN file). The test's runtime gate is a separate code path
+            // and used to silently accept relative paths — that
+            // structural inconsistency would confuse a future maintainer
+            // reading the two side-by-side. CI sets absolute paths
+            // already, so this is belt-and-braces, not a behavior change.
+            if !m.is_absolute() {
+                eprintln!(
+                    "SKIP: ATLAS_HSM_PKCS11_LIB={} is not absolute — V1.11 \
+                     pre-flight refuses relative paths for parity with \
+                     HsmConfig::from_env (defends against CWD-swap library \
+                     hijack).",
+                    m.display()
+                );
+                return None;
+            }
+            if !p.is_absolute() {
+                eprintln!(
+                    "SKIP: ATLAS_HSM_PIN_FILE={} is not absolute — V1.11 \
+                     pre-flight refuses relative paths for parity with \
+                     HsmConfig::from_env (defends against CWD-swap PIN \
+                     file substitution).",
+                    p.display()
+                );
+                return None;
+            }
+            Some(RuntimeEnv {
+                module_path: m,
+                slot: s,
+                pin_file: p,
+            })
+        }
         _ => {
             eprintln!(
                 "SKIP: HSM trio (ATLAS_HSM_PKCS11_LIB, ATLAS_HSM_SLOT, \

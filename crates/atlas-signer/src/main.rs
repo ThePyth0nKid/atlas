@@ -627,7 +627,7 @@ fn run_anchor(args: AnchorArgs) -> ExitCode {
     }
 }
 
-fn run_sign(args: SignArgs, hkdf: Option<&dyn keys::MasterSeedHkdf>) -> ExitCode {
+fn run_sign(mut args: SignArgs, hkdf: Option<&dyn keys::MasterSeedHkdf>) -> ExitCode {
     // Required-when-signing fields (clap can't enforce because legacy mode
     // makes them all optional at the parser level). Surface clear errors.
     let workspace = match args.workspace {
@@ -742,22 +742,52 @@ fn run_sign(args: SignArgs, hkdf: Option<&dyn keys::MasterSeedHkdf>) -> ExitCode
             }
         }
     } else {
-        let secret_hex = if args.secret_stdin {
-            let mut buf = String::new();
+        // V1.11 Scope-A pre-flight follow-up: the sign-path's secret-bytes
+        // chain (`secret_hex` String → `secret_bytes` Vec<u8> → `secret_array`
+        // [u8; 32]) used to drop unscrubbed, leaving 32-byte signing-key
+        // material in the freed-allocator pool until reuse. The ceremony
+        // path (`build_derive_key_json` above) already wraps every heap
+        // copy in `Zeroizing` — this branch was the one place V1.11
+        // missed. Wrapping here closes the divergence before wave-3 layers
+        // a `WorkspaceSigner` trait on top of this dispatcher (the trait
+        // would inherit the gap if it were merged first).
+        //
+        // `SigningKey::from_bytes(&*secret_array)` borrows the inner
+        // [u8; 32], so the returned `SigningKey` does not extend the
+        // `Zeroizing` wrapper's lifetime; the wrapper drops at the end
+        // of this `else` arm and scrubs. `SigningKey` itself implements
+        // `ZeroizeOnDrop` in `ed25519-dalek` ≥ 2, so the expanded scalar
+        // is also scrubbed when `signing_key` drops at function exit.
+        let secret_hex: Zeroizing<String> = if args.secret_stdin {
+            let mut buf: Zeroizing<String> = Zeroizing::new(String::new());
             if let Err(e) = io::stdin().read_to_string(&mut buf) {
                 eprintln!("--secret-stdin: failed to read stdin: {e}");
                 return ExitCode::from(2);
             }
-            buf.trim().to_string()
+            // `trim()` returns a borrow; copy the trimmed slice into a
+            // fresh Zeroizing<String> so the trim-induced mid-buffer
+            // bytes are scrubbed alongside the original buf. Both
+            // `Zeroizing<String>` allocations drop at this `else` arm's
+            // exit and zero their backing UTF-8 buffer.
+            Zeroizing::new(buf.trim().to_string())
         } else {
             eprintln!(
                 "WARNING: secret passed via --secret-hex (visible in process list). \
                  Use --secret-stdin in production."
             );
-            args.secret_hex.expect("mode_count check guarantees exactly one source")
+            // `args.secret_hex` is `Option<String>` from clap. Move it
+            // straight into `Zeroizing` so the only unscrubbed window is
+            // the live argv / clap parser's own buffer (which is already
+            // visible in the process list — the WARNING above documents
+            // why this path is deprecated for production).
+            Zeroizing::new(
+                args.secret_hex
+                    .take()
+                    .expect("mode_count check guarantees exactly one source"),
+            )
         };
-        let secret_bytes = match hex::decode(&secret_hex) {
-            Ok(b) if b.len() == 32 => b,
+        let secret_bytes: Zeroizing<Vec<u8>> = match hex::decode(secret_hex.as_str()) {
+            Ok(b) if b.len() == 32 => Zeroizing::new(b),
             Ok(_) => {
                 eprintln!("secret must decode to 32 bytes");
                 return ExitCode::from(2);
@@ -767,7 +797,8 @@ fn run_sign(args: SignArgs, hkdf: Option<&dyn keys::MasterSeedHkdf>) -> ExitCode
                 return ExitCode::from(2);
             }
         };
-        let secret_array: [u8; 32] = secret_bytes.try_into().expect("len-checked above");
+        let mut secret_array: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
+        secret_array.copy_from_slice(secret_bytes.as_slice());
         SigningKey::from_bytes(&secret_array)
     };
 
