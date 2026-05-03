@@ -12,6 +12,30 @@
 //! public lib surface — the helper has no purpose outside the crate's
 //! own test harness, and exposing it would only invite drift.
 
+/// V1.10 pinned pubkey for workspace_id `"alice"` derived from
+/// [`crate::keys::DEV_MASTER_SEED`] via HKDF-SHA256 with info
+/// `"atlas-anchor-v1:alice"`. Base64url-no-pad of the 32-byte
+/// verifying-key.
+///
+/// **Single source of truth.** V1.10 introduced the pin in
+/// `keys::tests::workspace_pubkeys_are_pinned`; V1.11 wave-3
+/// Phase A added a second consumer in
+/// `workspace_signer::tests::pubkey_is_pinned_against_v1_10_goldens`.
+/// The two sites must stay in lock-step (any drift means a
+/// production pubkey rotation), so the pins live here as a single
+/// `pub(crate) const` that both tests reference. Changing this
+/// constant intentionally ALSO requires bumping
+/// `atlas-trust-core`'s crate version so `VERIFIER_VERSION` cascades
+/// through old bundles.
+pub(crate) const PINNED_PUBKEY_B64URL_ALICE: &str =
+    "HaADbOvQvGRNVJnGFLLjj-qxC-zwReufz-8dAbBu9aY";
+
+/// V1.10 pinned pubkey for workspace_id `"ws-mcp-default"` (the MCP
+/// server's `DEFAULT_WORKSPACE`). See
+/// [`PINNED_PUBKEY_B64URL_ALICE`] for the lock-step rationale.
+pub(crate) const PINNED_PUBKEY_B64URL_WS_MCP_DEFAULT: &str =
+    "_7VayPxHeadNxfSOw0p8E5LNXBNP2Mb-cOieCZRZq6M";
+
 /// Build an env reader closure that returns each `(name, value)` pair's
 /// value for matching lookups and `None` otherwise.
 ///

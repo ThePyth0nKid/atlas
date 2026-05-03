@@ -908,22 +908,21 @@ mod tests {
                 .encode(sk.verifying_key().to_bytes())
         };
 
-        // BEGIN PINNED — DO NOT EDIT WITHOUT INTENT.
-        // Computed from `DEV_MASTER_SEED` + info `"atlas-anchor-v1:" + ws`.
-        const ALICE_PUBKEY_B64URL: &str = "HaADbOvQvGRNVJnGFLLjj-qxC-zwReufz-8dAbBu9aY";
-        const DEFAULT_PUBKEY_B64URL: &str = "_7VayPxHeadNxfSOw0p8E5LNXBNP2Mb-cOieCZRZq6M";
-        // END PINNED.
-
+        // Pins live in `crate::test_support` so this site and the
+        // V1.11 wave-3 `workspace_signer::tests` site reference one
+        // source of truth — see test_support.rs lock-step note.
         let alice = pubkey("alice");
         let default = pubkey("ws-mcp-default");
 
         assert_eq!(
-            alice, ALICE_PUBKEY_B64URL,
+            alice,
+            crate::test_support::PINNED_PUBKEY_B64URL_ALICE,
             "V1.9 derivation drift for workspace 'alice'. If intentional, \
              regenerate both pins AND bump atlas-trust-core's crate version."
         );
         assert_eq!(
-            default, DEFAULT_PUBKEY_B64URL,
+            default,
+            crate::test_support::PINNED_PUBKEY_B64URL_WS_MCP_DEFAULT,
             "V1.9 derivation drift for workspace 'ws-mcp-default'. If intentional, \
              regenerate both pins AND bump atlas-trust-core's crate version."
         );

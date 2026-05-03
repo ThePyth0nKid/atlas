@@ -28,12 +28,19 @@
 //!     message.
 //!   * [`rekor_client`] — HTTP client for live Sigstore Rekor v1
 //!     submission. Used internally by [`anchor`].
+//!   * [`workspace_signer`] — V1.11 Scope A wave-3 abstraction over
+//!     per-workspace signing. Phase A (this commit) ships the trait
+//!     and a dev impl that wraps [`keys::MasterSeedHkdf`]; Phase B
+//!     adds a sealed PKCS#11 impl that owns the per-tenant scalar
+//!     end-to-end inside the HSM; Phase C wires the dispatcher into
+//!     the binary's `run_sign` flow.
 
 pub mod anchor;
 pub mod chain;
 pub mod hsm;
 pub mod keys;
 pub mod rekor_client;
+pub mod workspace_signer;
 
 #[cfg(test)]
 pub(crate) mod test_support;
