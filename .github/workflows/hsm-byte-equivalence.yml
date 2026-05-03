@@ -1,4 +1,4 @@
-# V1.11 Scope A pre-flight — SoftHSM2 byte-equivalence CI lane.
+# V1.12 Scope B1 — SoftHSM2 byte-equivalence CI lane (PR-promoted).
 #
 # Runs the `hsm_byte_equivalence` integration test in
 # `crates/atlas-signer/tests/` against a CI-provisioned SoftHSM2 token.
@@ -9,74 +9,94 @@
 #
 # If YES: V1.11 Scope A (HSM seal scope wave 3) can ship as a
 # backwards-compatible seed-import migration — old workspace pubkeys
-# survive the HSM-seal upgrade.
-#
-# If NO: Scope A becomes a fresh-rotation event. Documented and
-# escalated via the test's panic message; CI red signals the design
-# branch in `.handoff/v1.11-handoff.md` Scope A section.
+# survive the HSM-seal upgrade. (V1.11 confirmed: YES for the HKDF
+# import path; wave-3 keypairs use CKM_EC_EDWARDS_KEY_PAIR_GEN with
+# hardware entropy and are NOT byte-equivalent to V1.9 — that's why
+# wave-3 is an explicit opt-in. See `.handoff/v1.11-handoff.md` §1.)
 #
 # This workflow does NOT replace the dev-seed CI lane — it adds an
 # HSM-backed lane on top so the PKCS#11 path is exercised end-to-end
 # in CI without needing a hardware token. The token is throwaway
-# (created and destroyed inside the workflow); the PIN is a literal
-# constant that ships with this file because the SoftHSM2 token
-# created here is ephemeral CI-only and disappears with the runner.
+# (created and destroyed inside the workflow); the PIN defaults to a
+# literal constant for fork-PR compatibility (secrets are not exposed
+# to fork workflows) but is overridable via `secrets.SOFTHSM2_PIN` for
+# repo-internal PRs that want hardened CI hygiene.
+#
+# V1.12 Scope B1 promotion: trigger flipped from `workflow_dispatch`-only
+# to `pull_request:` + `push:` (with paths-filter to only fire on HSM-
+# relevant changes), all `uses:` pinned to immutable SHAs, and PIN
+# literals moved behind a `${{ secrets.* || 'default' }}` fallback.
 
 name: hsm-byte-equivalence
 
 on:
-  # Manual trigger only for V1.11 — the test runs cleanly on Linux but
-  # has not yet been pinned in matrix CI. Once V1.11 Scope A merges,
-  # promote to `pull_request:` + `push:` so every PR exercises the
-  # HSM path. Keeping it `workflow_dispatch` for now lets us iterate
-  # on the runbook ceremony without flooding PR checks with red runs
-  # if a SoftHSM2 quirk surfaces.
+  # Manual re-run is preserved for ad-hoc verification + debugging
+  # (e.g. SoftHSM2 quirks surfacing on a non-HSM-touching PR).
   workflow_dispatch:
+  # Pull-request and push triggers are gated by `paths:` so only HSM-
+  # relevant changes pay the SoftHSM2 provisioning cost (~30-45s on
+  # ubuntu-latest). Touching docs, TS, or non-signer crates does NOT
+  # fire this lane. The wave-3 smoke lane (sibling workflow added in
+  # V1.12 Scope B2) shares the same paths filter to keep CI cost
+  # bounded.
+  pull_request:
+    paths:
+      - 'crates/atlas-signer/**'
+      - 'crates/atlas-trust-core/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.github/workflows/hsm-byte-equivalence.yml'
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - 'crates/atlas-signer/**'
+      - 'crates/atlas-trust-core/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.github/workflows/hsm-byte-equivalence.yml'
+
+# Minimum permission set: this workflow only reads source and writes
+# nothing back to the repo. Explicit `read` declaration overrides any
+# repo-default `write-all` token grant and shrinks the blast radius if
+# a pinned action is later compromised at the SHA level (theoretical
+# but documented in GitHub's threat model).
+permissions:
+  contents: read
 
 jobs:
   byte-equivalence:
     runs-on: ubuntu-latest
     env:
-      # Hard-coded ephemeral token state. These constants are CI-only;
-      # the SoftHSM2 token they configure is destroyed at the end of
-      # every runner job and never touches a production secret. The PIN
-      # in particular is NOT sensitive — it gates only the throwaway
-      # token created in the next step.
+      # Ephemeral CI-only token state. The SoftHSM2 token configured
+      # here is created and destroyed inside this single runner job and
+      # never touches a production secret.
+      #
+      # PIN handling: defaults to a literal so fork PRs (which have no
+      # access to repository secrets) still run end-to-end. Repo-internal
+      # PRs and pushes can override via `secrets.SOFTHSM2_PIN` to
+      # exercise the secrets-injection path without changing workflow
+      # shape — the test does not branch on PIN value, so both paths
+      # yield identical assertions. Same pattern for SO-PIN.
+      #
+      # The literal default ('1234' / '0000') is intentionally well-known
+      # so an auditor can reproduce the full byte-equivalence test
+      # locally with `softhsm2-util --init-token --pin 1234 --so-pin 0000`
+      # and a fresh tokendir, without needing repo secret access.
       SOFTHSM2_TOKEN_LABEL: atlas-byte-equiv-ci
-      SOFTHSM2_PIN: '1234'
-      SOFTHSM2_SO_PIN: '0000'
+      SOFTHSM2_PIN: ${{ secrets.SOFTHSM2_PIN || '1234' }}
+      SOFTHSM2_SO_PIN: ${{ secrets.SOFTHSM2_SO_PIN || '0000' }}
       SOFTHSM2_SLOT_INDEX: '0'
 
     steps:
-      # NOTE — promotion-from-workflow_dispatch checklist (HARD prereqs
-      # before flipping the trigger to `pull_request:` / `push:`):
-      #
-      # 1. Pin EVERY `uses:` in this file to an immutable SHA digest.
-      #    The mutable refs currently in use are:
-      #      - `actions/checkout@v4`         (line below)
-      #      - `dtolnay/rust-toolchain@stable` (further down)
-      #      - `Swatinem/rust-cache@v2`      (further down)
-      #    All three execute with the runner's `GITHUB_TOKEN`; a
-      #    compromised tag move on any of them lets the attacker run
-      #    arbitrary code on every PR (including from forks). Under the
-      #    current `workflow_dispatch`-only trigger the blast radius is
-      #    bounded to human-initiated runs, but PR-triggered execution
-      #    removes that bound entirely.
-      #
-      # 2. Move the SoftHSM2 PIN + SO-PIN out of `env:` literals into
-      #    repository secrets (`${{ secrets.SOFTHSM2_PIN }}` etc.). The
-      #    literal `'1234'` below is intentional under workflow_dispatch
-      #    (the token is throwaway and never touches a real secret), but
-      #    once PR triggers are enabled, `set -x` or a debug step could
-      #    expose the literal in the run log on every PR run. Even
-      #    knowing the SoftHSM2 PIN of a CI-only token is harmless in
-      #    isolation, leaking PIN literals trains operators that PIN
-      #    leakage is fine — a habit that costs us when the same
-      #    workflow shape is copied for a real-secret context.
-      #
-      # The promotion checklist in `.handoff/v1.11-handoff.md` Scope A
-      # section is the canonical owner of these prereqs.
-      - uses: actions/checkout@v4
+      # All `uses:` pinned to immutable SHAs (V1.12 Scope B1). Tag refs
+      # like `@v4` and `@stable` are mutable and a compromised tag move
+      # would let an attacker run arbitrary code on every PR (including
+      # from forks). Bumping the SHAs requires a human-reviewed PR; the
+      # comment after each pin records the resolved tag/branch at the
+      # time of pinning so the upgrade path stays auditable.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Install SoftHSM2 + opensc
         run: |
@@ -85,6 +105,14 @@ jobs:
 
       - name: Initialise throwaway SoftHSM2 token
         run: |
+          # Belt-and-suspenders: explicitly disable shell trace so a
+          # future edit accidentally adding `set -x` (or a CI debug
+          # toggle that flips `RUNNER_DEBUG=1`) doesn't echo the PIN
+          # into the run log. GitHub Actions auto-masks values sourced
+          # from `secrets.*`, but the fallback literal ('1234') is NOT
+          # masked, so the explicit `set +x` is the load-bearing guard
+          # for the fork-PR case.
+          set +x
           # Use a per-workflow tokendir so two parallel runs of this
           # workflow do not race on /var/lib/softhsm. `softhsm2-util
           # --init-token --free` picks the first uninitialised slot,
@@ -125,10 +153,10 @@ jobs:
           echo "ATLAS_TEST_HSM_BYTE_EQUIV=1" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-05-03
 
       - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
         with:
           workspaces: . -> target
 
