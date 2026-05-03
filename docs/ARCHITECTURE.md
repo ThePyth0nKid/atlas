@@ -1077,6 +1077,20 @@ Headline:
   ignores it, but leaving it in place makes audit logs misleading. The
   V1.10 positive opt-in (`ATLAS_DEV_MASTER_SEED=1`) and the V1.10 wave-2
   HSM trio remain the supported production-readiness signals.
+- **CI-lane promotion (Scope B).** Three CI lanes were promoted from
+  manual-only (`workflow_dispatch`) to auto-trigger on PR + push +
+  schedule: `hsm-byte-equivalence` (V1.10 wave-2 drift sentry),
+  `hsm-wave3-smoke` (V1.11 wave-3 end-to-end sentry), and
+  `sigstore-rekor-nightly` (live Sigstore Rekor + pinned-roster
+  drift sentry, cron `0 6 * * *` UTC). The lanes encode the
+  trust-property invariants of the V1.6+V1.7+V1.8 anchor stack
+  and the V1.10/V1.11 sealed-key stack as auto-fired CI signals;
+  see `docs/SECURITY-NOTES.md` §"CI lanes" for the trust-model
+  rationale and `docs/OPERATOR-RUNBOOK.md` §8 for the operator-
+  facing failure-handling sketches. Each workflow file carries an
+  inline header documenting its trigger surface, the invariant under
+  test, and the rationale for SHA-pinned actions + paths-filter +
+  permissions block.
 
 ### V2 — full COSE + policy + SPIFFE
 

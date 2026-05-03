@@ -1,0 +1,182 @@
+# V1.12 Scope B2 — wave-3 sealed-signer end-to-end smoke lane.
+#
+# This workflow exercises the full V1.11 wave-3 path in CI:
+#
+#   SoftHSM2 + ATLAS_HSM_* trio + ATLAS_HSM_WORKSPACE_SIGNER=1
+#   → atlas-signer (with --features hsm)
+#   → CKM_EC_EDWARDS_KEY_PAIR_GEN per workspace
+#   → CKM_EDDSA(Ed25519) signing inside the token
+#   → atlas-mcp-server smoke writes 3 events + 2 anchors
+#   → atlas-verify-cli verifies the exported trace as VALID
+#
+# Complements the byte-equivalence lane (hsm-byte-equivalence.yml). That
+# lane proves the V1.9 HKDF→SoftHSM2 import is byte-identical to the
+# host-side derivation; this lane proves the wave-3 sealed signer
+# produces traces that the verifier accepts end-to-end.
+#
+# Why a separate workflow file (rather than a job in
+# hsm-byte-equivalence.yml): the smoke lane has a different paths
+# filter (it fires on TS changes too) and runs the full TS toolchain
+# (pnpm install + build + smoke). Combining them would either over-
+# trigger the byte-equivalence run on TS-only PRs or under-trigger
+# the smoke on signer-only PRs. Separate files keep each lane's
+# trigger surface minimal.
+#
+# The PIN-fallback pattern, SHA pinning, paths filter, and
+# permissions block all mirror hsm-byte-equivalence.yml — see that
+# file's header for the rationale (V1.12 Scope B1).
+
+name: hsm-wave3-smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'crates/atlas-signer/**'
+      - 'crates/atlas-trust-core/**'
+      - 'crates/atlas-verify-cli/**'
+      - 'apps/atlas-mcp-server/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/hsm-wave3-smoke.yml'
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - 'crates/atlas-signer/**'
+      - 'crates/atlas-trust-core/**'
+      - 'crates/atlas-verify-cli/**'
+      - 'apps/atlas-mcp-server/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/hsm-wave3-smoke.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  wave3-smoke:
+    runs-on: ubuntu-latest
+    env:
+      SOFTHSM2_TOKEN_LABEL: atlas-wave3-smoke-ci
+      SOFTHSM2_PIN: ${{ secrets.SOFTHSM2_PIN || '1234' }}
+      SOFTHSM2_SO_PIN: ${{ secrets.SOFTHSM2_SO_PIN || '0000' }}
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install SoftHSM2 + opensc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y softhsm2 opensc
+
+      - name: Initialise throwaway SoftHSM2 token
+        run: |
+          # Belt-and-suspenders: explicitly disable shell trace so a
+          # future edit accidentally adding `set -x` (or a CI debug
+          # toggle that flips `RUNNER_DEBUG=1`) doesn't echo the PIN
+          # into the run log. GitHub Actions auto-masks values sourced
+          # from `secrets.*`, but the fallback literal ('1234') is NOT
+          # masked, so the explicit `set +x` is the load-bearing guard
+          # for the fork-PR case. (Mirrors the rationale in
+          # hsm-byte-equivalence.yml — kept inline here so a future
+          # editor cannot remove `set +x` without seeing the why.)
+          set +x
+          mkdir -p "${RUNNER_TEMP}/softhsm-tokens"
+          cat > "${RUNNER_TEMP}/softhsm2.conf" <<EOF
+          directories.tokendir = ${RUNNER_TEMP}/softhsm-tokens
+          objectstore.backend = file
+          log.level = INFO
+          slots.removable = false
+          EOF
+          export SOFTHSM2_CONF="${RUNNER_TEMP}/softhsm2.conf"
+          softhsm2-util --init-token --free \
+            --label "${SOFTHSM2_TOKEN_LABEL}" \
+            --pin "${SOFTHSM2_PIN}" \
+            --so-pin "${SOFTHSM2_SO_PIN}"
+          SLOT_ID=$(softhsm2-util --show-slots \
+            | awk '/^Slot [0-9]+/{slot=$2} /Label:[[:space:]]+'"${SOFTHSM2_TOKEN_LABEL}"'$/{print slot; exit}')
+          if [ -z "${SLOT_ID}" ]; then
+            echo "FATAL: could not resolve slot id for token ${SOFTHSM2_TOKEN_LABEL}"
+            softhsm2-util --show-slots
+            exit 1
+          fi
+          PIN_FILE="${RUNNER_TEMP}/atlas-hsm.pin"
+          printf '%s' "${SOFTHSM2_PIN}" > "${PIN_FILE}"
+          chmod 0400 "${PIN_FILE}"
+          # Export the trio + the wave-3 opt-in for every subsequent
+          # step. The smoke.ts auto-detects all four and switches off
+          # the dev-seed default when they are all present.
+          {
+            echo "SOFTHSM2_CONF=${RUNNER_TEMP}/softhsm2.conf"
+            echo "ATLAS_HSM_PKCS11_LIB=/usr/lib/softhsm/libsofthsm2.so"
+            echo "ATLAS_HSM_SLOT=${SLOT_ID}"
+            echo "ATLAS_HSM_PIN_FILE=${PIN_FILE}"
+            echo "ATLAS_HSM_WORKSPACE_SIGNER=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-05-03
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+        with:
+          workspaces: . -> target
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47 # v4.0.0
+        with:
+          version: 9
+
+      - name: Install Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Build atlas-signer (release, --features hsm)
+        # The HSM-feature build is the load-bearing artefact for this
+        # lane. Release mode mirrors the production deployment shape
+        # and exercises the same compiler optimisations the signer
+        # ships with. ATLAS_SIGNER_PATH (set in the next step) points
+        # the TS smoke at this binary explicitly so smoke.ts cannot
+        # silently fall back to a non-HSM build.
+        run: cargo build --release -p atlas-signer --features hsm
+
+      - name: Build atlas-verify-cli (release)
+        # The verifier is a default-features build — it does NOT need
+        # the hsm feature because verification is purely public-key
+        # math. Mirroring the production verifier shape.
+        run: cargo build --release -p atlas-verify-cli
+
+      - name: Pin atlas-signer path for the TS smoke
+        # Without this, smoke.ts's resolveSignerBinary() walks
+        # target/release first; in CI that exists with the right
+        # binary, but pinning the path here makes the wave-3 contract
+        # explicit and survives a future change to the binary search
+        # order.
+        run: echo "ATLAS_SIGNER_PATH=$GITHUB_WORKSPACE/target/release/atlas-signer" >> "$GITHUB_ENV"
+
+      - name: Install MCP-server dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: apps/atlas-mcp-server
+
+      - name: Build MCP-server (TypeScript)
+        run: pnpm build
+        working-directory: apps/atlas-mcp-server
+
+      - name: Run smoke against wave-3 sealed signer
+        # The smoke.ts auto-detect block (V1.12 Scope B2) recognises
+        # the HSM trio + ATLAS_HSM_WORKSPACE_SIGNER=1 and skips the
+        # dev-seed override. Expected stdout includes the line
+        # `[smoke] smoke-mode wave-3 sealed (...)`. If smoke.ts ever
+        # regresses to unconditionally setting ATLAS_DEV_MASTER_SEED,
+        # the signer dispatcher's three-layer ordering will pick
+        # wave-3 anyway (HSM trio + opt-in wins over dev seed) — but
+        # the log line is the canonical signal that the auto-detect
+        # is still wired correctly.
+        run: pnpm smoke
+        working-directory: apps/atlas-mcp-server

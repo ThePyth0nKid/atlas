@@ -754,6 +754,67 @@ profile.
 
 ---
 
+## CI lanes (V1.12 — in scope)
+
+V1.12 Scope B promotes three CI lanes from manual-only
+(`workflow_dispatch`) to auto-trigger on PR + push + schedule. The
+lanes are operational defence-in-depth: each one converts a specific
+class of silent drift into a red CI signal that an auditor or
+reviewer cannot miss. The drift classes are exactly the
+trust-property invariants this document enumerates above; the lanes
+exist so a regression in any of them surfaces before downstream
+forks consume an affected build.
+
+- **`hsm-byte-equivalence`** (PR + push, paths-filtered to signer +
+  trust-core changes). Imports the canonical 32-byte master seed
+  into a throwaway SoftHSM2 token and proves the V1.10 wave-2
+  in-token HKDF-SHA256 derivation is byte-identical to the
+  host-side derivation across every workspace under test. A red
+  here means the V1.10 sealed-seed trust property
+  (host-derivation == HSM-derivation for `(seed, workspace_id)`) is
+  no longer holding — wave-2 deployments switching from dev to
+  HSM mode would silently emit different per-tenant pubkeys for
+  the same logical tenant. Drift sources include cryptoki crate
+  regressions on `Mechanism` payload serialisation and PKCS#11
+  derive-mechanism semantics changes
+  (CKM_SP800_108_COUNTER_KDF).
+- **`hsm-wave3-smoke`** (PR + push, paths-filtered to signer +
+  trust-core + verify-cli + MCP-server). Builds atlas-signer with
+  `--features hsm`, generates per-workspace keypairs in a throwaway
+  SoftHSM2 token via `CKM_EC_EDWARDS_KEY_PAIR_GEN`, signs three
+  events + two anchors via `CKM_EDDSA`, and verifies the exported
+  trace as VALID. A red here means the V1.11 wave-3 trust property
+  (per-workspace scalar never enters Atlas address space; signatures
+  verify against pubkeys advertised in the bundle) has regressed
+  end-to-end. Drift sources include the V1.11 wave-3 dispatcher
+  routing (HSM trio + opt-in must select sealed signer over wave-2
+  + dev), the cryptoki Mechanism payload for `CKM_EDDSA(Ed25519)`,
+  and verifier acceptance of wave-3-emitted Ed25519 signatures.
+- **`sigstore-rekor-nightly`** (cron `0 6 * * *` UTC + `workflow_dispatch`).
+  Submits anchor batches to live `rekor.sigstore.dev` and verifies
+  the inclusion proofs against the pinned Sigstore log pubkey + the
+  active shard roster. A red here means one of three upstream drifts
+  has landed: (1) Sigstore Rekor v1 API surface change (response
+  schema, error format, deprecation event); (2) Sigstore log-pubkey
+  rotation — the pinned ECDSA P-256 key in
+  `SIGSTORE_REKOR_V1_PEM` (and, where the rotation also adds a new
+  shard, the tree-ID roster `SIGSTORE_REKOR_V1_TREE_IDS`) requires
+  a coordinated update + crate-version bump per V1.7's boundary rule;
+  (3) tree_id growth past V1.8's lossless-JSON precision-preservation
+  guarantee. The lane is decoupled from PR triggers so a Sigstore
+  outage cannot block PR turnaround; nightly cadence gives < 24h
+  drift-detection latency without coupling the audit signal to
+  live-API availability. Concurrency-grouped so a manual dispatch
+  during an in-flight scheduled run cancels the older run rather
+  than doubling the production-log footprint.
+
+The trust-property invariants under test are documented inline in
+each lane's workflow file header (`.github/workflows/`); the
+operator-facing failure-handling sketches live in
+`docs/OPERATOR-RUNBOOK.md` §8.
+
+---
+
 ## Crate boundary
 
 The verifier crates (`atlas-trust-core`, `atlas-verify-cli`,

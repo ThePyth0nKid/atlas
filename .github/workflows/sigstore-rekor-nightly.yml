@@ -1,0 +1,130 @@
+# V1.12 Scope B2 — nightly live-Rekor smoke lane.
+#
+# Submits anchors to the production Sigstore Rekor instance
+# (rekor.sigstore.dev) and verifies the resulting trace fully
+# end-to-end. Catches drift in three classes:
+#
+#   1. Sigstore Rekor v1 API surface — schema changes, error-format
+#      shifts, deprecation of accepted entry types.
+#   2. Sigstore log-pubkey rotation — when Sigstore rotates the
+#      ECDSA P-256 log signing key, the verifier's pinned roster needs
+#      a corresponding update (see SIGSTORE_REKOR_V1_TREE_IDS in
+#      atlas-trust-core/src/anchor.rs); a nightly red here is the
+#      first signal.
+#   3. Tree_id growth — the precision-preserving JSON path (V1.8
+#      lossless-json) must keep round-tripping the production tree_id
+#      (~2^60) byte-identically as the log grows.
+#
+# This is intentionally NOT a PR-trigger. PR-triggered live submission
+# would (a) flood Sigstore with disposable anchors on every PR, (b)
+# couple PR turnaround time to Sigstore availability (an outage on
+# Sigstore's side would block every Atlas PR), and (c) make CI
+# flakiness from network conditions unactionable. Nightly schedule
+# decouples the audit signal from the PR feedback loop.
+#
+# Workflow_dispatch is preserved so an operator can manually trigger
+# a re-run after a Sigstore incident or after a crate-version bump
+# that touches the anchor format.
+#
+# When this lane goes red:
+#   1. Inspect run logs for the failed step. Likely culprits in order
+#      of frequency: schema-validation drift on /api/v1/log/entries
+#      response, tree_id roster gone stale, atlas-trust-core verifier
+#      rejecting a previously-accepted format.
+#   2. Cross-check `cargo test -p atlas-trust-core --test sigstore_golden`
+#      locally — golden tests are pinned to specific shards and would
+#      surface any pubkey-rotation event without needing live API access.
+#   3. If the issue is a Sigstore rotation, follow the rotation
+#      handling sketch in `docs/SECURITY-NOTES.md` ("Sigstore Rekor v1
+#      shard roster") to extend the pinned roster + bump the crate
+#      version (V1.7 boundary applies).
+
+name: sigstore-rekor-nightly
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 06:00 UTC daily — comfortably after Sigstore's typical
+    # maintenance windows (which historically land Tue/Thu 14:00 UTC
+    # per their #sigstore-incidents announcements). Adjust the cron
+    # if Sigstore announces a recurring window in this slot.
+    - cron: '0 6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  live-rekor-smoke:
+    runs-on: ubuntu-latest
+    # Single concurrency group across all triggers so a manual dispatch
+    # while a scheduled run is in flight cancels the older run rather
+    # than racing it. Two simultaneous runs would each submit anchor
+    # batches to live Sigstore, doubling the production-log footprint
+    # without doubling the audit signal.
+    concurrency:
+      group: sigstore-rekor-nightly
+      cancel-in-progress: true
+    env:
+      ATLAS_REKOR_URL: https://rekor.sigstore.dev
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-05-03
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+        with:
+          workspaces: . -> target
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47 # v4.0.0
+        with:
+          version: 9
+
+      - name: Install Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Build atlas-signer + atlas-verify-cli (release)
+        # Default features only — live-Rekor does not need the HSM
+        # feature. The signer's mock vs Sigstore dispatch is governed
+        # by the `--rekor-url` argv flag (set by the MCP server from
+        # ATLAS_REKOR_URL, see apps/atlas-mcp-server/src/tools/
+        # anchor-bundle.ts), not by a Cargo feature.
+        run: cargo build --release -p atlas-signer -p atlas-verify-cli
+
+      - name: Install MCP-server dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: apps/atlas-mcp-server
+
+      - name: Build MCP-server (TypeScript)
+        run: pnpm build
+        working-directory: apps/atlas-mcp-server
+
+      - name: Run smoke against live Sigstore Rekor
+        # ATLAS_REKOR_URL is read by the MCP-server anchor-bundle
+        # tool; smoke.ts triggers two anchor batches. Each batch posts
+        # a single inclusion-proof request to rekor.sigstore.dev and
+        # waits for the signed checkpoint. The verifier then walks the
+        # checkpoint signature against the pinned ECDSA P-256 log
+        # pubkey + validates the inclusion proof against the live
+        # tree_id (in the active shard roster).
+        #
+        # If Sigstore is unreachable, the run will fail at the anchor
+        # step with a clear network error — the failure mode is
+        # operational, not a test bug.
+        run: pnpm smoke
+        working-directory: apps/atlas-mcp-server
+
+      - name: Upload trace artefact for post-mortem
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: sigstore-rekor-trace
+          path: apps/atlas-mcp-server/data/
+          retention-days: 14
+          if-no-files-found: ignore

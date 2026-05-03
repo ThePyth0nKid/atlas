@@ -1108,7 +1108,101 @@ rotation strategy with the HSM threat model in mind.
 
 ---
 
-## 8. Quick reference
+## 8. CI lanes
+
+V1.12 Scope B introduced three auto-triggered CI lanes that act as
+drift sentries for the V1.10 wave-2, V1.11 wave-3, and Sigstore
+anchor trust properties. Operators consume the lanes in two ways:
+(a) as a pre-merge signal for changes touching the signer / verifier
+/ MCP server, (b) as a daily heartbeat against live Sigstore. This
+section describes how to interpret a red lane and where to look for
+the recovery sketch.
+
+Workflow files live under `.github/workflows/` and each carries an
+inline header documenting the trust-property invariant it tests +
+the rationale for its trigger surface. Read the header first when
+triaging a failure.
+
+### Lane reference
+
+| Lane | Trigger | Invariant under test | First-look on red |
+|---|---|---|---|
+| `hsm-byte-equivalence.yml` | PR + push (paths-filtered: signer / trust-core / Cargo.lock / workflow), `workflow_dispatch` | V1.10 wave-2: in-HSM HKDF derivation byte-identical to host-side derivation | Cryptoki crate version diff in Cargo.lock; SoftHSM2 package version on the runner; per-workspace test vector mismatch in step output |
+| `hsm-wave3-smoke.yml` | PR + push (paths-filtered: signer / trust-core / verify-cli / MCP-server / lockfiles / workflow), `workflow_dispatch` | V1.11 wave-3: end-to-end sealed signer produces verifier-VALID traces | `[smoke] smoke-mode wave-3 sealed (...)` line absent (auto-detect regression); `--features hsm` build failed; verifier rejected an Ed25519 signature emitted by `CKM_EDDSA` |
+| `sigstore-rekor-nightly.yml` | cron `0 6 * * *` UTC, `workflow_dispatch` | V1.6+V1.7+V1.8 Sigstore stack: live anchor submission + inclusion-proof verification against the pinned roster | Sigstore Rekor API schema/error change; pinned ECDSA P-256 log pubkey rotation (see [SECURITY-NOTES.md](SECURITY-NOTES.md) "Sigstore shard roster"); tree_id grew past lossless-JSON limit |
+
+### Failure-handling sketch
+
+For every red lane the **first action is the same**: open the run,
+read the workflow file's inline header (it documents the failure
+classes in the order of historical frequency), then read the failed
+step's stderr. The header's "When this lane goes red" block names
+the most likely cause and the cross-reference to recovery
+documentation.
+
+For `hsm-byte-equivalence` and `hsm-wave3-smoke` failures:
+
+1. Reproduce locally — both lanes use SoftHSM2 + an ephemeral
+   token; the same `softhsm2-util --init-token` ceremony from §2 of
+   this runbook reproduces the CI environment. Run
+   `cargo test -p atlas-signer --features hsm` (byte-equivalence)
+   or `pnpm smoke` from `apps/atlas-mcp-server/` with the HSM trio
+   exported (wave-3 smoke).
+2. If the failure reproduces, inspect the cryptoki crate version
+   in `Cargo.lock` + the SoftHSM2 vendor module path against the
+   wave's expectation. A vendor-module update on the runner can
+   cause a real change in derive-mechanism semantics; the V1.10
+   "absolute-path guard" + `permissions: contents: read` block
+   bound the blast radius but cannot prevent vendor-side drift.
+3. The wave-3 smoke also runs the verifier; a verifier-side
+   rejection of a wave-3-emitted signature is investigated against
+   `crates/atlas-trust-core/src/event/sig.rs` (the verifier
+   acceptance path) and `crates/atlas-signer/src/hsm/pkcs11_workspace.rs`
+   (the `CKM_EDDSA` payload encoding).
+
+For `sigstore-rekor-nightly` failures:
+
+1. Read the failed step's stderr — Sigstore returns structured
+   error JSON for schema/auth issues and plain network errors for
+   reachability issues; the failure mode is usually obvious from
+   the first line.
+2. If Sigstore announced an incident in `#sigstore-incidents` or
+   their status page, wait + manually re-trigger via
+   `workflow_dispatch` once they confirm recovery. The lane is
+   intentionally tolerant of single nightly misses.
+3. If the failure is a pubkey rotation (verifier rejects the
+   checkpoint signature against the pinned key), follow the
+   "Sigstore Rekor v1 shard roster" rotation sketch in
+   `docs/SECURITY-NOTES.md` — extend the pinned roster, bump the
+   crate version per V1.7's boundary rule, ship a coordinated
+   release.
+4. If the failure is `tree_id` precision loss
+   (`pubkey_bundle_hash` mismatch on a freshly-anchored bundle),
+   confirm the V1.8 lossless-JSON path is intact in
+   `crates/atlas-trust-core/src/anchor.rs`; treat any regression
+   as a verifier-bug-class incident.
+
+### What red lanes do NOT mean
+
+- A red `sigstore-rekor-nightly` is **not** a regression in the
+  Atlas codebase by default — Sigstore is upstream of us and an
+  outage on their side is unactionable from this repo. Read the
+  step output before assuming the cause is local.
+- A red `hsm-byte-equivalence` does **not** invalidate already-
+  shipped V1.10 wave-2 deployments retroactively — the property
+  was tested against the runner's vendor-module-of-the-day; a
+  field deployment using a different vendor module is unaffected
+  unless the same vendor-module version landed in production.
+- A red `hsm-wave3-smoke` does **not** invalidate already-deployed
+  V1.11 wave-3 instances. The lane tests the CI build of the signer
+  + verifier against a SoftHSM2 token; a regression here means the
+  current branch's code path no longer round-trips, NOT that any
+  field deployment has stopped signing or verifying. Field impact
+  depends on whether the regressed commit gets deployed.
+
+---
+
+## 9. Quick reference
 
 | Ceremony | Command | Idempotent | Atomic-replace required |
 |---|---|---|---|

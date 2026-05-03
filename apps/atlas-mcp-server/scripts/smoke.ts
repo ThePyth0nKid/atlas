@@ -54,7 +54,50 @@ async function main(): Promise<void> {
   // and the gate allows the dev seed. Real dev workflows (`pnpm dev`)
   // must export this var explicitly — see apps/atlas-mcp-server/README.md
   // and docs/OPERATOR-RUNBOOK.md §1 for the V1.9→V1.10 migration.
-  process.env.ATLAS_DEV_MASTER_SEED = "1";
+  //
+  // V1.12 Scope B2 — wave-3 auto-detect: when the HSM trio AND the
+  // wave-3 opt-in are externally set (CI hsm-wave3-smoke lane), skip
+  // the dev-seed override so the sealed-per-workspace signer is the
+  // active signing layer. The signer dispatcher refuses if both layers
+  // are simultaneously configured (it picks wave-3 when the trio +
+  // opt-in are present), so leaving DEV_MASTER_SEED unset keeps the
+  // signer's three-layer dispatcher unambiguous.
+  // Mirror the Rust signer's truthy allow-list (keys.rs / workspace_signer.rs:
+  // "1" | "true" | "yes" | "on", case-insensitive, whitespace-tolerant). A
+  // strict `=== "1"` check here would silently log smoke-mode `dev` while
+  // the signer dispatcher activated wave-3, defeating the audit signal the
+  // log line is meant to provide.
+  const isTruthyEnv = (value: string | undefined): boolean =>
+    value !== undefined && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+  const trioPresent = [
+    process.env.ATLAS_HSM_PKCS11_LIB,
+    process.env.ATLAS_HSM_SLOT,
+    process.env.ATLAS_HSM_PIN_FILE,
+  ].filter((v) => v !== undefined && v.length > 0).length;
+  const hsmTrioComplete = trioPresent === 3;
+  const wave3OptIn = isTruthyEnv(process.env.ATLAS_HSM_WORKSPACE_SIGNER);
+  // Fail-closed on partial trio under wave-3 opt-in: the signer dispatcher
+  // would refuse anyway (workspace_signer.rs loader rejects partial trio),
+  // but failing here pinpoints the misconfiguration before any process
+  // spawns. A partial trio without wave-3 opt-in still fails in the wave-2
+  // loader; we leave that path to the signer's own diagnostic.
+  if (wave3OptIn && !hsmTrioComplete) {
+    fail(
+      `wave-3 opted in (ATLAS_HSM_WORKSPACE_SIGNER set) but HSM trio incomplete ` +
+        `(${trioPresent}/3 vars set). Set all of ATLAS_HSM_PKCS11_LIB, ATLAS_HSM_SLOT, ` +
+        `ATLAS_HSM_PIN_FILE — or unset ATLAS_HSM_WORKSPACE_SIGNER to use the dev seed.`,
+    );
+  }
+  if (hsmTrioComplete && wave3OptIn) {
+    log(
+      "smoke-mode",
+      `wave-3 sealed (HSM trio + ATLAS_HSM_WORKSPACE_SIGNER=${process.env.ATLAS_HSM_WORKSPACE_SIGNER}; ` +
+        `lib=${process.env.ATLAS_HSM_PKCS11_LIB}; dev seed skipped)`,
+    );
+  } else {
+    process.env.ATLAS_DEV_MASTER_SEED = "1";
+    log("smoke-mode", "dev (ATLAS_DEV_MASTER_SEED=1)");
+  }
 
   // 1. Sanity: signer binary is on disk
   const signer = resolveSignerBinary();
