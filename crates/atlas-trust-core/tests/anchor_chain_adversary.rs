@@ -56,6 +56,7 @@ fn fixture_batch(batch_index: u64, integrated_time: i64, previous_head: &str) ->
         integrated_time,
         entries: vec![fixture_entry(batch_index * 10), fixture_entry(batch_index * 10 + 1)],
         previous_head: previous_head.to_string(),
+        witnesses: Vec::new(),
     }
 }
 
@@ -498,6 +499,7 @@ fn trace_anchor_with_swapped_proof_rejected_by_coverage() {
         integrated_time: 1_745_000_001,
         entries: vec![chain_entry.clone()],
         previous_head: ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD.to_string(),
+        witnesses: Vec::new(),
     };
     let head = chain_head_for(&batch).unwrap();
     let chain = AnchorChain {

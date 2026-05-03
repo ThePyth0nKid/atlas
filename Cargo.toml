@@ -11,6 +11,12 @@ members = [
     # loader now lives in-tree at `crates/atlas-signer/src/hsm/` behind
     # the `hsm` feature flag — same operator opt-in semantics, no cycle.
     "crates/atlas-signer",
+    # V1.13 Scope C wave 1: independent witness cosignature attestor.
+    # Runs as its own binary (Trust-Domain separation from atlas-signer)
+    # and depends only on `atlas-trust-core` for the WitnessSig type +
+    # `witness_signing_input` helper. Atlas-trust-core does NOT depend
+    # on atlas-witness — clean DAG, no cycle.
+    "crates/atlas-witness",
 ]
 
 [workspace.package]
@@ -40,6 +46,12 @@ hkdf = "0.12"
 # nor freed-allocator pages leak the seed. Used by atlas-signer's HSM
 # backend and the dispatcher that hands derived bytes to ed25519-dalek.
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
+
+# V1.13 atlas-witness key generation. OS CSPRNG for fresh witness
+# keypair entropy. Witness keys are long-lived and high-trust, so we
+# pin to `rand_core` (the minimal RNG-trait crate) with `getrandom` to
+# pull from the kernel directly rather than the heavier `rand` umbrella.
+rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 
 # Serde
 serde = { version = "1.0", features = ["derive"] }

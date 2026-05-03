@@ -159,6 +159,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-witness"
+version = "0.1.0"
+dependencies = [
+ "atlas-trust-core",
+ "base64",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "rand_core 0.6.4",
+ "serde_json",
+ "zeroize",
+]
+
+[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

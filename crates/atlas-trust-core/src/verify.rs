@@ -7,7 +7,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::anchor::{
-    default_trusted_logs, verify_anchor_chain, verify_anchors, SIGSTORE_REKOR_V1_LOG_ID,
+    chain_head_for, default_trusted_logs, verify_anchor_chain, verify_anchors,
+    SIGSTORE_REKOR_V1_LOG_ID,
 };
 use crate::cose::build_signing_input;
 use crate::ed25519::verify_signature;
@@ -15,7 +16,8 @@ use crate::error::TrustResult;
 use crate::hashchain::{check_event_hashes, check_parent_links, compute_tips};
 use crate::per_tenant::per_tenant_kid_for;
 use crate::pubkey_bundle::PubkeyBundle;
-use crate::trace_format::{AnchorEntry, AnchorKind, AtlasTrace};
+use crate::trace_format::{AnchorChain, AnchorEntry, AnchorKind, AtlasTrace};
+use crate::witness::{verify_witnesses_against_roster, ATLAS_WITNESS_V1_ROSTER};
 
 /// Caller-tunable verification options.
 ///
@@ -604,6 +606,9 @@ pub fn verify_trace_with(
                     });
                 }
             }
+
+            // 8c. Witness cosignatures (V1.13 Scope C, lenient default).
+            evidence.push(witness_evidence_for_chain(chain));
         }
     }
 
@@ -651,8 +656,233 @@ fn decode_b64url(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
     URL_SAFE_NO_PAD.decode(s)
 }
 
+/// Walk an `AnchorChain` and produce a `witnesses` evidence row
+/// summarising how many witness sigs were presented across all batches,
+/// how many verified against `ATLAS_WITNESS_V1_ROSTER`, and what (if
+/// any) failed.
+///
+/// Lenient mode (current — V1.13 wave C-1): failed witnesses are
+/// surfaced as `ok: false` evidence carrying a per-failure breakdown,
+/// but the caller does NOT push the failures into the top-level
+/// `errors` collection — the trace stays valid. Rationale: V1.13 ships
+/// with an empty roster (commissioning ceremony lands in wave C-2), so
+/// a strict default would universally pass with "0 of 0 verified" —
+/// uninformative — while flipping to a true threshold without operator
+/// opt-in would surprise existing deployments. Wave C-2 will add an
+/// `opts.require_witness_threshold` flag that promotes the failures to
+/// `errors` when set.
+///
+/// We do NOT gate this on the chain-internal walk's success: a witness
+/// sig commits to one SPECIFIC batch's recomputed head, which is
+/// well-defined even if adjacent batches in the chain don't link
+/// cleanly. The chain-link check and the witness check are independent
+/// trust properties — surfacing both is more useful than collapsing
+/// them.
+fn witness_evidence_for_chain(chain: &AnchorChain) -> VerifyEvidence {
+    let mut presented = 0usize;
+    let mut verified = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+
+    for batch in &chain.history {
+        if batch.witnesses.is_empty() {
+            continue;
+        }
+        let head = match chain_head_for(batch) {
+            Ok(h) => h,
+            Err(e) => {
+                // chain_head_for failed for THIS batch; we can't
+                // verify its witnesses. Record as a witness-side
+                // diagnostic — counted as "presented but failed".
+                presented += batch.witnesses.len();
+                for w in &batch.witnesses {
+                    failures.push(format!(
+                        "batch[{}] witness {}: chain_head recompute failed: {}",
+                        batch.batch_index, w.witness_kid, e,
+                    ));
+                }
+                continue;
+            }
+        };
+        let batch_outcome = verify_witnesses_against_roster(
+            &batch.witnesses,
+            &head,
+            ATLAS_WITNESS_V1_ROSTER,
+        );
+        presented += batch_outcome.presented;
+        verified += batch_outcome.verified;
+        for f in batch_outcome.failures {
+            failures.push(format!("batch[{}] {}", batch.batch_index, f));
+        }
+    }
+
+    if presented == 0 {
+        VerifyEvidence {
+            check: "witnesses".to_string(),
+            ok: true,
+            detail: "no witnesses presented (lenient mode passes)".to_string(),
+        }
+    } else if failures.is_empty() {
+        VerifyEvidence {
+            check: "witnesses".to_string(),
+            ok: true,
+            detail: format!("{} witness sig(s) verified across chain history", verified),
+        }
+    } else {
+        VerifyEvidence {
+            check: "witnesses".to_string(),
+            ok: false,
+            detail: format!(
+                "lenient: {} of {} witness sig(s) verified; {} failure(s) recorded but non-blocking (strict --require-witness deferred to V1.13 wave C-2): {}",
+                verified,
+                presented,
+                failures.len(),
+                failures.join("; "),
+            ),
+        }
+    }
+}
+
 /// Convenience: parse trace from JSON and verify.
 pub fn verify_trace_json(trace_bytes: &[u8], bundle: &PubkeyBundle) -> TrustResult<VerifyOutcome> {
     let trace: AtlasTrace = serde_json::from_slice(trace_bytes)?;
     Ok(verify_trace(&trace, bundle))
+}
+
+#[cfg(test)]
+mod tests {
+    //! Focused unit tests for the witness-evidence rollup.
+    //!
+    //! Full end-to-end tests of `verify_trace_with` live in the
+    //! integration-test files under `tests/`; these tests target the
+    //! V1.13 wave C-1 lenient-mode rollup helper directly so the
+    //! contract (presented/verified counts, failure surfacing, lenient
+    //! disposition) is pinned without standing up a full trace fixture.
+    use super::*;
+    use crate::trace_format::{
+        AnchorBatch, AnchorChain, ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD,
+    };
+    use crate::witness::WitnessSig;
+
+    fn empty_chain() -> AnchorChain {
+        AnchorChain {
+            history: Vec::new(),
+            head: ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD.to_string(),
+        }
+    }
+
+    fn batch_no_witnesses(idx: u64, prev: &str) -> AnchorBatch {
+        AnchorBatch {
+            batch_index: idx,
+            integrated_time: 1_745_000_000,
+            entries: Vec::new(),
+            previous_head: prev.to_string(),
+            witnesses: Vec::new(),
+        }
+    }
+
+    /// Empty chain history → "no witnesses presented" with ok=true.
+    /// Lenient mode's no-op disposition.
+    #[test]
+    fn witnesses_evidence_empty_history_passes_lenient() {
+        let chain = empty_chain();
+        let ev = witness_evidence_for_chain(&chain);
+        assert_eq!(ev.check, "witnesses");
+        assert!(ev.ok, "empty history must pass lenient: {ev:?}");
+        assert!(
+            ev.detail.contains("no witnesses presented"),
+            "detail should name the no-op disposition: {}",
+            ev.detail,
+        );
+    }
+
+    /// Chain with batches but zero witnesses on each → identical
+    /// "no witnesses presented" outcome (the ZERO presentation is what
+    /// triggers the no-op branch, not the empty history).
+    #[test]
+    fn witnesses_evidence_batches_without_witnesses_pass_lenient() {
+        let mut chain = empty_chain();
+        chain.history.push(batch_no_witnesses(
+            0,
+            ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD,
+        ));
+        let head_zero = chain_head_for(&chain.history[0]).unwrap();
+        chain.history.push(batch_no_witnesses(1, &head_zero));
+        chain.head = chain_head_for(&chain.history[1]).unwrap();
+
+        let ev = witness_evidence_for_chain(&chain);
+        assert!(ev.ok);
+        assert!(
+            ev.detail.contains("no witnesses presented"),
+            "non-empty history with no witnesses must still be no-op: {}",
+            ev.detail,
+        );
+    }
+
+    /// Chain with witnesses whose kids aren't in the (empty) genesis
+    /// roster → ok=false, lenient detail naming the count + each failure.
+    /// This is the most operationally common shape during V1.13 wave C-1
+    /// rollout: an issuer started attaching witnesses BEFORE the
+    /// commissioning ceremony added the corresponding pubkey to
+    /// ATLAS_WITNESS_V1_ROSTER.
+    #[test]
+    fn witnesses_evidence_unknown_kid_lenient_records_failure() {
+        let mut chain = empty_chain();
+        let mut batch = batch_no_witnesses(0, ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        batch.witnesses.push(WitnessSig {
+            witness_kid: "uncommissioned-witness".to_string(),
+            // 64-byte sig under URL_SAFE_NO_PAD = 86 chars.
+            signature: "A".repeat(86),
+        });
+        chain.history.push(batch);
+        chain.head = chain_head_for(&chain.history[0]).unwrap();
+
+        let ev = witness_evidence_for_chain(&chain);
+        assert!(!ev.ok, "unknown-kid witness must surface as ok=false: {ev:?}");
+        assert!(ev.detail.contains("0 of 1"), "detail must name presented/verified counts: {}", ev.detail);
+        assert!(
+            ev.detail.contains("non-blocking"),
+            "detail must name the lenient disposition: {}",
+            ev.detail,
+        );
+        assert!(
+            ev.detail.contains("uncommissioned-witness"),
+            "detail must include the kid that failed for auditor diagnostics: {}",
+            ev.detail,
+        );
+        assert!(
+            ev.detail.contains("not in pinned roster"),
+            "detail must surface the underlying failure reason: {}",
+            ev.detail,
+        );
+    }
+
+    /// Mixed chain: batch[0] has no witnesses, batch[1] has one
+    /// known-bad. Walker must aggregate across batches and emit
+    /// `batch[1] ...` prefix on the failure. Defends against an
+    /// off-by-one where only the first batch's witnesses get checked.
+    #[test]
+    fn witnesses_evidence_aggregates_across_batches() {
+        let mut chain = empty_chain();
+        chain.history.push(batch_no_witnesses(
+            0,
+            ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD,
+        ));
+        let head_zero = chain_head_for(&chain.history[0]).unwrap();
+
+        let mut batch_one = batch_no_witnesses(1, &head_zero);
+        batch_one.witnesses.push(WitnessSig {
+            witness_kid: "k-on-batch-1".to_string(),
+            signature: "B".repeat(86),
+        });
+        chain.history.push(batch_one);
+        chain.head = chain_head_for(&chain.history[1]).unwrap();
+
+        let ev = witness_evidence_for_chain(&chain);
+        assert!(!ev.ok);
+        assert!(
+            ev.detail.contains("batch[1]"),
+            "detail must label which batch the failure belongs to: {}",
+            ev.detail,
+        );
+    }
 }

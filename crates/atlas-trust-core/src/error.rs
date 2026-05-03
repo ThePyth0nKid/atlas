@@ -80,6 +80,19 @@ pub enum TrustError {
         reason: String,
     },
 
+    /// V1.13 witness cosignature failed to verify (unknown kid in pinned
+    /// roster, malformed signature bytes, or Ed25519 verification rejected).
+    /// Distinguished from `BadSignature` (event-level) and `BadAnchor`
+    /// (Sigstore inclusion-proof) so auditor-facing diagnostics name the
+    /// right trust domain.
+    #[error("invalid witness {witness_kid}: {reason}")]
+    BadWitness {
+        /// witness kid as it appeared on the wire
+        witness_kid: String,
+        /// underlying reason
+        reason: String,
+    },
+
     /// Two events in the trace share the same `event_hash`. Either an honest
     /// duplicate (which trace-builders should deduplicate before emit) or a
     /// replay-attack signal.

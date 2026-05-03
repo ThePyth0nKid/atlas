@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::witness::WitnessSig;
+
 /// The full trace bundle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -286,6 +288,22 @@ pub struct AnchorBatch {
     /// `history[i].previous_head == chain_head_for(history[i-1])` so
     /// silent rewriting of any past batch breaks the chain.
     pub previous_head: String,
+
+    /// V1.13 witness cosignatures over this batch's chain head.
+    ///
+    /// CRITICAL: this field is deliberately excluded from
+    /// `chain_head_for(batch)` (see `anchor::ChainHeadInput`). A witness
+    /// signs OVER the chain head; including witnesses in the head
+    /// computation would create infinite regress.
+    ///
+    /// Pre-V1.13 batches omit the field entirely; `serde(default)` lets
+    /// the verifier accept them (empty vec). Post-V1.13 batches with no
+    /// commissioned witness still emit no field
+    /// (`skip_serializing_if = "Vec::is_empty"`) so the wire shape is
+    /// byte-identical to pre-V1.13 for the empty case — preserves
+    /// already-issued anchor-chain bytes verbatim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub witnesses: Vec<WitnessSig>,
 }
 
 /// Genesis sentinel for `AnchorBatch::previous_head`: 64 ASCII zeros

@@ -1,0 +1,45 @@
+[package]
+name = "atlas-witness"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# V1.13 Scope C wave 1 — independent witness cosignature attestor.
+#
+# A witness signs over the Atlas anchor-chain head with its own Ed25519
+# keypair, producing a `WitnessSig` that the verifier resolves against
+# `ATLAS_WITNESS_V1_ROSTER` (pinned in `atlas-trust-core`). Operationally
+# the witness runs as the `atlas-witness` binary, separate from the
+# `atlas-signer` process — that separation is the entire point: a
+# witness in the same process as the signer is "the same machine signed
+# twice", not an independent attestation.
+#
+# Crate dependency direction: `atlas-witness` → `atlas-trust-core`.
+# Trust-core does NOT depend on atlas-witness, so the no-cycles rule
+# (V1.10 footgun #13) holds.
+
+[lib]
+name = "atlas_witness"
+path = "src/lib.rs"
+
+[[bin]]
+name = "atlas-witness"
+path = "src/main.rs"
+
+[dependencies]
+atlas-trust-core = { path = "../atlas-trust-core" }
+ed25519-dalek = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+zeroize = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+rand_core = { workspace = true }
+# NOTE: thiserror was listed during the initial scaffold but never
+# imported — the witness library uses `String` errors at the trait
+# boundary (V1.11 footgun #20 dyn-safety pattern), and the binary uses
+# the same `Result<_, String>` shape. Adding thiserror back would only
+# be justified by introducing a structured error variant in the lib.

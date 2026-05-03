@@ -19,6 +19,7 @@ pub mod per_tenant;
 pub mod pubkey_bundle;
 pub mod trace_format;
 pub mod verify;
+pub mod witness;
 pub mod error;
 
 pub use error::{TrustError, TrustResult};
@@ -30,6 +31,11 @@ pub use verify::{VerifyOutcome, VerifyEvidence, VerifyOptions, verify_trace, ver
 pub use pubkey_bundle::PubkeyBundle;
 pub use anchor::{chain_head_for, ANCHOR_CHAIN_DOMAIN};
 pub use per_tenant::{parse_per_tenant_kid, per_tenant_kid_for, PER_TENANT_KID_PREFIX};
+pub use witness::{
+    decode_chain_head, verify_witness_against_roster, verify_witnesses_against_roster,
+    witness_signing_input, WitnessSig, WitnessVerifyOutcome, ATLAS_WITNESS_DOMAIN,
+    ATLAS_WITNESS_V1_ROSTER,
+};
 
 /// Schema version this build of the crate produces and accepts.
 pub const SCHEMA_VERSION: &str = "atlas-trace-v1";

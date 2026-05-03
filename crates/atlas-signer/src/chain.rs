@@ -162,6 +162,13 @@ pub fn extend_chain_with_batch(
         integrated_time,
         entries: entries.to_vec(),
         previous_head,
+        // V1.13: issuer-side never populates witnesses — that is the
+        // sidecar `atlas-witness` binary's job (Trust-Domain separation).
+        // Empty vec keeps the batch deserialisable on pre-V1.13 verifiers
+        // for now; once a witness ceremony commissions an entry into the
+        // pinned roster, an out-of-process step appends WitnessSig values
+        // before the batch is shipped to auditors.
+        witnesses: Vec::new(),
     };
 
     // Sanity: the new batch must produce a usable head. If

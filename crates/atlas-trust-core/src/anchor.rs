@@ -24,6 +24,7 @@
 use base64::Engine;
 use blake3::Hasher;
 use ed25519_dalek::{Signature as EdSignature, Verifier as EdVerifier, VerifyingKey as EdVerifyingKey};
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
@@ -824,22 +825,87 @@ pub fn canonical_checkpoint_bytes_sigstore(
 /// crate version so `VERIFIER_VERSION` cascades.
 pub const ANCHOR_CHAIN_DOMAIN: &[u8] = b"atlas-anchor-chain-v1:";
 
+/// Subset of `AnchorBatch` fields that participate in `chain_head_for`.
+///
+/// V1.13 added `AnchorBatch.witnesses: Vec<WitnessSig>` — but a witness
+/// signs OVER the chain head, so the chain head computation MUST exclude
+/// witnesses (otherwise infinite regress: head depends on witness depends
+/// on head). Defining the canonical input as a separate struct makes the
+/// chain-head contract explicit: adding a new field to `AnchorBatch` is
+/// a deliberate choice about whether it joins this view (changes the
+/// head) or stays out of it (does not).
+///
+/// Field NAMES here MUST match `AnchorBatch` exactly — canonical JSON
+/// sorts keys lex, so the resulting bytes are byte-identical to a
+/// pre-V1.13 serialisation of `AnchorBatch` (no `witnesses` field). This
+/// preserves already-issued chain bytes verbatim — the `chain_head_for`
+/// pin test in this file is the load-bearing assertion.
+#[derive(Serialize)]
+struct ChainHeadInput<'a> {
+    batch_index: u64,
+    integrated_time: i64,
+    entries: &'a [AnchorEntry],
+    previous_head: &'a str,
+}
+
 /// Canonical bytes for an `AnchorBatch` — the input to the chain hash.
 ///
-/// Implementation strategy: serialize the batch through `serde_json` (which
-/// honors `#[serde(rename_all)]` and `#[serde(skip_serializing_if)]` on
-/// `AnchorBatch` and `AnchorEntry`), then re-emit those bytes through the
-/// same canonical-JSON pipeline `PubkeyBundle::deterministic_hash` uses —
-/// keys sorted lex, no whitespace, numbers as `Number::to_string`,
-/// strings JSON-escaped. One implementation, one set of pin tests, one
-/// source of truth.
+/// Implementation strategy: project the batch into `ChainHeadInput`
+/// (which omits `witnesses` — see that struct's docs), serialize the
+/// projection through `serde_json` (which honors `#[serde(rename_all)]`
+/// and `#[serde(skip_serializing_if)]` on `AnchorEntry`), then re-emit
+/// those bytes through the same canonical-JSON pipeline
+/// `PubkeyBundle::deterministic_hash` uses — keys sorted lex, no
+/// whitespace, numbers as `Number::to_string`, strings JSON-escaped.
+/// One implementation, one set of pin tests, one source of truth.
 ///
 /// JSON-escaping defends against splicing: if `log_id` ever contained an
 /// embedded newline or quote, JSON's escape rules render those bytes
 /// unambiguously, so two batches that differ in log_id contents cannot
 /// produce the same canonical bytes.
+///
+/// `#[deny(unused_variables)]` makes the destructure inside load-bearing:
+/// a future contributor can't silence the unused-binding warning with
+/// `let _ = batch.new_field;` or `#[allow(unused)]`. Adding a new field
+/// to `AnchorBatch` MUST land here as either a positional binding (joins
+/// `ChainHeadInput`, changes the head) or `field: _` (intentionally
+/// excluded). No silent third option.
+#[deny(unused_variables)]
 fn canonical_chain_batch_body(batch: &AnchorBatch) -> TrustResult<Vec<u8>> {
-    let v = serde_json::to_value(batch).map_err(|e| TrustError::Encoding(e.to_string()))?;
+    // Exhaustive field-audit destructure: rust requires every field of
+    // `AnchorBatch` to be named here, so adding a new field to
+    // `AnchorBatch` is a compile-fail at THIS site — forcing the next
+    // contributor to make a deliberate decision about whether the new
+    // field joins `ChainHeadInput` (changes the head) or stays out of
+    // it (does not). Without this, a new field would silently land in
+    // the canonical body via `serde_json::to_value(&view)` without any
+    // signal at the chain-head contract layer.
+    //
+    // Match ergonomics auto-borrows from `&AnchorBatch`, so the
+    // unprefixed bindings below all become `&Field` — no moves, no
+    // explicit `ref` markers needed (Rust 2024 forbids them in
+    // implicitly-borrowing patterns).
+    let AnchorBatch {
+        batch_index,
+        integrated_time,
+        entries,
+        previous_head,
+        // INTENTIONALLY OMITTED FROM ChainHeadInput. A witness signs
+        // OVER chain_head_for(batch); if the head depended on
+        // `witnesses`, signing would be impossible without infinite
+        // regress. The `chain_head_invariant_under_witnesses` test
+        // pins this property at runtime; this destructure pins it at
+        // compile time.
+        witnesses: _,
+    } = batch;
+
+    let view = ChainHeadInput {
+        batch_index: *batch_index,
+        integrated_time: *integrated_time,
+        entries: entries.as_slice(),
+        previous_head: previous_head.as_str(),
+    };
+    let v = serde_json::to_value(&view).map_err(|e| TrustError::Encoding(e.to_string()))?;
     crate::pubkey_bundle::canonical_json_bytes(&v)
 }
 
@@ -2015,6 +2081,7 @@ mod tests {
         AnchorBatch {
             batch_index,
             integrated_time: 1_745_000_000,
+            witnesses: Vec::new(),
             entries: vec![AnchorEntry {
                 kind: AnchorKind::DagTip,
                 anchored_hash:
@@ -2159,5 +2226,44 @@ mod tests {
         ))
         .unwrap();
         assert_ne!(h0, h1, "chain head must depend on batch_index");
+    }
+
+    /// V1.13 invariant: adding witnesses to an `AnchorBatch` MUST NOT
+    /// change `chain_head_for(batch)`. A witness signs OVER the head;
+    /// if the head depended on witnesses, signing would be impossible
+    /// without infinite regress. The `ChainHeadInput` view in this file
+    /// is the load-bearing mechanism for this invariance — this test
+    /// catches any future change that accidentally adds `witnesses` to
+    /// the canonicalisation.
+    #[test]
+    fn chain_head_invariant_under_witnesses() {
+        use crate::witness::WitnessSig;
+
+        let mut empty = fixture_batch(0, crate::trace_format::ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        let h_empty = chain_head_for(&empty).unwrap();
+
+        empty.witnesses = vec![WitnessSig {
+            witness_kid: "test-witness-1".to_string(),
+            // 64-byte Ed25519 sig under URL_SAFE_NO_PAD = 86 chars
+            // (matches the wire dialect; STANDARD-padded would be 88).
+            signature: "A".repeat(86),
+        }];
+        let h_with_one = chain_head_for(&empty).unwrap();
+        assert_eq!(
+            h_empty, h_with_one,
+            "chain head must NOT depend on witnesses; otherwise the \
+             witness sig would be over a head that depends on itself \
+             (infinite regress)",
+        );
+
+        empty.witnesses.push(WitnessSig {
+            witness_kid: "test-witness-2".to_string(),
+            signature: "B".repeat(86),
+        });
+        let h_with_two = chain_head_for(&empty).unwrap();
+        assert_eq!(
+            h_empty, h_with_two,
+            "chain head invariance must hold for any number of witnesses",
+        );
     }
 }
