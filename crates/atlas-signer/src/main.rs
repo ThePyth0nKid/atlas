@@ -122,8 +122,10 @@ use base64::Engine;
 use clap::{Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
 use serde::Serialize;
+use std::fmt::Write as _;
 use std::io::{self, Read};
 use std::process::ExitCode;
+use zeroize::Zeroizing;
 
 #[derive(Parser)]
 #[command(name = "atlas-signer")]
@@ -267,65 +269,165 @@ fn b64url_no_pad_encode(bytes: &[u8]) -> String {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Sign(args)) => run_sign(args),
+        Some(Command::Sign(args)) => run_sign_dispatch(args),
         Some(Command::BundleHash) => run_bundle_hash(),
         Some(Command::Anchor(args)) => run_anchor(args),
         Some(Command::ChainExport) => run_chain_export(),
-        Some(Command::DeriveKey(args)) => run_derive_key(args),
-        Some(Command::DerivePubkey(args)) => run_derive_pubkey(args),
-        Some(Command::RotatePubkeyBundle(args)) => run_rotate_pubkey_bundle(args),
-        None => run_sign(cli.legacy_sign),
+        Some(Command::DeriveKey(args)) => with_master_seed("derive-key", |hkdf| {
+            run_derive_key(args, hkdf)
+        }),
+        Some(Command::DerivePubkey(args)) => with_master_seed("derive-pubkey", |hkdf| {
+            run_derive_pubkey(args, hkdf)
+        }),
+        Some(Command::RotatePubkeyBundle(args)) => {
+            with_master_seed("rotate-pubkey-bundle", |hkdf| {
+                run_rotate_pubkey_bundle(args, hkdf)
+            })
+        }
+        None => run_sign_dispatch(cli.legacy_sign),
     }
 }
 
-/// JSON shape emitted by `derive-key`. Mirrors `keys::PerTenantIdentity`
-/// with `serde_json` derive — kept distinct from the Rust struct so the
-/// wire format is locked even if the internal type evolves.
-#[derive(Serialize)]
-struct DeriveKeyOutput {
-    /// Canonical per-tenant kid (`atlas-anchor:{workspace}`).
-    kid: String,
-    /// 32-byte Ed25519 pubkey, base64url-no-pad.
-    pubkey_b64url: String,
-    /// 32-byte secret, hex (64 chars). The caller pipes this back via
-    /// `sign --secret-stdin` — never via argv.
-    secret_hex: String,
+/// V1.11 M-4 — single-load helper for per-tenant subcommands.
+///
+/// V1.10 wave 2 dispatched four subcommands (`derive-key`,
+/// `derive-pubkey`, `rotate-pubkey-bundle`, and `sign
+/// --derive-from-workspace`), each of which independently called
+/// [`keys::master_seed_loader`]. In dev mode that's free; in HSM mode
+/// each call is a `Pkcs11::new` + `C_Initialize` + `C_OpenSession` +
+/// `C_Login` + `C_FindObjects` chain — and `C_Login` is an audit event
+/// on commercial HSMs (Thales Luna, AWS CloudHSM, YubiHSM2 all
+/// timestamp every login). Today the binary is one-shot per
+/// subcommand so the per-process cost is bounded, but the future
+/// MCP-embedded form will share one loader across many signing calls.
+///
+/// This helper formalises the "single load per process" invariant in
+/// the API surface: per-tenant handlers receive a borrowed
+/// `&dyn MasterSeedHkdf` rather than each calling the loader. Today
+/// the helper still loads on demand (per subcommand invocation) — the
+/// behavioural change lands in the V1.11 MCP-embedding work — but the
+/// signature change is the one-shot now-and-future fix.
+///
+/// Error wrapping preserves the V1.10 per-subcommand `cmd: msg` prefix
+/// so existing operator log-grep patterns continue to work.
+fn with_master_seed<F>(cmd: &str, handler: F) -> ExitCode
+where
+    F: FnOnce(&dyn keys::MasterSeedHkdf) -> ExitCode,
+{
+    match keys::master_seed_loader() {
+        Ok(hkdf) => handler(&*hkdf),
+        Err(e) => {
+            eprintln!("{cmd}: {e}");
+            ExitCode::from(2)
+        }
+    }
 }
 
-fn run_derive_key(args: DeriveWorkspaceArgs) -> ExitCode {
-    let hkdf = match keys::master_seed_loader() {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("derive-key: {e}");
-            return ExitCode::from(2);
+/// V1.11 M-4 — `sign` dispatcher that conditionally loads the master
+/// seed only when the caller requested in-signer derivation
+/// (`--derive-from-workspace`). Legacy `--secret-stdin` /
+/// `--secret-hex` paths must NOT trigger the loader: they have no
+/// dependency on the master seed and must remain usable in CI/dev
+/// environments that haven't opted into the V1.10 master-seed gate.
+///
+/// Sharing the dispatcher between the explicit `Command::Sign(_)` arm
+/// and the legacy no-subcommand fall-through (used by the bank-demo
+/// example) avoids duplicating the conditional-load block.
+fn run_sign_dispatch(args: SignArgs) -> ExitCode {
+    let hkdf = if args.derive_from_workspace.is_some() {
+        match keys::master_seed_loader() {
+            Ok(h) => Some(h),
+            Err(e) => {
+                eprintln!("sign --derive-from-workspace: {e}");
+                return ExitCode::from(2);
+            }
         }
+    } else {
+        None
     };
+    // `as_deref()` peels `Option<Box<dyn MasterSeedHkdf>>` to
+    // `Option<&dyn MasterSeedHkdf>` — a reference, not a move, so the
+    // boxed loader stays alive for the call duration and drops at
+    // function return.
+    run_sign(args, hkdf.as_deref())
+}
+
+/// V1.11 W1 (H-1): emit the `derive-key` ceremony JSON without
+/// allocating an unprotected `String` copy of the secret.
+///
+/// V1.10 used a `#[derive(Serialize)] struct DeriveKeyOutput { ...,
+/// secret_hex: String }` and `serde_json::to_string_pretty(&output)`,
+/// which copied the 64-char hex string through serde's tree as
+/// unprotected `String` allocations. V1.11 eliminates the struct and
+/// builds the JSON document directly in a [`Zeroizing<String>`]
+/// buffer:
+///
+///   * `kid` and `pubkey_b64url` are non-sensitive (already-public
+///     material). They route through `serde_json::to_string` for
+///     correct JSON-escape handling.
+///   * `secret_hex` borrows from the caller's [`Zeroizing<String>`]
+///     wrapper via `&**secret_hex` and is injected directly. The hex
+///     output of [`hex::encode`] cannot contain characters that would
+///     require JSON-escape (it is `[0-9a-f]+` only), so the literal
+///     string injection is safe.
+///   * The full JSON document lives in a second
+///     `Zeroizing<String>` buffer that scrubs on drop, immediately
+///     after `println!` writes it to stdout.
+///
+/// The function returns the assembled buffer so the caller controls
+/// its drop scope. A caller that holds the buffer beyond the
+/// `println!` call extends the heap-residency window of the secret;
+/// `run_derive_key` drops it as soon as the write completes.
+fn build_derive_key_json(
+    identity: &keys::PerTenantIdentity,
+    secret_hex: &Zeroizing<String>,
+) -> Result<Zeroizing<String>, serde_json::Error> {
+    let kid_json = serde_json::to_string(&identity.kid)?;
+    let pubkey_json = serde_json::to_string(&identity.pubkey_b64url)?;
+    let mut buf: Zeroizing<String> = Zeroizing::new(String::with_capacity(256));
+    // `write!` into a `String` is infallible; the inner `String` impl
+    // of `std::fmt::Write` cannot fail. The `expect` documents the
+    // invariant rather than threading `io::Error` through the call
+    // chain.
+    write!(
+        *buf,
+        "{{\n  \"kid\": {kid_json},\n  \"pubkey_b64url\": {pubkey_json},\n  \"secret_hex\": \"{}\"\n}}",
+        // Borrow the inner `String` via double-deref to `&str`. No new
+        // allocation, no clone — the secret bytes are read directly
+        // from the caller's `Zeroizing<String>` and written into our
+        // (also `Zeroizing<String>`) output buffer.
+        secret_hex.as_str(),
+    )
+    .expect("write! to String is infallible");
+    Ok(buf)
+}
+
+fn run_derive_key(args: DeriveWorkspaceArgs, hkdf: &dyn keys::MasterSeedHkdf) -> ExitCode {
     if let Err(e) = keys::validate_workspace_id(&args.workspace) {
         eprintln!("derive-key: invalid --workspace: {e}");
         return ExitCode::from(2);
     }
-    let identity = match keys::per_tenant_identity_via(&*hkdf, &args.workspace) {
-        Ok(id) => id,
+    let (identity, secret_hex) = match keys::per_tenant_ceremony_output_via(
+        hkdf,
+        &args.workspace,
+    ) {
+        Ok(t) => t,
         Err(e) => {
             eprintln!("derive-key: per-tenant derive failed: {e}");
             return ExitCode::from(2);
         }
     };
-    let output = DeriveKeyOutput {
-        kid: identity.kid,
-        pubkey_b64url: identity.pubkey_b64url,
-        secret_hex: identity.secret_hex,
-    };
-    match serde_json::to_string_pretty(&output) {
-        Ok(s) => {
-            println!("{s}");
-            ExitCode::from(0)
-        }
+    let json_buf = match build_derive_key_json(&identity, &secret_hex) {
+        Ok(b) => b,
         Err(e) => {
             eprintln!("derive-key: emit failed: {e}");
-            ExitCode::from(2)
+            return ExitCode::from(2);
         }
-    }
+    };
+    println!("{}", json_buf.as_str());
+    // `secret_hex` and `json_buf` drop here; `Zeroizing` scrubs the
+    // heap String contents on every exit path.
+    ExitCode::from(0)
 }
 
 /// JSON shape emitted by `derive-pubkey`. Distinct from `DeriveKeyOutput`
@@ -342,19 +444,12 @@ struct DerivePubkeyOutput {
 /// public material. The MCP server uses this to assemble per-workspace
 /// `PubkeyBundle`s without ever materialising the workspace's signing
 /// key in TS heap.
-fn run_derive_pubkey(args: DeriveWorkspaceArgs) -> ExitCode {
-    let hkdf = match keys::master_seed_loader() {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("derive-pubkey: {e}");
-            return ExitCode::from(2);
-        }
-    };
+fn run_derive_pubkey(args: DeriveWorkspaceArgs, hkdf: &dyn keys::MasterSeedHkdf) -> ExitCode {
     if let Err(e) = keys::validate_workspace_id(&args.workspace) {
         eprintln!("derive-pubkey: invalid --workspace: {e}");
         return ExitCode::from(2);
     }
-    let identity = match keys::per_tenant_identity_via(&*hkdf, &args.workspace) {
+    let identity = match keys::per_tenant_identity_via(hkdf, &args.workspace) {
         Ok(id) => id,
         Err(e) => {
             eprintln!("derive-pubkey: per-tenant derive failed: {e}");
@@ -377,14 +472,10 @@ fn run_derive_pubkey(args: DeriveWorkspaceArgs) -> ExitCode {
     }
 }
 
-fn run_rotate_pubkey_bundle(args: RotatePubkeyBundleArgs) -> ExitCode {
-    let hkdf = match keys::master_seed_loader() {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("rotate-pubkey-bundle: {e}");
-            return ExitCode::from(2);
-        }
-    };
+fn run_rotate_pubkey_bundle(
+    args: RotatePubkeyBundleArgs,
+    hkdf: &dyn keys::MasterSeedHkdf,
+) -> ExitCode {
     if let Err(e) = keys::validate_workspace_id(&args.workspace) {
         eprintln!("rotate-pubkey-bundle: invalid --workspace: {e}");
         return ExitCode::from(2);
@@ -402,7 +493,7 @@ fn run_rotate_pubkey_bundle(args: RotatePubkeyBundleArgs) -> ExitCode {
         }
     };
 
-    let identity = match keys::per_tenant_identity_via(&*hkdf, &args.workspace) {
+    let identity = match keys::per_tenant_identity_via(hkdf, &args.workspace) {
         Ok(id) => id,
         Err(e) => {
             eprintln!("rotate-pubkey-bundle: per-tenant derive failed: {e}");
@@ -536,7 +627,7 @@ fn run_anchor(args: AnchorArgs) -> ExitCode {
     }
 }
 
-fn run_sign(args: SignArgs) -> ExitCode {
+fn run_sign(args: SignArgs, hkdf: Option<&dyn keys::MasterSeedHkdf>) -> ExitCode {
     // Required-when-signing fields (clap can't enforce because legacy mode
     // makes them all optional at the parser level). Surface clear errors.
     let workspace = match args.workspace {
@@ -611,13 +702,19 @@ fn run_sign(args: SignArgs) -> ExitCode {
         // V1.10 wave 2: master_seed_loader dispatches to PKCS#11 when
         // the HSM trio is set, otherwise falls through to the V1.10
         // wave-1 dev-seed gate.
-        let hkdf = match keys::master_seed_loader() {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("sign --derive-from-workspace: {e}");
-                return ExitCode::from(2);
-            }
-        };
+        //
+        // V1.11 M-4: the loader is now resolved by `run_sign_dispatch`
+        // BEFORE this function is entered, and threaded in via the
+        // `hkdf` parameter. The conditional `expect` is sound because
+        // the dispatcher only loads the master seed when
+        // `args.derive_from_workspace.is_some()` — the same predicate
+        // that guards this `if let` arm. Reaching `None` here would
+        // mean the dispatcher and this branch disagree on when to
+        // load, which is a bug worth panicking on.
+        let hkdf = hkdf.expect(
+            "M-4 invariant: run_sign_dispatch loads master seed iff \
+             --derive-from-workspace is set",
+        );
         if let Err(e) = keys::validate_workspace_id(ws) {
             eprintln!("sign --derive-from-workspace: invalid workspace: {e}");
             return ExitCode::from(2);
@@ -637,7 +734,7 @@ fn run_sign(args: SignArgs) -> ExitCode {
             );
             return ExitCode::from(2);
         }
-        match keys::derive_workspace_signing_key_via(&*hkdf, ws) {
+        match keys::derive_workspace_signing_key_via(hkdf, ws) {
             Ok(sk) => sk,
             Err(e) => {
                 eprintln!("sign --derive-from-workspace: per-tenant derive failed: {e}");

@@ -56,10 +56,16 @@ pub const SLOT_ENV: &str = "ATLAS_HSM_SLOT";
 /// Environment variable that names the path to the PIN file.
 ///
 /// Must be an *absolute* filesystem path (same path-confusion
-/// rationale as [`PKCS11_LIB_ENV`]). The PIN file should be mode
-/// 0400 and owned by the signer's runtime user; the loader does not
-/// re-check permission bits at read time, so the import ceremony is
-/// the only place that guarantee is set up.
+/// rationale as [`PKCS11_LIB_ENV`]). The PIN file must be mode
+/// 0400 (or 0600) and owned by the signer's runtime user. V1.11
+/// hardening (M-2) re-checks permission bits at read time on Unix
+/// via `metadata()` on the open file descriptor; a PIN file with
+/// any group/world access bits set is refused with
+/// [`MasterSeedError::Locked`](crate::keys::MasterSeedError::Locked)
+/// — the import ceremony is no longer the sole guarantee. Windows
+/// has no portable mode-bit equivalent (ACLs differ structurally)
+/// and is documented as out-of-scope for production deployments
+/// per the runbook.
 pub const PIN_FILE_ENV: &str = "ATLAS_HSM_PIN_FILE";
 
 /// CKA_LABEL of the master seed object inside the HSM token.
@@ -88,15 +94,32 @@ pub const MASTER_SEED_LABEL: &str = "atlas-master-seed-v1";
 /// and lives only inside the loader's session; the *path* is
 /// not sensitive.
 ///
+/// **V1.11 L-9:** Fields are `pub(crate)`. The struct is constructed
+/// by [`HsmConfig::from_env`] and consumed by
+/// [`crate::hsm::pkcs11::Pkcs11MasterSeedHkdf::open`]; no external
+/// embedder needs to read or mutate the fields directly. Hiding them
+/// keeps the secret-mount layout (the `pin_file` path, in particular)
+/// from leaking into operator logs through any `format!("{:?}", cfg)`
+/// site that escapes the crate boundary, and prevents external code
+/// from constructing a partial / unvalidated `HsmConfig` that bypasses
+/// the absolute-path and trim guards in `from_env`.
+///
 /// [`MasterSeedError::Unavailable`]: crate::keys::MasterSeedError::Unavailable
 #[derive(Debug, Clone)]
+// Without the `hsm` feature, only the stub `Pkcs11MasterSeedHkdf::open`
+// references `HsmConfig` (and only as `_config`), so dead-code analysis
+// would flag the fields as unread on the default-features build. The
+// fields are read by the real PKCS#11 backend behind `#[cfg(feature =
+// "hsm")]` and by `#[cfg(test)]` config tests; suppress the lint in
+// the stub-only configuration to keep `cargo check` clean.
+#[cfg_attr(not(feature = "hsm"), allow(dead_code))]
 pub struct HsmConfig {
     /// Path to the PKCS#11 module shared library.
-    pub module_path: PathBuf,
+    pub(crate) module_path: PathBuf,
     /// Token slot number, decimal.
-    pub slot: u64,
+    pub(crate) slot: u64,
     /// Path to the user PIN file. Read once at open time.
-    pub pin_file: PathBuf,
+    pub(crate) pin_file: PathBuf,
 }
 
 impl HsmConfig {

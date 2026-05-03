@@ -285,10 +285,75 @@ pub fn master_seed_loader() -> Result<Box<dyn MasterSeedHkdf>, String> {
 /// closure — same shape as [`master_seed_gate_with`] and
 /// [`crate::hsm::config::HsmConfig::from_env`] — so a single env source
 /// drives both the HSM trio parse and the dev-seed gate.
+///
+/// Forwards to [`master_seed_loader_with_writer`] with `std::io::stderr()`
+/// as the deprecation-warning sink. Tests that need to assert on the
+/// warning content (or want to silence it during noise-sensitive runs)
+/// should call `master_seed_loader_with_writer` directly with a
+/// `Vec<u8>` or [`std::io::sink`].
 pub fn master_seed_loader_with<F>(env: F) -> Result<Box<dyn MasterSeedHkdf>, String>
 where
     F: Fn(&str) -> Option<String>,
 {
+    master_seed_loader_with_writer(env, &mut std::io::stderr())
+}
+
+/// V1.11 L-8 entry point. Same dispatch logic as
+/// [`master_seed_loader_with`], but takes a `&mut dyn Write` for the
+/// deprecation warning emitted when [`PRODUCTION_GATE_ENV`] is set.
+///
+/// **Why a writer parameter?** Test code can capture the warning text
+/// in a `Vec<u8>` and assert on it, or pass [`std::io::sink`] to drop
+/// the warning entirely (useful when a test is exercising a deliberately
+/// deprecated configuration and the noise on stderr would clutter the
+/// test runner output). Production callers route through
+/// [`master_seed_loader_with`] which forwards to `std::io::stderr()`.
+///
+/// **Why the warning?** The HSM trio (V1.10 wave 2) is now the
+/// production audit signal. `ATLAS_PRODUCTION=1` carried the V1.9
+/// paranoia gate forward as belt-and-braces, but it has the
+/// literal-`"1"`-only recognition footgun (an operator who reflexively
+/// writes `ATLAS_PRODUCTION=true` gets silent fallthrough). V1.11
+/// emits a deprecation warning whenever the env var is observed with
+/// non-whitespace content; V1.12 will remove the gate entirely. The
+/// warning fires *before* the layered gates so it surfaces even when
+/// the gate ultimately refuses the configuration.
+pub fn master_seed_loader_with_writer<F, W>(
+    env: F,
+    warn_out: &mut W,
+) -> Result<Box<dyn MasterSeedHkdf>, String>
+where
+    F: Fn(&str) -> Option<String>,
+    W: std::io::Write,
+{
+    // V1.11 L-8: ATLAS_PRODUCTION deprecation warning. Fired before
+    // any gate check so the operator sees the migration notice
+    // regardless of which path the loader ultimately takes (refuse via
+    // production_gate, refuse via opt-in gate, succeed via HSM trio,
+    // succeed via dev opt-in). The trim-empty filter ignores
+    // misconfigured pipelines that emit `ATLAS_PRODUCTION=` with no
+    // value; only meaningful settings trip the warning. Writes via
+    // `writeln!` and ignores errors — a failed write to stderr should
+    // not block the loader.
+    if env(PRODUCTION_GATE_ENV)
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+    {
+        let _ = writeln!(
+            warn_out,
+            "warning: {PRODUCTION_GATE_ENV} is deprecated and scheduled for \
+             removal in V1.12. V1.10 inverted the master-seed gate to positive \
+             opt-in: the dev seed now requires {DEV_MASTER_SEED_OPT_IN_ENV}=1 \
+             (truthy values: 1/true/yes/on, case-insensitive), which makes the \
+             V1.9 paranoia check redundant. For production, configure the HSM \
+             trio ({}, {}, {}) — that is the V1.10+ production audit signal. \
+             See docs/OPERATOR-RUNBOOK.md §1.",
+            crate::hsm::config::PKCS11_LIB_ENV,
+            crate::hsm::config::SLOT_ENV,
+            crate::hsm::config::PIN_FILE_ENV,
+        );
+    }
+
     // Layer 1: HSM trio. If any of the three env vars is set, we
     // commit to sealed-seed mode; partial trios refuse via
     // `HsmConfig::from_env`.
@@ -613,16 +678,29 @@ pub(crate) fn derive_workspace_signing_key_default(workspace_id: &str) -> Signin
 /// expects in `EventSignature.kid` plus the URL-safe-no-pad base64 of
 /// the public key for embedding in the `PubkeyBundle`.
 ///
-/// `Debug` is implemented manually below so accidental `dbg!()` or
-/// `tracing` calls do not print `secret_hex` to logs.
+/// **V1.11 W1 hardening (H-1).** This struct intentionally holds NO
+/// secret material. V1.9–V1.10 carried a `secret_hex: String` field
+/// alongside the public material; the unprotected `String` lingered in
+/// the freed-allocator pool for the lifetime of any holder, even
+/// though the `derive-pubkey` and `rotate-pubkey-bundle` paths never
+/// read it. V1.11 splits the ceremony-only secret emission into
+/// [`per_tenant_ceremony_output_via`], which returns the secret in a
+/// [`Zeroizing<String>`] wrapper scoped tightly to the
+/// `derive-key` subcommand's JSON output. Public-only consumers
+/// (`derive-pubkey`, `rotate-pubkey-bundle`, MCP-side bundle assembly)
+/// continue to use [`per_tenant_identity_via`] and never touch heap-
+/// resident secret bytes.
 ///
 /// **Visibility (V1.10 lib refactor):** `pub` so the binary in
 /// `src/main.rs` (now a separate crate from the library) can construct
 /// the JSON output shapes for `derive-key` / `derive-pubkey` /
-/// `rotate-pubkey-bundle`. The `Debug` redaction is the only sensitive-
-/// field guard; consumers that emit the struct over a wire MUST drop
-/// `secret_hex` explicitly (the `derive-pubkey` JSON shape does this).
-#[derive(Clone)]
+/// `rotate-pubkey-bundle`.
+///
+/// **Debug derive is safe now.** With no sensitive field on the
+/// struct, the manual redaction-only `Debug` impl from V1.9–V1.10 is
+/// no longer required — the auto-derived `Debug` cannot leak secret
+/// material because the struct holds none.
+#[derive(Clone, Debug)]
 pub struct PerTenantIdentity {
     /// `format!("atlas-anchor:{workspace_id}")` — the per-tenant kid
     /// the verifier expects under strict mode.
@@ -630,39 +708,27 @@ pub struct PerTenantIdentity {
     /// 32-byte Ed25519 public key, base64url-no-pad encoded — wire
     /// format for `PubkeyBundle.keys`.
     pub pubkey_b64url: String,
-    /// 32-byte secret as 64-char hex — fed to `atlas-signer sign
-    /// --secret-stdin` (production) or `derive-key` JSON output (dev).
-    /// Treat as sensitive; never log. The `Debug` impl below redacts
-    /// this field; do not derive `Debug` automatically.
-    pub secret_hex: String,
-}
-
-/// Manual `Debug` impl that redacts `secret_hex`. The derived `Debug`
-/// would print the raw 64-char hex in any `dbg!(identity)` or
-/// `tracing::debug!(?identity)` site — exactly the leak path V1.9
-/// security review flagged. We keep `kid` and `pubkey_b64url` visible
-/// because they are public material and useful for diagnostics.
-impl std::fmt::Debug for PerTenantIdentity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PerTenantIdentity")
-            .field("kid", &self.kid)
-            .field("pubkey_b64url", &self.pubkey_b64url)
-            .field("secret_hex", &"<redacted>")
-            .finish()
-    }
 }
 
 /// Trait-routed counterpart of `per_tenant_identity`.
 ///
 /// Derives the workspace signing key via the supplied
 /// [`MasterSeedHkdf`] and stitches the canonical kid + base64url
-/// pubkey + hex secret into one record. The MCP server consumes
-/// this via the `derive-key` JSON output.
+/// pubkey into one public-only record. The MCP server consumes this
+/// via the `derive-pubkey` JSON output and via direct lib-API calls
+/// for bundle assembly.
 ///
-/// V1.10 binary call sites pair this with [`master_seed_gate`] to
-/// enforce positive opt-in for the dev seed; the gate selects the
-/// `DevMasterSeedHkdf` impl (or, after Task #10, a sealed-seed
-/// PKCS#11 impl) and hands it here.
+/// V1.10 binary call sites pair this with [`master_seed_loader`] to
+/// enforce positive opt-in for the dev seed; the loader selects the
+/// `DevMasterSeedHkdf` or sealed-seed PKCS#11 impl and hands it here.
+///
+/// **V1.11 W1 (H-1):** the secret hex is no longer returned. The
+/// signing key bytes are wrapped in `Zeroizing` inside
+/// [`derive_workspace_signing_key_via`] and dropped before this
+/// function returns — only the (already-public) verifying key bytes
+/// transit out. Callers needing the secret for the
+/// `derive-key` ceremony route through
+/// [`per_tenant_ceremony_output_via`] instead.
 ///
 /// Returns `Result` because the trait is fallible — a sealed-seed
 /// impl can return `MasterSeedError::Locked`/`Unavailable` mid-call.
@@ -678,12 +744,74 @@ pub fn per_tenant_identity_via<H: MasterSeedHkdf + ?Sized>(
     let pubkey_bytes = signing_key.verifying_key().to_bytes();
     let pubkey_b64url =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey_bytes);
-    let secret_hex = hex::encode(signing_key.to_bytes());
     Ok(PerTenantIdentity {
         kid: per_tenant_kid_for(workspace_id),
         pubkey_b64url,
-        secret_hex,
     })
+}
+
+/// Ceremony-only: derive both the public per-tenant identity AND the
+/// hex-encoded secret-key material. The secret is wrapped in
+/// [`Zeroizing<String>`] so the heap-resident hex string is scrubbed
+/// on every exit path (Ok, Err, panic) when the wrapper drops.
+///
+/// **V1.11 W1 (H-1).** This function is the sole supported entry
+/// point for the `derive-key` subcommand's JSON output and the only
+/// place per-tenant secret bytes legitimately cross the
+/// [`atlas_signer`] lib boundary. Any other call site is a misuse —
+/// routine signing should use `sign --derive-from-workspace` (the
+/// hot-path that derives inside the signer process and never emits the
+/// secret), and bundle assembly should use [`per_tenant_identity_via`]
+/// (public-only).
+///
+/// **Caller obligations:**
+///   * Limit the wrapper's lifetime to the JSON-emission scope. The
+///     wrapper scrubs on drop; the longer it lives, the longer the
+///     hex bytes are heap-resident.
+///   * Do NOT clone the inner `String` into another allocation — that
+///     would defeat the wrapper. Borrow `&*secret_hex` (yields
+///     `&String`) or `&**secret_hex` (yields `&str`) for serialisation.
+///   * Do NOT emit through `serde_json::to_string_pretty(&struct)` if
+///     the struct's `Serialize` impl pulls the inner `String` into a
+///     serde tree — the tree allocates unprotected intermediates. The
+///     binary's `run_derive_key` builds the JSON output by hand into
+///     a second `Zeroizing<String>` buffer for exactly this reason.
+pub fn per_tenant_ceremony_output_via<H: MasterSeedHkdf + ?Sized>(
+    hkdf: &H,
+    workspace_id: &str,
+) -> Result<(PerTenantIdentity, Zeroizing<String>), MasterSeedError> {
+    use base64::Engine;
+    let signing_key = derive_workspace_signing_key_via(hkdf, workspace_id)?;
+    let pubkey_bytes = signing_key.verifying_key().to_bytes();
+    let pubkey_b64url =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey_bytes);
+    // `signing_key.to_bytes()` returns an unwrapped `[u8; 32]` —
+    // wrap it immediately so the byte array is scrubbed on every exit
+    // path (Ok of this function, panic in `hex::encode`, …). Without
+    // the wrapper the array would live as freed stack memory after this
+    // function returns.
+    let secret_bytes: Zeroizing<[u8; 32]> = Zeroizing::new(signing_key.to_bytes());
+    // `hex::encode` allocates a heap `String` — wrap it likewise. The
+    // returned `Zeroizing<String>` is the only legitimate heap copy of
+    // the secret material from this point on; the caller's borrow chain
+    // must keep that invariant.
+    //
+    // `secret_bytes.as_slice()` is deliberate over the more obvious
+    // `*secret_bytes`: `[u8; 32]` is `Copy`, so the dereferenced form
+    // would copy the array onto `hex::encode`'s stack frame outside the
+    // `Zeroizing` wrapper, leaving an un-scrubbed copy of the secret
+    // until the frame is reused. The slice borrow keeps the bytes
+    // inside the wrapper for their entire lifetime. Clippy's
+    // `needless_borrows_for_generic_args` would happily simplify
+    // `&*secret_bytes` → `*secret_bytes` here without seeing the Copy
+    // hazard; using `.as_slice()` returns `&[u8]` which clippy does not
+    // try to "simplify" away.
+    let secret_hex: Zeroizing<String> = Zeroizing::new(hex::encode(secret_bytes.as_slice()));
+    let identity = PerTenantIdentity {
+        kid: per_tenant_kid_for(workspace_id),
+        pubkey_b64url,
+    };
+    Ok((identity, secret_hex))
 }
 
 /// Test-only convenience wrapping [`per_tenant_identity_via`] with
@@ -828,8 +956,70 @@ mod tests {
         // pubkey_b64url is 43 chars (32 bytes b64url-no-pad) — sanity
         // check; downstream Zod schema enforces the same.
         assert_eq!(ident.pubkey_b64url.len(), 43);
-        // secret_hex is 64 hex chars (32 bytes).
-        assert_eq!(ident.secret_hex.len(), 64);
+    }
+
+    /// V1.11 W1 (H-1): the public-only `PerTenantIdentity` struct
+    /// must hold no sensitive material. The destructuring pattern
+    /// below names every field exhaustively (no `..` rest pattern):
+    /// adding a third field — even an inert one — breaks
+    /// compilation and forces a reviewer to re-evaluate whether the
+    /// new field is sensitive and whether
+    /// [`per_tenant_ceremony_output_via`] is the right entry point
+    /// for any secret material.
+    ///
+    /// This is the regression fence for the H-1 finding: V1.10
+    /// carried a `secret_hex: String` field on this struct that
+    /// lingered unprotected in the freed-allocator pool for the
+    /// lifetime of any holder. V1.11 split the secret into the
+    /// ceremony-only path; the destructure asserts the split.
+    #[test]
+    fn per_tenant_identity_struct_has_no_secret_field_v1_11_h1() {
+        let ident = per_tenant_identity("alice");
+        // Exhaustive destructure — adding a field to PerTenantIdentity
+        // breaks this line and surfaces in code review.
+        let PerTenantIdentity { kid, pubkey_b64url } = ident;
+        assert_eq!(kid, "atlas-anchor:alice");
+        assert_eq!(pubkey_b64url.len(), 43);
+    }
+
+    /// V1.11 W1 (H-1): the ceremony-only entry point must yield the
+    /// 64-char hex secret in a `Zeroizing<String>` wrapper that is
+    /// type-equivalent to the wrapper enforced by the function
+    /// signature. The pubkey returned alongside must match the
+    /// public-only `per_tenant_identity_via` output byte-for-byte —
+    /// same HKDF derive, two emission paths.
+    #[test]
+    fn per_tenant_ceremony_output_via_yields_64_char_hex_v1_11_h1() {
+        let public_only = per_tenant_identity_via(&DevMasterSeedHkdf, "alice")
+            .expect("DevMasterSeedHkdf cannot fail");
+        let (ident, secret_hex) =
+            per_tenant_ceremony_output_via(&DevMasterSeedHkdf, "alice")
+                .expect("DevMasterSeedHkdf cannot fail");
+        assert_eq!(ident.kid, public_only.kid);
+        assert_eq!(ident.pubkey_b64url, public_only.pubkey_b64url);
+        // 64 chars = 32 bytes hex-encoded
+        assert_eq!(secret_hex.len(), 64);
+        // ASCII-hex shape — the binary's `build_derive_key_json`
+        // injects the bytes directly into the JSON output without
+        // escape, relying on this property.
+        assert!(
+            secret_hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            "secret_hex must be ASCII hex; got {:?}",
+            secret_hex.as_str(),
+        );
+        // Roundtrip via SigningKey::from_bytes recreates the same
+        // pubkey — the secret really does correspond to the public
+        // identity returned alongside.
+        use base64::Engine;
+        let bytes: [u8; 32] = hex::decode(secret_hex.as_str())
+            .expect("ascii-hex decode")
+            .try_into()
+            .expect("32 bytes");
+        let recovered_pub = SigningKey::from_bytes(&bytes).verifying_key().to_bytes();
+        let expected_pub = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(&public_only.pubkey_b64url)
+            .expect("b64url decode");
+        assert_eq!(recovered_pub.as_slice(), expected_pub.as_slice());
     }
 
     #[test]
@@ -1247,15 +1437,147 @@ mod tests {
         // ATLAS_DEV_MASTER_SEED=1 set, ATLAS_PRODUCTION=1 still
         // refuses the dev path. This pins the V1.9 paranoia layer's
         // behaviour through the loader-dispatch wrapper.
-        let err = loader_err(env_pairs(&[
-            (PRODUCTION_GATE_ENV, "1"),
-            (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
-        ]));
+        //
+        // V1.11 L-8: this test now uses `master_seed_loader_with_writer`
+        // with `std::io::sink()` to swallow the deprecation warning,
+        // keeping cargo test output uncluttered while still exercising
+        // the gate refusal. The warning emission itself is covered by
+        // dedicated tests below.
+        let mut sink = std::io::sink();
+        let result = master_seed_loader_with_writer(
+            env_pairs(&[
+                (PRODUCTION_GATE_ENV, "1"),
+                (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+            ]),
+            &mut sink,
+        );
+        let err = match result {
+            Ok(_) => panic!("expected loader to refuse with ATLAS_PRODUCTION=1"),
+            Err(e) => e,
+        };
         assert!(
             err.contains(PRODUCTION_GATE_ENV),
             "ATLAS_PRODUCTION=1 must override the dev opt-in even through the loader; \
              got {err:?}",
         );
+    }
+
+    // V1.11 L-8 — ATLAS_PRODUCTION deprecation warning. Verifies the
+    // writer-based seam emits the warning text under the documented
+    // conditions and stays silent in the unset / empty cases.
+
+    #[test]
+    fn master_seed_loader_emits_atlas_production_deprecation_warning() {
+        // Whenever ATLAS_PRODUCTION is observed with non-whitespace
+        // content, the loader must write a deprecation warning to the
+        // supplied writer BEFORE any gate check runs (so the operator
+        // sees the migration notice even on the gate-refuses path).
+        // We pair it with ATLAS_DEV_MASTER_SEED=1 here so the gate
+        // ultimately refuses (production_gate fires); the test asserts
+        // only on the warning content, not the loader return value.
+        let mut warnings = Vec::<u8>::new();
+        let _ = master_seed_loader_with_writer(
+            env_pairs(&[
+                (PRODUCTION_GATE_ENV, "1"),
+                (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+            ]),
+            &mut warnings,
+        );
+        let text = String::from_utf8(warnings).expect("warning text must be UTF-8");
+        assert!(
+            text.contains(PRODUCTION_GATE_ENV),
+            "warning must name the env var so operators can grep for it; got {text:?}",
+        );
+        assert!(
+            text.contains("deprecated"),
+            "warning must label the var as deprecated; got {text:?}",
+        );
+        assert!(
+            text.contains("V1.12"),
+            "warning must announce the removal target so operators have a deprecation \
+             window; got {text:?}",
+        );
+        assert!(
+            text.contains(DEV_MASTER_SEED_OPT_IN_ENV),
+            "warning must reference the V1.10 positive-opt-in env var (the replacement \
+             for the V1.9 paranoia layer); got {text:?}",
+        );
+        assert!(
+            text.contains(crate::hsm::config::PKCS11_LIB_ENV),
+            "warning must reference the HSM trio (the V1.10+ production audit signal); \
+             got {text:?}",
+        );
+        assert!(
+            text.contains("OPERATOR-RUNBOOK"),
+            "warning must point operators at the migration doc; got {text:?}",
+        );
+    }
+
+    #[test]
+    fn master_seed_loader_no_warning_when_atlas_production_unset() {
+        // Default deployment (ATLAS_PRODUCTION not in env): no
+        // deprecation noise. The warning is only meaningful when the
+        // operator has actively set the deprecated var.
+        let mut warnings = Vec::<u8>::new();
+        let _ = master_seed_loader_with_writer(
+            env_pairs(&[(DEV_MASTER_SEED_OPT_IN_ENV, "1")]),
+            &mut warnings,
+        );
+        assert!(
+            warnings.is_empty(),
+            "no warning expected when ATLAS_PRODUCTION is unset; got {:?}",
+            String::from_utf8_lossy(&warnings),
+        );
+    }
+
+    #[test]
+    fn master_seed_loader_no_warning_when_atlas_production_empty_or_whitespace() {
+        // Misconfigured pipelines that emit `ATLAS_PRODUCTION=` (with no
+        // value) or `ATLAS_PRODUCTION="   "` are NOT operator intent to
+        // mark production — the V1.9 production_gate already treats
+        // these as unset (only literal `"1"` trips the gate). The
+        // deprecation warning mirrors that semantic: don't blame the
+        // operator for a pipeline-emitted empty value they didn't write.
+        for value in ["", "   ", "\t\n"] {
+            let mut warnings = Vec::<u8>::new();
+            let _ = master_seed_loader_with_writer(
+                env_pairs(&[
+                    (PRODUCTION_GATE_ENV, value),
+                    (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+                ]),
+                &mut warnings,
+            );
+            assert!(
+                warnings.is_empty(),
+                "no warning expected for pipeline-empty ATLAS_PRODUCTION={value:?}; \
+                 got {:?}",
+                String::from_utf8_lossy(&warnings),
+            );
+        }
+    }
+
+    #[test]
+    fn master_seed_loader_warning_fires_for_any_non_empty_value() {
+        // Mirror the V1.10 master_seed_gate's tolerance: V1.9 operators
+        // who reflexively wrote ATLAS_PRODUCTION=true (the documented
+        // V1.9 footgun) get the same deprecation notice as those who
+        // wrote =1. The warning is about the env var's existence, not
+        // about whether the gate would fire on the value.
+        for value in ["1", "true", "false", "yes", "0", "anything"] {
+            let mut warnings = Vec::<u8>::new();
+            let _ = master_seed_loader_with_writer(
+                env_pairs(&[
+                    (PRODUCTION_GATE_ENV, value),
+                    (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+                ]),
+                &mut warnings,
+            );
+            let text = String::from_utf8(warnings).expect("UTF-8");
+            assert!(
+                text.contains("deprecated"),
+                "warning must fire for ATLAS_PRODUCTION={value:?}; got {text:?}",
+            );
+        }
     }
 
     #[test]
@@ -1273,13 +1595,17 @@ mod tests {
         // refactor where the no-arg form drifts from the trait-routed
         // form (e.g. someone re-implements the kid prefix in one
         // place but not the other).
+        //
+        // V1.11 W1 (H-1): the public-only struct carries no secret
+        // field, so the comparison covers `kid` and `pubkey_b64url`
+        // only. The ceremony-only secret is verified separately in
+        // `per_tenant_ceremony_output_via_yields_64_char_hex_v1_11_h1`.
         for ws in ["alice", "ws-mcp-default"] {
             let direct = per_tenant_identity(ws);
             let via = per_tenant_identity_via(&DevMasterSeedHkdf, ws)
                 .expect("dev impl is infallible");
             assert_eq!(direct.kid, via.kid);
             assert_eq!(direct.pubkey_b64url, via.pubkey_b64url);
-            assert_eq!(direct.secret_hex, via.secret_hex);
         }
     }
 
@@ -1475,24 +1801,51 @@ mod tests {
         assert!(s.contains("locked"), "Display lost variant tag: {s:?}");
     }
 
+    /// V1.11 W1 (H-1): the public-only struct's auto-derived `Debug`
+    /// is now safe — there is no sensitive field to redact. The V1.10
+    /// manual `Debug` impl was a workaround for the `secret_hex: String`
+    /// field on the same struct; with that field moved to the
+    /// ceremony-only [`per_tenant_ceremony_output_via`] return value
+    /// (wrapped in `Zeroizing<String>`), the auto-derived `Debug`
+    /// cannot leak secret bytes because the struct holds none.
+    ///
+    /// We still assert that the public material appears so a regression
+    /// to manual `Debug` that drops field values would trip this test.
     #[test]
-    fn per_tenant_identity_debug_redacts_secret() {
-        // Defence: any `dbg!(identity)` or `tracing::debug!(?identity)`
-        // site must NOT leak `secret_hex`. The manual `Debug` impl
-        // emits "<redacted>" in place of the raw hex; we assert the
-        // redacted marker is present AND the secret hex is absent.
+    fn per_tenant_identity_debug_shows_public_fields_only_v1_11_h1() {
         let identity = per_tenant_identity("alice");
         let dbg_out = format!("{identity:?}");
         assert!(
-            dbg_out.contains("<redacted>"),
-            "Debug must mark secret_hex as redacted; got {dbg_out:?}",
+            dbg_out.contains(&identity.kid),
+            "Debug must include kid for diagnostics; got {dbg_out:?}",
         );
         assert!(
-            !dbg_out.contains(&identity.secret_hex),
-            "Debug must NOT contain the raw secret_hex; got {dbg_out:?}",
+            dbg_out.contains(&identity.pubkey_b64url),
+            "Debug must include pubkey_b64url for diagnostics; got {dbg_out:?}",
         );
-        // Public material stays visible for diagnostics:
-        assert!(dbg_out.contains(&identity.kid));
-        assert!(dbg_out.contains(&identity.pubkey_b64url));
+    }
+
+    /// V1.11 W1 (H-1): the ceremony-only `Zeroizing<String>` does
+    /// expose the secret bytes via `Display` / `Debug` — that is
+    /// intentional, the wrapper protects against heap residency on
+    /// drop, not against intentional inspection. This test
+    /// documents the boundary by asserting the wrapper IS dereferenceable
+    /// to its inner str (so the binary's JSON-emit path can read the
+    /// bytes) but does NOT auto-zeroize on every borrow.
+    ///
+    /// The trust property the wrapper provides — heap scrubbing on
+    /// drop — is supplied by the `zeroize` crate and exercised by its
+    /// own test suite; we don't re-test it here. We only assert the
+    /// API surface this crate depends on.
+    #[test]
+    fn ceremony_secret_hex_is_dereferenceable_to_str_v1_11_h1() {
+        let (_, secret_hex) =
+            per_tenant_ceremony_output_via(&DevMasterSeedHkdf, "alice")
+                .expect("DevMasterSeedHkdf cannot fail");
+        // Borrow paths the binary's `build_derive_key_json` relies on:
+        let as_str_ref: &str = secret_hex.as_str();
+        assert_eq!(as_str_ref.len(), 64);
+        let via_double_deref: &str = &secret_hex;
+        assert_eq!(via_double_deref, as_str_ref);
     }
 }

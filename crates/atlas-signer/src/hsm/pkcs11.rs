@@ -163,20 +163,90 @@ impl Pkcs11MasterSeedHkdf {
 /// Read the PIN file from disk, trim trailing newlines, wrap in a
 /// [`AuthPin`] (`secrecy::SecretString`).
 ///
-/// `Locked` is the right category for a missing or unreadable PIN
-/// file — the token itself may be perfectly reachable; the operator
-/// just hasn't supplied auth material the loader can use.
+/// `Locked` is the right category for a missing, unreadable, or
+/// over-permissive PIN file — the token itself may be perfectly
+/// reachable; the operator just hasn't supplied auth material the
+/// loader can safely use.
+///
+/// V1.11 M-2 hardening: on Unix, the loader refuses to consume a PIN
+/// file with any group/world access bits set. The runbook ceremony
+/// installs the file mode 0400; an operator who creates the file via
+/// `echo "$PIN" > /run/atlas/hsm.pin` gets the umask default (typically
+/// 0644) and would, before this guard, silently authenticate to the
+/// token while exposing the PIN to every local user. Refusing at read
+/// time turns that footgun into a loud failure with a remediation hint.
+///
+/// The check uses `File::metadata()` on the *open* file handle (not a
+/// path-lookup `metadata()`), which closes the standard TOCTOU window
+/// where an attacker could swap the file between the permission check
+/// and the read. Both checks bind to the same inode.
+///
+/// Windows has no portable file-mode equivalent — ACL semantics are
+/// fundamentally different — and the runbook places production
+/// deployments on Linux/container hosts, so the check is `#[cfg(unix)]`.
 fn read_pin_file(config: &HsmConfig) -> Result<AuthPin, MasterSeedError> {
-    // Wrap the raw bytes in `Zeroizing` immediately. `std::fs::read`
-    // allocates a heap `Vec<u8>`; if we drop it without zeroing, the
-    // PIN bytes linger in the freed-allocator pool until reused. The
-    // wrapper zeroes the buffer on every exit path (Ok, Err, panic).
-    let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(std::fs::read(&config.pin_file).map_err(|e| {
+    use std::io::Read;
+
+    // Open the file *first* so the subsequent metadata + read calls
+    // both bind to the same inode via the file descriptor — TOCTOU-safe.
+    // A plain `std::fs::read(&path)` would re-resolve the path and
+    // leave a window for an attacker with filesystem write access in
+    // the secret-mount directory to swap files between checks.
+    let mut file = std::fs::File::open(&config.pin_file).map_err(|e| {
         MasterSeedError::Locked(format!(
             "PIN file {} unreadable: {e}",
             config.pin_file.display()
         ))
-    })?);
+    })?;
+
+    let meta = file.metadata().map_err(|e| {
+        MasterSeedError::Locked(format!(
+            "PIN file {} metadata unreadable: {e}",
+            config.pin_file.display()
+        ))
+    })?;
+
+    // V1.11 M-2 — Unix permission guard. Mask `mode() & 0o777` to drop
+    // file-type bits, then `& 0o077` selects only group/other rwx.
+    // Owner bits are deliberately not constrained: the runbook ships
+    // 0400, but 0600 is also a valid layout (e.g. systemd
+    // `LoadCredential=` tmpfs default) and we don't want to refuse a
+    // correctly-secured PIN file just because it's owner-writable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let mode = meta.mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(MasterSeedError::Locked(format!(
+                "PIN file {} has group/world-accessible permissions \
+                 (mode {:04o}); chmod 0400 (or 0600) required to \
+                 prevent local privilege escalation reading the PIN",
+                config.pin_file.display(),
+                mode,
+            )));
+        }
+    }
+
+    // Pre-size the destination Vec from the file's reported length so
+    // `read_to_end` does not realloc-and-grow during the read. A growth
+    // realloc copies the partially-read PIN bytes to a new buffer and
+    // frees the old, smaller buffer *without zeroing it* — that orphans
+    // PIN-bearing bytes in the allocator's freed pool until reuse. The
+    // pre-sized Vec stays put; only the final `Zeroizing` drop runs.
+    //
+    // `Zeroizing` wraps the destination *before* `read_to_end` starts
+    // writing into it, so an intermediate read failure (with partial
+    // PIN bytes already in the buffer) still scrubs on the early-return
+    // path.
+    let len_hint = (meta.len() as usize).max(1);
+    let mut bytes: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(len_hint));
+    file.read_to_end(&mut bytes).map_err(|e| {
+        MasterSeedError::Locked(format!(
+            "PIN file {} read failed: {e}",
+            config.pin_file.display()
+        ))
+    })?;
+
     // `trimmed: &str` is a borrow of `bytes` — no heap allocation, so
     // no separate scrub needed. The empty-check happens here, before
     // any owning `String` is constructed, so the early-return path
@@ -230,12 +300,14 @@ fn find_master_seed(session: &Session, slot_id: u64) -> Result<ObjectHandle, Mas
 
 impl MasterSeedHkdf for Pkcs11MasterSeedHkdf {
     fn derive_for(&self, info: &[u8], out: &mut [u8; 32]) -> Result<(), MasterSeedError> {
-        let session = self.session.lock().map_err(|_| {
-            MasterSeedError::Unavailable(
-                "PKCS#11 session mutex poisoned — a previous derive panicked"
-                    .to_string(),
-            )
-        })?;
+        // V1.11 M-5 — Mutex poison maps to `DeriveFailed`, not the
+        // V1.10 wave-2 `Unavailable`. Operator runbook routes
+        // `Unavailable` to "check HSM connectivity" (transient); a
+        // poisoned mutex is permanent for *this process* (std locks
+        // do not un-poison) so the only fix is a process restart. The
+        // re-categorisation plus the explicit "restart required"
+        // wording keeps the operator on the right remediation path.
+        let session = self.session.lock().map_err(|_| map_session_lock_poison())?;
 
         // RFC 5869 HKDF-SHA256 with empty salt (= HashLen zeros, the
         // RFC default). Matches the dev impl's
@@ -263,18 +335,29 @@ impl MasterSeedHkdf for Pkcs11MasterSeedHkdf {
             .derive_key(&mech, self.master_seed, &template)
             .map_err(map_pkcs11_error)?;
 
-        // `?` not used here so we can fall through and destroy the
-        // ephemeral object on the error path. We trade one extra
-        // statement for a tighter security invariant.
-        let attr_result = session.get_attributes(derived, &[AttributeType::Value]);
+        // V1.11 M-3 — RAII guard around the ephemeral derived-key
+        // handle. The guard's `Drop` impl calls `destroy_object`, so
+        // the cleanup runs on EVERY exit path: the `Ok` return below,
+        // a `?` early-exit on `get_attributes` failure, the
+        // length-mismatch error, OR a panic anywhere in the remainder
+        // of this function (including FFI panics in cryptoki itself).
+        //
+        // The V1.10 wave-2 pattern stored `attr_result` separately and
+        // called `destroy_object` between the call and the `?` — that
+        // covered the explicit-Err path but not panic unwinding. The
+        // RAII guard is the strictly stronger invariant and is also a
+        // forward defence: if a future commit makes the derived object
+        // CKA_TOKEN=true (e.g. for a debug build), the guarantee that
+        // it gets destroyed becomes load-bearing rather than belt-and-
+        // braces.
+        let _guard = EphemeralObjectGuard {
+            session: &session,
+            handle: derived,
+        };
 
-        // Always destroy the ephemeral derived key, even if attribute
-        // extraction failed in some weird way. We deliberately ignore
-        // the destroy error — at worst the object lingers until the
-        // session closes; at best it's already gone.
-        let _ = session.destroy_object(derived);
-
-        let attrs = attr_result.map_err(map_pkcs11_error)?;
+        let attrs = session
+            .get_attributes(derived, &[AttributeType::Value])
+            .map_err(map_pkcs11_error)?;
 
         // Wrap the 32-byte HKDF output in `Zeroizing` the moment it
         // crosses the cryptoki FFI boundary. `attrs` is a `Vec<Attribute>`;
@@ -309,7 +392,59 @@ impl MasterSeedHkdf for Pkcs11MasterSeedHkdf {
 
         out.copy_from_slice(&value);
         Ok(())
+        // `_guard` drops here, calling `destroy_object` on `derived`.
     }
+}
+
+/// V1.11 M-3 — RAII guard that destroys an ephemeral PKCS#11 object on
+/// drop. Used by [`Pkcs11MasterSeedHkdf::derive_for`] so the short-lived
+/// derived-key handle is guaranteed to be released even if downstream
+/// code panics (FFI panic in `get_attributes`, length-mismatch panic in
+/// the value check, etc.).
+///
+/// The `destroy_object` error is intentionally swallowed: the caller
+/// has no actionable response (the original derive already returned its
+/// data and consumed the lock), and `CKR_OBJECT_HANDLE_INVALID` on an
+/// already-destroyed object is benign. The PKCS#11 session itself is
+/// the strict ceiling on orphaned objects (CKA_TOKEN=false → object
+/// dies with session close) — the guard tightens the upper bound from
+/// "session lifetime" to "single-derive-call lifetime".
+///
+/// The `'a` lifetime ties the guard to the `MutexGuard` borrow held
+/// during `derive_for`; the borrow checker therefore guarantees the
+/// session outlives the handle, so the `Drop` impl can safely call back
+/// into cryptoki without a use-after-free.
+struct EphemeralObjectGuard<'a> {
+    session: &'a Session,
+    handle: ObjectHandle,
+}
+
+impl Drop for EphemeralObjectGuard<'_> {
+    fn drop(&mut self) {
+        // Best-effort destroy. See struct doc for why the error is
+        // swallowed; in short, the caller has already returned its
+        // result and the session-close ceiling bounds the worst case.
+        let _ = self.session.destroy_object(self.handle);
+    }
+}
+
+/// V1.11 M-5 — categorisation helper for a poisoned session mutex.
+///
+/// Centralised in a free function so the production path
+/// ([`Pkcs11MasterSeedHkdf::derive_for`]) and the regression test agree
+/// on the exact wording. Returns [`MasterSeedError::DeriveFailed`] (not
+/// the V1.10 wave-2 `Unavailable`) because mutex poison is permanent
+/// for the affected process — `std::sync::Mutex` does not un-poison —
+/// and the operator runbook's `Unavailable` advice (check token
+/// connectivity, reseat the device) cannot fix poison. The "process
+/// restart required" hint inside the message routes the operator to
+/// the only remediation that actually works.
+fn map_session_lock_poison() -> MasterSeedError {
+    MasterSeedError::DeriveFailed(
+        "PKCS#11 session mutex poisoned — a previous derive panicked; \
+         process restart required (poison is permanent for this process)"
+            .to_string(),
+    )
 }
 
 /// Template for the ephemeral 32-byte derived key.
@@ -356,3 +491,208 @@ const _: () = {
     let _ = assert_send::<Pkcs11MasterSeedHkdf>;
     let _ = assert_sync::<Pkcs11MasterSeedHkdf>;
 };
+
+#[cfg(test)]
+mod tests {
+    //! V1.11 W2 — pkcs11 hardening regression tests.
+    //!
+    //! These tests exercise the parts of the loader that DO NOT need a
+    //! live PKCS#11 module:
+    //!
+    //!   * `read_pin_file` — file-system path, exercised end-to-end via
+    //!     `tempfile`. The Unix-only mode-bit check is the M-2 surface.
+    //!   * `map_session_lock_poison` — pure helper; the M-5
+    //!     categorisation is a one-line policy that needs to stay
+    //!     `DeriveFailed` across refactors.
+    //!
+    //! The M-3 RAII guard cannot be unit-tested without a live
+    //! `cryptoki::session::Session` (which requires SoftHSM2 in the
+    //! test runner). Its correctness is by construction — `Drop` runs
+    //! on every exit path including panic — and the SoftHSM2 CI lane
+    //! (V1.11 scope B candidate) is the operational verification.
+    use super::*;
+
+    /// V1.11 M-5 — mutex-poison categorisation contract. Operator
+    /// runbook routes [`MasterSeedError::Unavailable`] to "check HSM
+    /// connectivity" (transient) and [`MasterSeedError::DeriveFailed`]
+    /// to "investigate / restart" (permanent for this process). Mutex
+    /// poison is the latter — a previous derive panicked and the lock
+    /// will not un-poison without a process restart. Pin the variant
+    /// and the wording so a refactor cannot silently drift back to
+    /// `Unavailable`.
+    #[test]
+    fn session_lock_poison_returns_derive_failed_v1_11_m5() {
+        match map_session_lock_poison() {
+            MasterSeedError::DeriveFailed(msg) => {
+                assert!(
+                    msg.contains("poison"),
+                    "M-5: poison message must contain 'poison' so the operator \
+                     can grep their logs for it; got: {msg}"
+                );
+                assert!(
+                    msg.contains("restart"),
+                    "M-5: poison message must say 'restart' so the operator knows \
+                     the only effective remediation; got: {msg}"
+                );
+            }
+            other => panic!(
+                "V1.11 M-5 regression: mutex poison must map to DeriveFailed \
+                 (Unavailable would route the operator to transient remediation \
+                 that cannot fix a permanent poison); got {other:?}"
+            ),
+        }
+    }
+
+    /// V1.11 M-2 — refuse a PIN file with the most common operator
+    /// footgun mode (0o644: default umask 022 + plain `echo > file`).
+    /// Without this guard, any local user with read access to the
+    /// secret-mount dir can read the PIN and authenticate to the token
+    /// behind the operator's back.
+    #[cfg(unix)]
+    #[test]
+    fn read_pin_file_refuses_world_readable_v1_11_m2() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pin_path = dir.path().join("hsm.pin");
+        std::fs::write(&pin_path, b"1234").expect("write pin");
+        std::fs::set_permissions(&pin_path, std::fs::Permissions::from_mode(0o644))
+            .expect("chmod 0644");
+
+        // module_path is unused by `read_pin_file`; the path just has
+        // to be syntactically valid for the `HsmConfig` struct. The
+        // mode-bit check happens before any module load.
+        let cfg = HsmConfig {
+            module_path: PathBuf::from("/nonexistent/lib.so"),
+            slot: 0,
+            pin_file: pin_path,
+        };
+
+        match read_pin_file(&cfg) {
+            Err(MasterSeedError::Locked(msg)) => {
+                assert!(
+                    msg.contains("0644") || msg.contains("permission"),
+                    "M-2 error must surface the offending mode or the word \
+                     'permission' so the operator understands what's wrong; \
+                     got: {msg}"
+                );
+                assert!(
+                    msg.contains("chmod") || msg.contains("0400"),
+                    "M-2 error must hint the chmod remediation so the operator \
+                     can act without consulting the runbook; got: {msg}"
+                );
+            }
+            Ok(_) => panic!(
+                "V1.11 M-2 regression: a 0644 PIN file was silently accepted \
+                 — local-user PIN exfiltration vector"
+            ),
+            Err(other) => panic!(
+                "V1.11 M-2: 0644 PIN file should yield Locked (auth material \
+                 unusable), got {other:?}"
+            ),
+        }
+    }
+
+    /// V1.11 M-2 — accept the runbook ceremony's `install -m 0400`
+    /// output and the systemd `LoadCredential=` tmpfs default 0o600.
+    /// Both are well-known correctly-secured layouts for a PIN file
+    /// and refusing them would break the documented deployments.
+    #[cfg(unix)]
+    #[test]
+    fn read_pin_file_accepts_owner_only_modes_v1_11_m2() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+        for mode in [0o400u32, 0o600u32] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let pin_path = dir.path().join("hsm.pin");
+            std::fs::write(&pin_path, b"1234").expect("write pin");
+            std::fs::set_permissions(&pin_path, std::fs::Permissions::from_mode(mode))
+                .expect("chmod owner-only");
+
+            let cfg = HsmConfig {
+                module_path: PathBuf::from("/nonexistent/lib.so"),
+                slot: 0,
+                pin_file: pin_path,
+            };
+
+            assert!(
+                read_pin_file(&cfg).is_ok(),
+                "V1.11 M-2: mode {mode:#o} is a valid owner-only layout and \
+                 must be accepted by the loader (refusing it would block the \
+                 documented runbook ceremony output)"
+            );
+        }
+    }
+
+    /// V1.11 M-2 — exhaustive sweep of the lower-6 mode bits to ensure
+    /// the guard refuses ANY group/world access bit. Catches a future
+    /// relaxation (e.g. `mode & 0o007 != 0` instead of `mode & 0o077`)
+    /// that would silently allow group-readable PIN files.
+    #[cfg(unix)]
+    #[test]
+    fn read_pin_file_refuses_any_group_or_other_bit_v1_11_m2() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+        // Every combination of group (0o070) + other (0o007) bits set,
+        // owner unrestricted (0o600). Skip 0o600 itself (the legitimate
+        // baseline tested above) — every other combination must refuse.
+        let bad_modes: [u32; 9] = [
+            0o604, 0o602, 0o601, // owner+other variants
+            0o640, 0o620, 0o610, // owner+group variants
+            0o644, 0o660, 0o666, // owner+group+other classics
+        ];
+        for bad in bad_modes {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let pin_path = dir.path().join("hsm.pin");
+            std::fs::write(&pin_path, b"1234").expect("write pin");
+            std::fs::set_permissions(&pin_path, std::fs::Permissions::from_mode(bad))
+                .expect("chmod bad");
+
+            let cfg = HsmConfig {
+                module_path: PathBuf::from("/nonexistent/lib.so"),
+                slot: 0,
+                pin_file: pin_path,
+            };
+
+            match read_pin_file(&cfg) {
+                Err(MasterSeedError::Locked(_)) => (),
+                Ok(_) => panic!(
+                    "V1.11 M-2 regression: mode {bad:#o} was accepted — group \
+                     or other access leaks the PIN to local users"
+                ),
+                Err(other) => panic!(
+                    "V1.11 M-2: mode {bad:#o} should yield Locked, got {other:?}"
+                ),
+            }
+        }
+    }
+
+    /// V1.11 M-2 — sanity that the read path still surfaces the
+    /// existing empty-file diagnostic (regression guard for the
+    /// pre-V1.11 behaviour). Uses 0o400 to clear the mode-bit gate.
+    #[cfg(unix)]
+    #[test]
+    fn read_pin_file_still_rejects_empty_file_after_m2() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pin_path = dir.path().join("hsm.pin");
+        std::fs::write(&pin_path, b"").expect("write empty pin");
+        std::fs::set_permissions(&pin_path, std::fs::Permissions::from_mode(0o400))
+            .expect("chmod 0400");
+
+        let cfg = HsmConfig {
+            module_path: PathBuf::from("/nonexistent/lib.so"),
+            slot: 0,
+            pin_file: pin_path,
+        };
+
+        match read_pin_file(&cfg) {
+            Err(MasterSeedError::Locked(msg)) => assert!(
+                msg.contains("empty"),
+                "empty-file diagnostic must survive the M-2 refactor; got: {msg}"
+            ),
+            other => panic!("expected Locked(empty) after M-2; got {other:?}"),
+        }
+    }
+}

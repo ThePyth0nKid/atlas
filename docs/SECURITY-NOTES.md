@@ -559,10 +559,16 @@ spelled out in *Master-seed exfiltration is full compromise* above.
   address space. The residual risks are then the threat model
   documented in `docs/OPERATOR-RUNBOOK.md` §2: physical HSM
   compromise (token + PIN), malicious code injected into
-  `atlas-signer` during a session's lifetime, and HSM-driver
-  compromise. None of these are crypto-protocol weaknesses; they
-  are operational controls (filesystem ACLs, short-lived signer
-  invocations, vendor module signing).
+  `atlas-signer` during a session's lifetime, HSM-driver compromise,
+  and **TOCTOU on the PKCS#11 module path** between config-parse
+  (where the V1.10 absolute-path guard fires) and the loader's
+  `dlopen(3)` call (where filesystem state at the absolute path is
+  not held). None of these are crypto-protocol weaknesses; they
+  are operational controls (filesystem ACLs on
+  `${ATLAS_HSM_PKCS11_LIB}` AND its parent directories — the
+  TOCTOU bullet in the runbook elevates this from "nice-to-have"
+  to "required control" — short-lived signer invocations, vendor
+  module signing).
 - **Dev-mode exfiltration is unchanged from V1.9.** A deployment
   running with `ATLAS_DEV_MASTER_SEED=1` and no HSM trio reads
   `DEV_MASTER_SEED` directly; anyone with read access to process

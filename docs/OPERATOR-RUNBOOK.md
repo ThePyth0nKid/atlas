@@ -365,16 +365,55 @@ atlas-signer derive-pubkey --workspace alice
 
 ### Verifying the import
 
+The post-import verification has **two** stages: presence (the seed
+exists with the right label) and attribute-correctness (the seed has
+the security attributes the loader assumes). Stage 2 was added in
+V1.11 to close a silent-failure mode — an HSM whose `pkcs11-tool`
+ignored `--usage-derive` or whose vendor defaults set
+`CKA_EXTRACTABLE=true` would pass stage 1 and the `derive-pubkey`
+smoke without ever signalling that the seed was leakable via
+attribute readback.
+
 ```bash
-# List secret-key objects in the slot. Should show one object with
-# label "atlas-master-seed-v1" and CKA_DERIVE=true.
+# Stage 1 — presence. Should show one object with label
+# "atlas-master-seed-v1" and CKA_DERIVE=true.
 pkcs11-tool --module "${ATLAS_HSM_PKCS11_LIB}" \
             --slot "${ATLAS_HSM_SLOT}" \
             --login --pin-source "file:${ATLAS_HSM_PIN_FILE}" \
             --list-objects --type secrkey
 
-# Verify atlas-signer can open the session and derive. Failure here
-# is fatal — the binary refuses to fall through to the dev seed.
+# Stage 2 — attribute readback. The default `--list-objects` output
+# already prints the security attributes (`Access: ...`); confirm
+# all three of the following appear for the `atlas-master-seed-v1`
+# object. A vendor whose pkcs11-tool emits a different format MUST
+# surface the same three attributes via the vendor's attribute-dump
+# tool — DO NOT skip this stage on the assumption that the smoke is
+# sufficient.
+#
+#   Expected attributes for `atlas-master-seed-v1`:
+#     Access:     sensitive, always sensitive, never extractable
+#                 ╰──┬───────╯  ╰─────┬──────╯  ╰──────┬─────────╯
+#                    │                │                │
+#                    │                │                └─ CKA_EXTRACTABLE: no
+#                    │                └─ historical guarantee: was always sensitive
+#                    │                   (a token that ever set CKA_SENSITIVE=false
+#                    │                   on this object would be reported here as
+#                    │                   "not always sensitive")
+#                    └─ CKA_SENSITIVE: yes
+#     Usage:      derive
+#                 └─ CKA_DERIVE: yes (the HKDF backend depends on this)
+#
+# If ANY of `sensitive` / `never extractable` / `derive` is missing,
+# the import is not safe to use — the seed may be readable by an
+# attacker with PIN access, defeating the V1.10 wave 2 trust model.
+# Re-run §2 from step 1 with the correct `--usage-derive` flag (and
+# investigate why the vendor module ignored the import attribute set
+# — most commonly an out-of-date pkcs11-tool against a newer HSM
+# firmware).
+
+# Stage 3 — derive smoke. Verify atlas-signer can open the session
+# and derive. Failure here is fatal — the binary refuses to fall
+# through to the dev seed.
 atlas-signer derive-pubkey --workspace canary-import-test
 ```
 
@@ -430,10 +469,38 @@ atlas-signer derive-pubkey --workspace canary-import-test
   by short-lived signer invocations + per-event subprocess spawn
   (the V1.5+ design choice: the MCP server shells to atlas-signer
   per event, so no long-lived signer process is exposed).
+- TOCTOU on the PKCS#11 module path. V1.10 wave 2 refuses any
+  relative `ATLAS_HSM_PKCS11_LIB` value at config-parse time, closing
+  the CWD-relative library-hijack vector (an attacker who controls
+  the signer's working directory can no longer plant a `.so` next to
+  the binary and have the loader pick it up). A residual TOCTOU
+  window remains: between the config-parse check and `Pkcs11::new`'s
+  `dlopen(3)` call, filesystem state at the absolute path is not
+  held — an attacker with write access to that path (or to the
+  containing directory, via `rename(2)`) can swap the file and the
+  loader will dlopen the malicious shared library with full access
+  to the master-seed session. Closing this fully requires kernel
+  mechanisms (mount namespaces, sealed FDs, IMA/EVM measured-load,
+  `noexec` + `O_VERIFY` on the filesystem) outside the reach of
+  userspace V1.10. **Filesystem ACLs on `${ATLAS_HSM_PKCS11_LIB}`
+  AND its containing directory are therefore a *required*
+  operational control, not a nice-to-have.** The module file MUST
+  be owned by a privileged identity (root, or a vendor-package
+  user), writable only by that identity (mode `0755` typical, never
+  `0777` / group-writable / world-writable), and the signer's
+  runtime user MUST hold read-only access. The same applies
+  recursively to every parent directory up to a known-immutable
+  mount root — an attacker who can rename a parent directory can
+  swap a vendor `libsofthsm2.so` for their own without touching
+  the leaf file. On systemd hosts, pair this with a unit-level
+  `ProtectSystem=strict` + `ReadOnlyPaths=` declaration covering
+  the module path so even root inside the signer's namespace
+  cannot mutate it.
 - HSM driver compromise. The PKCS#11 module runs in atlas-signer's
   address space and has full access to the session. Vendor module
-  signing + filesystem ACLs on `${ATLAS_HSM_PKCS11_LIB}` are the
-  operational controls.
+  signing + the filesystem ACL controls described in the TOCTOU
+  bullet above are the operational defences; there is no in-process
+  sandbox between cryptoki and the rest of the signer.
 
 ### Test mode
 
