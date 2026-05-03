@@ -110,6 +110,10 @@
 // library entry point is `src/lib.rs`; this binary is a thin CLI
 // wrapper. No behaviour change vs. V1.9 — the modules below are the
 // same code, re-rooted from `crate::keys::` to `atlas_signer::keys::`.
+use atlas_signer::workspace_signer::{
+    per_tenant_identity_via_signer, workspace_signer_loader, WorkspaceSigner,
+    WORKSPACE_HSM_OPT_IN_ENV,
+};
 use atlas_signer::{anchor, chain, keys};
 
 use atlas_trust_core::{
@@ -273,15 +277,13 @@ fn main() -> ExitCode {
         Some(Command::BundleHash) => run_bundle_hash(),
         Some(Command::Anchor(args)) => run_anchor(args),
         Some(Command::ChainExport) => run_chain_export(),
-        Some(Command::DeriveKey(args)) => with_master_seed("derive-key", |hkdf| {
-            run_derive_key(args, hkdf)
-        }),
-        Some(Command::DerivePubkey(args)) => with_master_seed("derive-pubkey", |hkdf| {
-            run_derive_pubkey(args, hkdf)
+        Some(Command::DeriveKey(args)) => run_derive_key_or_refuse(args),
+        Some(Command::DerivePubkey(args)) => with_workspace_signer("derive-pubkey", |signer| {
+            run_derive_pubkey(args, signer)
         }),
         Some(Command::RotatePubkeyBundle(args)) => {
-            with_master_seed("rotate-pubkey-bundle", |hkdf| {
-                run_rotate_pubkey_bundle(args, hkdf)
+            with_workspace_signer("rotate-pubkey-bundle", |signer| {
+                run_rotate_pubkey_bundle(args, signer)
             })
         }
         None => run_sign_dispatch(cli.legacy_sign),
@@ -323,20 +325,62 @@ where
     }
 }
 
-/// V1.11 M-4 — `sign` dispatcher that conditionally loads the master
-/// seed only when the caller requested in-signer derivation
-/// (`--derive-from-workspace`). Legacy `--secret-stdin` /
+/// V1.11 wave-3 Phase C — wave-3-aware sibling of [`with_master_seed`].
+///
+/// Loads a [`WorkspaceSigner`] via [`workspace_signer_loader`] (which
+/// either returns the sealed-key
+/// [`Pkcs11WorkspaceSigner`](atlas_signer::hsm::pkcs11_workspace::Pkcs11WorkspaceSigner)
+/// when wave-3 is opted in, or a [`DevWorkspaceSigner`](atlas_signer::workspace_signer::DevWorkspaceSigner)
+/// over the wave-2 / dev master-seed loader otherwise) and hands it to
+/// the per-subcommand handler.
+///
+/// This is the call site for `sign --derive-from-workspace`,
+/// `derive-pubkey`, and `rotate-pubkey-bundle` — every subcommand that
+/// produces a SIGNATURE or PUBKEY must route through here so wave-3
+/// deployments emit the sealed key's actual material rather than a
+/// stale HKDF-derived shadow. The `derive-key` ceremony (which emits
+/// the SECRET hex) goes through [`with_master_seed`] instead because
+/// wave-3 sealed keys are unexportable by design — see
+/// [`run_derive_key_or_refuse`] for the wave-3 incompatibility check.
+fn with_workspace_signer<F>(cmd: &str, handler: F) -> ExitCode
+where
+    F: FnOnce(&dyn WorkspaceSigner) -> ExitCode,
+{
+    match workspace_signer_loader() {
+        Ok(signer) => handler(&*signer),
+        Err(e) => {
+            eprintln!("{cmd}: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// V1.11 M-4 + wave-3 Phase C — `sign` dispatcher that conditionally
+/// loads a [`WorkspaceSigner`] only when the caller requested in-signer
+/// derivation (`--derive-from-workspace`). Legacy `--secret-stdin` /
 /// `--secret-hex` paths must NOT trigger the loader: they have no
-/// dependency on the master seed and must remain usable in CI/dev
-/// environments that haven't opted into the V1.10 master-seed gate.
+/// dependency on the master seed (or the wave-3 sealed key store) and
+/// must remain usable in CI/dev environments that haven't opted into
+/// the V1.10 master-seed gate or the wave-3 HSM workspace signer.
+///
+/// **V1.11 Scope A wave-3.** The loader now routes through
+/// [`workspace_signer_loader`] (instead of [`keys::master_seed_loader`]
+/// directly) so a deployment that opted into wave-3 via
+/// [`atlas_signer::workspace_signer::WORKSPACE_HSM_OPT_IN_ENV`] gets the
+/// sealed [`Pkcs11WorkspaceSigner`](atlas_signer::hsm::pkcs11_workspace::Pkcs11WorkspaceSigner)
+/// and signs entirely inside the HSM. A deployment that did NOT opt in
+/// transparently falls through to a [`DevWorkspaceSigner`](atlas_signer::workspace_signer::DevWorkspaceSigner)
+/// over the wave-2 / dev master seed — byte-equivalent to V1.10 (the
+/// `pubkey_matches_v1_9_derivation_for_dev_seed` golden in
+/// `workspace_signer.rs::tests` is the regression fence).
 ///
 /// Sharing the dispatcher between the explicit `Command::Sign(_)` arm
 /// and the legacy no-subcommand fall-through (used by the bank-demo
 /// example) avoids duplicating the conditional-load block.
 fn run_sign_dispatch(args: SignArgs) -> ExitCode {
-    let hkdf = if args.derive_from_workspace.is_some() {
-        match keys::master_seed_loader() {
-            Ok(h) => Some(h),
+    let signer = if args.derive_from_workspace.is_some() {
+        match workspace_signer_loader() {
+            Ok(s) => Some(s),
             Err(e) => {
                 eprintln!("sign --derive-from-workspace: {e}");
                 return ExitCode::from(2);
@@ -345,11 +389,14 @@ fn run_sign_dispatch(args: SignArgs) -> ExitCode {
     } else {
         None
     };
-    // `as_deref()` peels `Option<Box<dyn MasterSeedHkdf>>` to
-    // `Option<&dyn MasterSeedHkdf>` — a reference, not a move, so the
+    // `as_deref()` peels `Option<Box<dyn WorkspaceSigner>>` to
+    // `Option<&dyn WorkspaceSigner>` — a reference, not a move, so the
     // boxed loader stays alive for the call duration and drops at
-    // function return.
-    run_sign(args, hkdf.as_deref())
+    // function return. Important for the wave-3 path: the
+    // `Pkcs11WorkspaceSigner` holds the PKCS#11 session + key handle
+    // cache; dropping it triggers `C_CloseSession` and (eventually)
+    // `C_Finalize`, so we want exactly one drop point per process.
+    run_sign(args, signer.as_deref())
 }
 
 /// V1.11 W1 (H-1): emit the `derive-key` ceremony JSON without
@@ -402,6 +449,52 @@ fn build_derive_key_json(
     Ok(buf)
 }
 
+/// V1.11 wave-3 Phase C — refuse `derive-key` when the wave-3 sealed
+/// per-workspace signer is opted in.
+///
+/// **Why a separate refusal layer.** `derive-key` is the one ceremony
+/// that emits the per-tenant SECRET hex on stdout. Under wave-3 the
+/// per-tenant Ed25519 secret is generated and held inside the HSM with
+/// `CKA_SENSITIVE=true` and `CKA_EXTRACTABLE=false` — the secret is
+/// structurally unexportable. If `derive-key` ran unchanged under
+/// wave-3 it would silently fall through to the wave-2 / dev master
+/// seed (because the `with_master_seed` path does not see the wave-3
+/// opt-in) and emit a hex secret that DOES NOT MATCH the actual
+/// signing key inside the HSM. An operator using that hex value to
+/// drive an external signer (e.g. `--secret-hex`) would produce
+/// signatures that fail verification against the wave-3 pubkey — a
+/// debugging nightmare with no clear remediation path. Refusing
+/// loudly and early keeps the failure mode legible: "you can't export
+/// a sealed key, here is the wave-3-compatible alternative."
+///
+/// The check reads `ATLAS_HSM_WORKSPACE_SIGNER` directly (not via the
+/// loader) so the refusal fires even when the HSM trio is missing —
+/// the operator's intent (wave-3) is what matters here, not whether
+/// the underlying token is reachable. The fallthrough call delegates
+/// to [`with_master_seed`] + [`run_derive_key`] which preserves the
+/// V1.10 behaviour byte-for-byte.
+fn run_derive_key_or_refuse(args: DeriveWorkspaceArgs) -> ExitCode {
+    if std::env::var(WORKSPACE_HSM_OPT_IN_ENV)
+        .ok()
+        .map(|v| {
+            let n = v.trim().to_ascii_lowercase();
+            matches!(n.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
+    {
+        eprintln!(
+            "derive-key: refused — wave-3 sealed per-workspace signer is opted in via \
+             {WORKSPACE_HSM_OPT_IN_ENV}. The per-tenant Ed25519 secret is held inside \
+             the HSM with CKA_SENSITIVE=true and CKA_EXTRACTABLE=false; it is \
+             structurally unexportable. Use `derive-pubkey` to obtain the public \
+             material, or unset {WORKSPACE_HSM_OPT_IN_ENV} to fall back to the \
+             wave-2 / dev derivation (which produces an exportable secret)."
+        );
+        return ExitCode::from(2);
+    }
+    with_master_seed("derive-key", |hkdf| run_derive_key(args, hkdf))
+}
+
 fn run_derive_key(args: DeriveWorkspaceArgs, hkdf: &dyn keys::MasterSeedHkdf) -> ExitCode {
     if let Err(e) = keys::validate_workspace_id(&args.workspace) {
         eprintln!("derive-key: invalid --workspace: {e}");
@@ -440,19 +533,28 @@ struct DerivePubkeyOutput {
     pubkey_b64url: String,
 }
 
-/// V1.9: Same HKDF derivation as `run_derive_key` but emits only the
-/// public material. The MCP server uses this to assemble per-workspace
-/// `PubkeyBundle`s without ever materialising the workspace's signing
-/// key in TS heap.
-fn run_derive_pubkey(args: DeriveWorkspaceArgs, hkdf: &dyn keys::MasterSeedHkdf) -> ExitCode {
+/// V1.9: Same per-tenant pubkey derivation as `run_derive_key` but
+/// emits only the public material. The MCP server uses this to
+/// assemble per-workspace `PubkeyBundle`s without ever materialising
+/// the workspace's signing key in TS heap.
+///
+/// **V1.11 wave-3 Phase C.** The handler takes a
+/// [`WorkspaceSigner`] rather than a `MasterSeedHkdf` so the dispatcher
+/// can route through the wave-3 sealed signer when opted in. Under
+/// wave-3 the pubkey is read from `CKA_EC_POINT` on the on-token
+/// public-key object (not derived in-process via HKDF), and the kid
+/// is the same `atlas-anchor:` + workspace_id construction as before.
+/// Verifier-side strict-mode pinning works unchanged because the kid
+/// is independent of the signing backend.
+fn run_derive_pubkey(args: DeriveWorkspaceArgs, signer: &dyn WorkspaceSigner) -> ExitCode {
     if let Err(e) = keys::validate_workspace_id(&args.workspace) {
         eprintln!("derive-pubkey: invalid --workspace: {e}");
         return ExitCode::from(2);
     }
-    let identity = match keys::per_tenant_identity_via(hkdf, &args.workspace) {
+    let identity = match per_tenant_identity_via_signer(signer, &args.workspace) {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("derive-pubkey: per-tenant derive failed: {e}");
+            eprintln!("derive-pubkey: per-tenant pubkey resolution failed: {e}");
             return ExitCode::from(2);
         }
     };
@@ -474,7 +576,7 @@ fn run_derive_pubkey(args: DeriveWorkspaceArgs, hkdf: &dyn keys::MasterSeedHkdf)
 
 fn run_rotate_pubkey_bundle(
     args: RotatePubkeyBundleArgs,
-    hkdf: &dyn keys::MasterSeedHkdf,
+    signer: &dyn WorkspaceSigner,
 ) -> ExitCode {
     if let Err(e) = keys::validate_workspace_id(&args.workspace) {
         eprintln!("rotate-pubkey-bundle: invalid --workspace: {e}");
@@ -493,10 +595,19 @@ fn run_rotate_pubkey_bundle(
         }
     };
 
-    let identity = match keys::per_tenant_identity_via(hkdf, &args.workspace) {
+    // V1.11 wave-3 Phase C: route through the WorkspaceSigner so the
+    // bundle entry advertises the SEALED pubkey when wave-3 is opted
+    // in. The mismatch-refusal logic below treats wave-3-rotated
+    // pubkeys identically to a master-seed-rotated key — the operator
+    // sees a clear "DIFFERENT pubkey" diagnostic rather than a silent
+    // overwrite. This is the load-bearing ceremony for the V1.10 →
+    // wave-3 migration: an operator opts into wave-3, runs
+    // `rotate-pubkey-bundle` for each workspace, and gets the fresh
+    // sealed pubkeys into the verifier-side trust store.
+    let identity = match per_tenant_identity_via_signer(signer, &args.workspace) {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("rotate-pubkey-bundle: per-tenant derive failed: {e}");
+            eprintln!("rotate-pubkey-bundle: per-tenant pubkey resolution failed: {e}");
             return ExitCode::from(2);
         }
     };
@@ -627,7 +738,7 @@ fn run_anchor(args: AnchorArgs) -> ExitCode {
     }
 }
 
-fn run_sign(mut args: SignArgs, hkdf: Option<&dyn keys::MasterSeedHkdf>) -> ExitCode {
+fn run_sign(mut args: SignArgs, signer: Option<&dyn WorkspaceSigner>) -> ExitCode {
     // Required-when-signing fields (clap can't enforce because legacy mode
     // makes them all optional at the parser level). Surface clear errors.
     let workspace = match args.workspace {
@@ -696,25 +807,14 @@ fn run_sign(mut args: SignArgs, hkdf: Option<&dyn keys::MasterSeedHkdf>) -> Exit
         return ExitCode::from(2);
     }
 
-    let signing_key: SigningKey = if let Some(ws) = args.derive_from_workspace.as_deref() {
-        // In-signer derivation: the secret never crosses the subprocess
-        // boundary. This is the V1.9 hot path for per-tenant events.
-        // V1.10 wave 2: master_seed_loader dispatches to PKCS#11 when
-        // the HSM trio is set, otherwise falls through to the V1.10
-        // wave-1 dev-seed gate.
-        //
-        // V1.11 M-4: the loader is now resolved by `run_sign_dispatch`
-        // BEFORE this function is entered, and threaded in via the
-        // `hkdf` parameter. The conditional `expect` is sound because
-        // the dispatcher only loads the master seed when
-        // `args.derive_from_workspace.is_some()` — the same predicate
-        // that guards this `if let` arm. Reaching `None` here would
-        // mean the dispatcher and this branch disagree on when to
-        // load, which is a bug worth panicking on.
-        let hkdf = hkdf.expect(
-            "M-4 invariant: run_sign_dispatch loads master seed iff \
-             --derive-from-workspace is set",
-        );
+    // V1.11 wave-3 Phase C: workspace_id + kid validation runs BEFORE
+    // building signing-input so operator errors (typos, mismatched kid)
+    // surface without paying the canonical-bytes cost — and BEFORE
+    // calling into the WorkspaceSigner so a malformed workspace_id never
+    // reaches the HSM (defence-in-depth alongside the trait-level guard
+    // in `WorkspaceSigner::sign`). The dev impl validates the same way,
+    // so byte-for-byte compatibility with V1.10 is preserved.
+    if let Some(ws) = args.derive_from_workspace.as_deref() {
         if let Err(e) = keys::validate_workspace_id(ws) {
             eprintln!("sign --derive-from-workspace: invalid workspace: {e}");
             return ExitCode::from(2);
@@ -734,30 +834,34 @@ fn run_sign(mut args: SignArgs, hkdf: Option<&dyn keys::MasterSeedHkdf>) -> Exit
             );
             return ExitCode::from(2);
         }
-        match keys::derive_workspace_signing_key_via(hkdf, ws) {
-            Ok(sk) => sk,
-            Err(e) => {
-                eprintln!("sign --derive-from-workspace: per-tenant derive failed: {e}");
-                return ExitCode::from(2);
-            }
-        }
+    }
+
+    // Secret-bytes path: parse the user-supplied 32-byte secret into a
+    // [`SigningKey`] now, while the `Zeroizing` intermediate buffers are
+    // still in scope. The returned key + the `Zeroizing` wrappers stay
+    // alive until function exit so the secret scalar's heap residency is
+    // bounded by the call. `None` when the workspace-derive path is
+    // active (signing in that path goes through the trait, not an
+    // in-process `SigningKey`).
+    //
+    // V1.11 Scope-A pre-flight follow-up: the sign-path's secret-bytes
+    // chain (`secret_hex` String → `secret_bytes` Vec<u8> → `secret_array`
+    // [u8; 32]) used to drop unscrubbed, leaving 32-byte signing-key
+    // material in the freed-allocator pool until reuse. The ceremony
+    // path (`build_derive_key_json` above) already wraps every heap
+    // copy in `Zeroizing`. Wrapping here closes the divergence and is
+    // mandatory now that the wave-3 trait sits between this dispatcher
+    // and the per-workspace key store.
+    //
+    // `SigningKey::from_bytes(&*secret_array)` borrows the inner
+    // [u8; 32], so the returned `SigningKey` does not extend the
+    // `Zeroizing` wrapper's lifetime; the wrapper drops at the end
+    // of this `else` arm and scrubs. `SigningKey` itself implements
+    // `ZeroizeOnDrop` in `ed25519-dalek` ≥ 2, so the expanded scalar
+    // is also scrubbed when `secret_signing_key` drops at function exit.
+    let secret_signing_key: Option<SigningKey> = if args.derive_from_workspace.is_some() {
+        None
     } else {
-        // V1.11 Scope-A pre-flight follow-up: the sign-path's secret-bytes
-        // chain (`secret_hex` String → `secret_bytes` Vec<u8> → `secret_array`
-        // [u8; 32]) used to drop unscrubbed, leaving 32-byte signing-key
-        // material in the freed-allocator pool until reuse. The ceremony
-        // path (`build_derive_key_json` above) already wraps every heap
-        // copy in `Zeroizing` — this branch was the one place V1.11
-        // missed. Wrapping here closes the divergence before wave-3 layers
-        // a `WorkspaceSigner` trait on top of this dispatcher (the trait
-        // would inherit the gap if it were merged first).
-        //
-        // `SigningKey::from_bytes(&*secret_array)` borrows the inner
-        // [u8; 32], so the returned `SigningKey` does not extend the
-        // `Zeroizing` wrapper's lifetime; the wrapper drops at the end
-        // of this `else` arm and scrubs. `SigningKey` itself implements
-        // `ZeroizeOnDrop` in `ed25519-dalek` ≥ 2, so the expanded scalar
-        // is also scrubbed when `signing_key` drops at function exit.
         let secret_hex: Zeroizing<String> = if args.secret_stdin {
             let mut buf: Zeroizing<String> = Zeroizing::new(String::new());
             if let Err(e) = io::stdin().read_to_string(&mut buf) {
@@ -799,7 +903,7 @@ fn run_sign(mut args: SignArgs, hkdf: Option<&dyn keys::MasterSeedHkdf>) -> Exit
         };
         let mut secret_array: Zeroizing<[u8; 32]> = Zeroizing::new([0u8; 32]);
         secret_array.copy_from_slice(secret_bytes.as_slice());
-        SigningKey::from_bytes(&secret_array)
+        Some(SigningKey::from_bytes(&secret_array))
     };
 
     let parents: Vec<String> = if args.parents.is_empty() {
@@ -817,7 +921,38 @@ fn run_sign(mut args: SignArgs, hkdf: Option<&dyn keys::MasterSeedHkdf>) -> Exit
     };
 
     let event_hash = compute_event_hash(&signing_input);
-    let sig = signing_key.sign(&signing_input);
+
+    // Sign: wave-3 path delegates the entire signing operation to the
+    // [`WorkspaceSigner`] (which may run inside an HSM via `CKM_EDDSA`,
+    // never exposing the per-tenant scalar to Atlas address space);
+    // legacy paths sign in-process with the [`SigningKey`] assembled
+    // above. Both branches produce a 64-byte raw RFC 8032 signature —
+    // the consumer side (the verifier) cannot tell which signed the
+    // event, which is the whole point: wave-3 is a deployment knob,
+    // not a wire-format change.
+    let sig_bytes: [u8; 64] = if let Some(ws) = args.derive_from_workspace.as_deref() {
+        // Phase-C invariant: the dispatcher (`run_sign_dispatch`) only
+        // loads a `WorkspaceSigner` when `args.derive_from_workspace`
+        // is `Some`, the same predicate that guards this `if let`
+        // arm. Reaching `None` here would mean dispatcher and branch
+        // disagree about when to load — a coding bug, not a runtime
+        // condition. Panic to surface it loudly.
+        let signer = signer.expect(
+            "Phase-C invariant: run_sign_dispatch loads the workspace signer iff \
+             --derive-from-workspace is set",
+        );
+        match signer.sign(ws, &signing_input) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("sign --derive-from-workspace: per-tenant sign failed: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        let signing_key = secret_signing_key
+            .expect("mode_count check guarantees exactly one secret source");
+        signing_key.sign(&signing_input).to_bytes()
+    };
 
     let event = AtlasEvent {
         event_id,
@@ -827,7 +962,7 @@ fn run_sign(mut args: SignArgs, hkdf: Option<&dyn keys::MasterSeedHkdf>) -> Exit
         signature: EventSignature {
             alg: "EdDSA".to_string(),
             kid,
-            sig: b64url_no_pad_encode(&sig.to_bytes()),
+            sig: b64url_no_pad_encode(&sig_bytes),
         },
         ts,
     };

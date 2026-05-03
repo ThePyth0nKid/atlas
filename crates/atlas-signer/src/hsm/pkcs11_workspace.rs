@@ -438,6 +438,16 @@ fn generate_keypair(
     label: &str,
     slot_id: u64,
 ) -> Result<CachedKey, WorkspaceSignerError> {
+    // PKCS#11 §10.1.2: a public/private key pair is bound by sharing the
+    // same `CKA_ID` value. We set CKA_ID = CKA_LABEL on both objects so
+    // standard tooling (`pkcs11-tool --list-key-types`, vendor CryptoKi
+    // toolkits, the operator-runbook half-keypair dedupe ceremony) can
+    // resolve the pair without our `find_one_object` disambiguation
+    // shortcut. The label itself already encodes the workspace_id, so
+    // this is byte-identical to the label and does not introduce a
+    // second naming source — just makes the spec-mandated pair binding
+    // explicit instead of relying on label-equality alone.
+    let id = label.as_bytes().to_vec();
     let pub_template = vec![
         Attribute::Class(ObjectClass::PUBLIC_KEY),
         Attribute::KeyType(KeyType::EC_EDWARDS),
@@ -446,6 +456,7 @@ fn generate_keypair(
         Attribute::Verify(true),
         Attribute::EcParams(ED25519_PARAMS_PRINTABLE.to_vec()),
         Attribute::Label(label.as_bytes().to_vec()),
+        Attribute::Id(id.clone()),
     ];
     let priv_template = vec![
         Attribute::Class(ObjectClass::PRIVATE_KEY),
@@ -465,6 +476,7 @@ fn generate_keypair(
         // policy and slams the door shut.
         Attribute::Derive(false),
         Attribute::Label(label.as_bytes().to_vec()),
+        Attribute::Id(id),
     ];
     let (public, private) = session
         .generate_key_pair(
@@ -533,7 +545,11 @@ fn unwrap_octet_string(
     if bytes.len() == 32 {
         return Ok(bytes.try_into().expect("len-32 slice → [u8; 32]"));
     }
-    if bytes.len() == 34 && bytes[0] == 0x04 && bytes[1] == 32 {
+    // ASN.1 OCTET STRING: tag 0x04, length 0x20 (= 32 decimal), 32 raw
+    // bytes. Spell the length byte in hex to mirror the comment block
+    // above and avoid a future reviewer reading `== 32` as the wrong
+    // ASN.1 length encoding.
+    if bytes.len() == 34 && bytes[0] == 0x04 && bytes[1] == 0x20 {
         return Ok(bytes[2..34].try_into().expect("len-32 slice → [u8; 32]"));
     }
     Err(WorkspaceSignerError::DeriveFailed(format!(

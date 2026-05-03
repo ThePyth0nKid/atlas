@@ -326,15 +326,44 @@ where
     F: Fn(&str) -> Option<String>,
     W: std::io::Write,
 {
-    // V1.11 L-8: ATLAS_PRODUCTION deprecation warning. Fired before
-    // any gate check so the operator sees the migration notice
-    // regardless of which path the loader ultimately takes (refuse via
-    // production_gate, refuse via opt-in gate, succeed via HSM trio,
-    // succeed via dev opt-in). The trim-empty filter ignores
-    // misconfigured pipelines that emit `ATLAS_PRODUCTION=` with no
-    // value; only meaningful settings trip the warning. Writes via
-    // `writeln!` and ignores errors — a failed write to stderr should
-    // not block the loader.
+    emit_atlas_production_deprecation_if_set(&env, warn_out);
+
+    // Layer 1: HSM trio. If any of the three env vars is set, we
+    // commit to sealed-seed mode; partial trios refuse via
+    // `HsmConfig::from_env`.
+    if let Some(cfg) = crate::hsm::config::HsmConfig::from_env(&env)? {
+        let pkcs11 = crate::hsm::pkcs11::Pkcs11MasterSeedHkdf::open(cfg)
+            .map_err(|e| format!("HSM open failed: {e}"))?;
+        return Ok(Box::new(pkcs11));
+    }
+
+    // Layer 2: dev seed via the V1.10 wave-1 gate.
+    let dev = master_seed_gate_with(&env)?;
+    Ok(Box::new(dev))
+}
+
+/// V1.11 L-8 — emit the [`PRODUCTION_GATE_ENV`] deprecation warning to
+/// `warn_out` when the env var is observed with non-whitespace content.
+///
+/// **Why factored out.** V1.11 wave-3 Phase C added a sibling loader
+/// ([`crate::workspace_signer::workspace_signer_loader_with_writer`])
+/// that takes the wave-3 sealed per-workspace path before reaching the
+/// wave-2 master-seed loader. Without this helper the wave-3 path would
+/// silently bypass the deprecation warning — operator who sets BOTH
+/// `ATLAS_PRODUCTION=1` and `ATLAS_HSM_WORKSPACE_SIGNER=1` would never
+/// see the V1.12-removal notice. The helper fires the warning *before*
+/// any gate check so the operator sees the migration notice regardless
+/// of which loader path or layer is ultimately taken.
+///
+/// The `trim().is_empty()` filter ignores misconfigured pipelines that
+/// emit `ATLAS_PRODUCTION=` with no value — only meaningful settings
+/// trip the warning. Writes via `writeln!` and ignores write errors —
+/// a failed write to stderr should not block the loader.
+pub(crate) fn emit_atlas_production_deprecation_if_set<F, W>(env: &F, warn_out: &mut W)
+where
+    F: Fn(&str) -> Option<String>,
+    W: std::io::Write,
+{
     if env(PRODUCTION_GATE_ENV)
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false)
@@ -353,19 +382,6 @@ where
             crate::hsm::config::PIN_FILE_ENV,
         );
     }
-
-    // Layer 1: HSM trio. If any of the three env vars is set, we
-    // commit to sealed-seed mode; partial trios refuse via
-    // `HsmConfig::from_env`.
-    if let Some(cfg) = crate::hsm::config::HsmConfig::from_env(&env)? {
-        let pkcs11 = crate::hsm::pkcs11::Pkcs11MasterSeedHkdf::open(cfg)
-            .map_err(|e| format!("HSM open failed: {e}"))?;
-        return Ok(Box::new(pkcs11));
-    }
-
-    // Layer 2: dev seed via the V1.10 wave-1 gate.
-    let dev = master_seed_gate_with(&env)?;
-    Ok(Box::new(dev))
 }
 
 /// Maximum byte length of a `workspace_id`. Bounding the input here

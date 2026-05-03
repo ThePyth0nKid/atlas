@@ -58,12 +58,38 @@ use std::sync::Arc;
 
 use ed25519_dalek::Signer;
 
+use atlas_trust_core::per_tenant_kid_for;
+
 use crate::keys::{
-    derive_workspace_signing_key_via, validate_workspace_id, MasterSeedError, MasterSeedHkdf,
+    derive_workspace_signing_key_via, master_seed_loader_with_writer,
+    validate_workspace_id, MasterSeedError, MasterSeedHkdf, PerTenantIdentity,
 };
 
 #[cfg(test)]
 use crate::keys::DevMasterSeedHkdf;
+
+/// V1.11 Scope A wave-3 — env-var name that opts a deployment into
+/// the sealed per-workspace signer.
+///
+/// **Why a separate opt-in instead of "HSM trio implies wave-3"?**
+/// Wave-2 dispatched on the trio: setting `ATLAS_HSM_PKCS11_LIB` /
+/// `ATLAS_HSM_SLOT` / `ATLAS_HSM_PIN_FILE` activated the sealed-seed
+/// loader. Wave-3 changes the per-tenant pubkey derivation: keys are
+/// HSM-generated via `CKM_EC_EDWARDS_KEY_PAIR_GEN`, not derived from
+/// a master seed via HKDF. The pubkeys are NOT byte-equivalent to the
+/// V1.9–V1.10 derivation. A V1.10 wave-2 deployment that already
+/// pinned per-tenant pubkeys (`PubkeyBundle.keys`) would silently
+/// rotate every entry on upgrade if wave-3 activated automatically
+/// with the trio. The opt-in is the operator's explicit handshake
+/// that they accept the rotation event.
+///
+/// Recognised truthy values match
+/// [`crate::keys::DEV_MASTER_SEED_OPT_IN_ENV`]: `1`, `true`, `yes`,
+/// `on`, case-insensitive, with leading/trailing whitespace
+/// tolerated. Anything else falls through to the wave-2 / dev path
+/// (per-tenant keys derived from a master seed loaded by
+/// [`crate::keys::master_seed_loader`]).
+pub const WORKSPACE_HSM_OPT_IN_ENV: &str = "ATLAS_HSM_WORKSPACE_SIGNER";
 
 /// Per-workspace Ed25519 signing surface.
 ///
@@ -358,6 +384,173 @@ impl WorkspaceSigner for DevWorkspaceSigner {
     }
 }
 
+/// V1.11 Scope A wave-3 Phase C — env-driven dispatcher that returns
+/// either the sealed-key [`Pkcs11WorkspaceSigner`](crate::hsm::pkcs11_workspace::Pkcs11WorkspaceSigner)
+/// (when [`WORKSPACE_HSM_OPT_IN_ENV`] is truthy AND the HSM trio is
+/// set) or the [`DevWorkspaceSigner`] backed by the result of
+/// [`crate::keys::master_seed_loader`] (preserving wave-2 sealed-seed
+/// or dev-seed semantics).
+///
+/// **Dispatcher layering (top to bottom):**
+///
+///   1. **Wave-3 sealed per-workspace signer.** Activated by
+///      `ATLAS_HSM_WORKSPACE_SIGNER=1` (truthy) AND the HSM trio
+///      (`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`,
+///      `ATLAS_HSM_PIN_FILE`) being fully set. Per-tenant Ed25519
+///      keys are generated and held inside the HSM; the private
+///      scalar never enters Atlas address space.
+///
+///   2. **Wave-2 sealed-seed dev signer.** Activated when wave-3 is
+///      NOT opted into AND the HSM trio is set. Per-tenant keys are
+///      derived in-process via HKDF, but the master seed lives in
+///      the HSM (wave-2 invariant preserved).
+///
+///   3. **Dev signer.** Activated when neither wave-3 nor the HSM
+///      trio is set. The master seed is the source-committed
+///      [`crate::keys::DEV_MASTER_SEED`], gated behind the wave-1
+///      positive opt-in (`ATLAS_DEV_MASTER_SEED=1`).
+///
+/// **Why wave-3 needs explicit opt-in (not "trio implies wave-3").**
+/// Wave-3 changes per-tenant pubkey derivation from
+/// HKDF-of-master-seed (V1.9 / V1.10) to HSM-native key generation
+/// (`CKM_EC_EDWARDS_KEY_PAIR_GEN`). The pubkeys are NOT
+/// byte-equivalent. A V1.10 wave-2 deployment that already pinned
+/// per-tenant pubkeys via `PubkeyBundle.keys` would silently rotate
+/// every entry on first wave-3 sign. The explicit
+/// `ATLAS_HSM_WORKSPACE_SIGNER=1` is the operator's handshake that
+/// they accept the rotation. Once accepted, the operator runs
+/// `derive-pubkey` / `rotate-pubkey-bundle` (which Phase C also wires
+/// through this dispatcher) to advertise the fresh wave-3 pubkeys to
+/// verifier-side trust pinning.
+///
+/// **Failure semantics — fail-closed at every layer.** If wave-3 is
+/// opted in but the HSM trio is missing or partial, the dispatcher
+/// refuses with a clear remediation hint instead of falling through
+/// to the dev signer (silent fallthrough is the V1.10 anti-pattern).
+/// If the HSM trio is set but the PKCS#11 module fails to open, the
+/// dispatcher likewise refuses — the operator must fix the HSM
+/// config or unset the wave-3 opt-in, not silently sign with the dev
+/// key.
+pub fn workspace_signer_loader() -> Result<Box<dyn WorkspaceSigner>, String> {
+    workspace_signer_loader_with(|name| std::env::var(name).ok())
+}
+
+/// Test-injection form of [`workspace_signer_loader`]. Same env-reader
+/// closure shape as [`crate::keys::master_seed_loader_with`] so a
+/// single env source can drive both the wave-3 opt-in check, the HSM
+/// trio parse (delegated to [`crate::hsm::config::HsmConfig::from_env`]),
+/// and the wave-2 / dev-seed fallback.
+///
+/// Forwards to [`workspace_signer_loader_with_writer`] with
+/// `std::io::stderr()` as the deprecation-warning sink (the warning
+/// fires for `ATLAS_PRODUCTION` set, see
+/// [`crate::keys::master_seed_loader_with_writer`]).
+pub fn workspace_signer_loader_with<F>(env: F) -> Result<Box<dyn WorkspaceSigner>, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    workspace_signer_loader_with_writer(env, &mut std::io::stderr())
+}
+
+/// V1.11 wave-3 Phase C entry point that takes both an env reader AND
+/// a `&mut dyn Write` for the wave-2 deprecation warning sink.
+/// Mirrors [`crate::keys::master_seed_loader_with_writer`] so wave-3
+/// tests can capture the warning text for assertion (or pipe it to
+/// [`std::io::sink`] when the test is exercising a deliberately-
+/// deprecated configuration and the noise on stderr would clutter
+/// the test runner output).
+pub fn workspace_signer_loader_with_writer<F, W>(
+    env: F,
+    warn_out: &mut W,
+) -> Result<Box<dyn WorkspaceSigner>, String>
+where
+    F: Fn(&str) -> Option<String>,
+    W: std::io::Write,
+{
+    // V1.11 L-8: emit the ATLAS_PRODUCTION deprecation warning *before*
+    // any gate check, so an operator who sets both `ATLAS_PRODUCTION=1`
+    // and `ATLAS_HSM_WORKSPACE_SIGNER=1` still sees the V1.12-removal
+    // notice. Without this call the wave-3 path would silently swallow
+    // the warning when wave-3 is opted in (the wave-2
+    // master_seed_loader_with_writer below is only reached on the
+    // fallthrough branch).
+    crate::keys::emit_atlas_production_deprecation_if_set(&env, warn_out);
+
+    // Layer 1: wave-3 opt-in. Truthy values match the wave-1 dev-seed
+    // gate's allow-list so an operator who learned `ATLAS_DEV_MASTER_SEED=1`
+    // can use the same spelling here without surprise rejection.
+    let opt_in_raw = env(WORKSPACE_HSM_OPT_IN_ENV).unwrap_or_default();
+    let opt_in_normalised = opt_in_raw.trim().to_ascii_lowercase();
+    let wave3_opt_in = matches!(opt_in_normalised.as_str(), "1" | "true" | "yes" | "on");
+
+    if wave3_opt_in {
+        // Wave-3 requires the HSM trio. `HsmConfig::from_env` returns
+        // `Ok(None)` when no HSM env vars are set, `Ok(Some(_))` when
+        // all three are set, and `Err(_)` for partial trios. We treat
+        // `Ok(None)` (trio absent) as a fail-closed refusal here:
+        // wave-3 opt-in without an HSM target is operator confusion
+        // worth surfacing loudly, not a silent dev-seed fallback.
+        let cfg = crate::hsm::config::HsmConfig::from_env(&env)?
+            .ok_or_else(|| {
+                format!(
+                    "{WORKSPACE_HSM_OPT_IN_ENV}={opt_in_raw:?} requested the wave-3 \
+                     sealed per-workspace signer, but the HSM trio is not set. \
+                     Wave-3 has NO dev fallback — set ATLAS_HSM_PKCS11_LIB / \
+                     ATLAS_HSM_SLOT / ATLAS_HSM_PIN_FILE (all three) to point at \
+                     the production token, OR unset {WORKSPACE_HSM_OPT_IN_ENV} \
+                     to fall through to the wave-2 sealed-seed signer (still HSM \
+                     for the master seed; per-tenant keys derived in-process). \
+                     See docs/OPERATOR-RUNBOOK.md §wave-3 for the migration."
+                )
+            })?;
+        let pkcs11 = crate::hsm::pkcs11_workspace::Pkcs11WorkspaceSigner::open(cfg)
+            .map_err(|e| format!("wave-3 HSM workspace signer open failed: {e}"))?;
+        return Ok(Box::new(pkcs11));
+    }
+
+    // Layer 2: wave-2 / dev signer. The underlying
+    // `master_seed_loader_with_writer` performs its own dispatch
+    // between the sealed-seed loader (HSM trio set) and the dev gate
+    // (HSM trio absent + dev opt-in). Wrap whatever it returns in
+    // `DevWorkspaceSigner` so the binary's call sites see one trait
+    // surface regardless of where the master seed actually lives.
+    let hkdf = master_seed_loader_with_writer(&env, warn_out)?;
+    Ok(Box::new(DevWorkspaceSigner::new(Arc::from(hkdf))))
+}
+
+/// V1.11 wave-3 Phase C — trait-routed counterpart of
+/// [`crate::keys::per_tenant_identity_via`].
+///
+/// Asks the [`WorkspaceSigner`] for the workspace's pubkey (the
+/// sealed-key impl reads `CKA_EC_POINT` from the on-token public-key
+/// object; the dev impl derives it via HKDF) and stitches it into a
+/// [`PerTenantIdentity`] alongside the canonical kid
+/// (`atlas-anchor:` + workspace_id). The kid construction is
+/// independent of the signing backend — it is the same
+/// `per_tenant_kid_for(workspace_id)` regardless of whether the key
+/// material lives in HSM or in-process.
+///
+/// Phase-C call sites (`derive-pubkey`, `rotate-pubkey-bundle`) route
+/// through this helper instead of the [`per_tenant_identity_via`](crate::keys::per_tenant_identity_via)
+/// HKDF-only form so that, when the wave-3 opt-in is active, the kid
+/// is paired with the SEALED pubkey (i.e. what the wave-3 signer will
+/// actually produce). Without this routing, the bundle would advertise
+/// stale HKDF-derived pubkeys against which wave-3 signatures would
+/// fail strict-mode verification.
+pub fn per_tenant_identity_via_signer(
+    signer: &dyn WorkspaceSigner,
+    workspace_id: &str,
+) -> Result<PerTenantIdentity, WorkspaceSignerError> {
+    use base64::Engine;
+    let pubkey_bytes = signer.pubkey(workspace_id)?;
+    let pubkey_b64url =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pubkey_bytes);
+    Ok(PerTenantIdentity {
+        kid: per_tenant_kid_for(workspace_id),
+        pubkey_b64url,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     //! Phase-A coverage: prove that the dev impl is a faithful
@@ -614,5 +807,278 @@ mod tests {
         // E0038 (the trait cannot be made into an object).
         let _signer: Box<dyn WorkspaceSigner> =
             Box::new(DevWorkspaceSigner::with_dev_seed());
+    }
+
+    // V1.11 wave-3 Phase C — `workspace_signer_loader_with` dispatcher
+    // tests. Pin the three-layer dispatch order (wave-3 opt-in → HSM
+    // trio → dev gate) and the refusal semantics on the obvious
+    // operator footguns. Each test runs against an injected env reader
+    // (`crate::test_support::env_pairs`) so the suite never mutates
+    // process environment — required because cargo runs tests in
+    // parallel and an env mutation would race across cases.
+
+    use crate::keys::DEV_MASTER_SEED_OPT_IN_ENV;
+    use crate::test_support::env_pairs;
+
+    /// Helper: extract the error message from a loader call that MUST
+    /// have failed. Mirrors `keys::tests::loader_err` — `Box<dyn
+    /// WorkspaceSigner>` does not implement `Debug` (the trait
+    /// deliberately omits it), so `.unwrap_err()` won't compile.
+    fn loader_err<F>(env: F) -> String
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        match workspace_signer_loader_with(env) {
+            Ok(_) => panic!("expected loader to refuse, but it succeeded"),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn loader_dev_path_when_wave3_unset_and_dev_opt_in_set() {
+        // Default-shape dev test: no wave-3 opt-in, no HSM trio, dev
+        // opt-in set. Loader must succeed and produce a usable
+        // [`WorkspaceSigner`]. Pubkey output must match the
+        // [`DevWorkspaceSigner::with_dev_seed`] convenience constructor
+        // byte-for-byte — that is the regression fence that lets the
+        // dispatcher swap in wave-3 only when the operator opts in.
+        let signer = workspace_signer_loader_with(env_pairs(&[(
+            DEV_MASTER_SEED_OPT_IN_ENV,
+            "1",
+        )]))
+        .expect("dev loader path must succeed");
+        let baseline = DevWorkspaceSigner::with_dev_seed();
+        for ws in ["alice", "bob", "ws-mcp-default"] {
+            assert_eq!(
+                signer.pubkey(ws).expect("dev impl is infallible"),
+                baseline.pubkey(ws).expect("dev impl is infallible"),
+                "loader-routed dev path must be byte-equivalent to with_dev_seed for {ws:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn loader_dev_path_when_wave3_opt_in_falsy() {
+        // The wave-3 opt-in is falsy when set to anything outside
+        // {1, true, yes, on}. A literal "no" or empty value MUST NOT
+        // activate the wave-3 layer (operator confusion guard) — the
+        // loader falls through to the dev path. Mirrors the wave-1
+        // dev-seed gate's truthy/falsy parsing.
+        for falsy in ["", "0", "no", "false", "off", "unknown"] {
+            let signer = workspace_signer_loader_with(env_pairs(&[
+                (WORKSPACE_HSM_OPT_IN_ENV, falsy),
+                (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+            ]))
+            .expect("falsy wave-3 opt-in must fall through to dev");
+            // Smoke: the resulting signer must produce SOME pubkey for
+            // a known-good workspace. Detailed byte-equivalence is
+            // covered by the test above; this case is about the
+            // dispatch-flow predicate.
+            let _ = signer
+                .pubkey("alice")
+                .expect("dev impl is infallible");
+        }
+    }
+
+    #[test]
+    fn loader_refuses_wave3_opt_in_without_hsm_trio() {
+        // Operator footgun #1: opt into wave-3 but forget to set the
+        // HSM trio. The loader MUST refuse with a clear
+        // remediation hint that names the env var (so an operator can
+        // grep stderr for `ATLAS_HSM_WORKSPACE_SIGNER`). The dev
+        // opt-in is also set in this case to prove that wave-3 does
+        // NOT silently fall through to dev — the refusal is structural,
+        // not a side-effect of dev being missing.
+        let err = loader_err(env_pairs(&[
+            (WORKSPACE_HSM_OPT_IN_ENV, "1"),
+            (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+        ]));
+        assert!(
+            err.contains(WORKSPACE_HSM_OPT_IN_ENV),
+            "wave-3 trio-missing error must name the opt-in env var; got {err:?}",
+        );
+        assert!(
+            err.contains("HSM trio is not set"),
+            "error must explain WHY (trio missing); got {err:?}",
+        );
+    }
+
+    #[test]
+    fn loader_refuses_wave3_opt_in_with_partial_hsm_trio() {
+        // Operator footgun #2: partial HSM trio. The
+        // [`HsmConfig::from_env`] propagates the partial-trio refusal
+        // up through the loader; we just pin that the propagation
+        // path is wired correctly (the wave-3 layer must NOT silently
+        // accept a partial trio and continue).
+        let err = loader_err(env_pairs(&[
+            (WORKSPACE_HSM_OPT_IN_ENV, "1"),
+            (
+                crate::hsm::config::PKCS11_LIB_ENV,
+                "/usr/lib/softhsm/libsofthsm2.so",
+            ),
+        ]));
+        assert!(
+            err.contains("partial"),
+            "partial wave-3 trio must surface 'partial' from HsmConfig::from_env; got {err:?}",
+        );
+    }
+
+    #[test]
+    fn loader_truthy_wave3_opt_in_variants_all_activate_layer() {
+        // The wave-3 opt-in's truthy spelling must match the wave-1
+        // dev-seed gate's allow-list so an operator who learned one
+        // can use the other without surprise. Catches a regression
+        // where the wave-3 layer accidentally narrows to "1" only.
+        // We assert via the trio-absent refusal: each truthy value
+        // MUST hit the layer-1 refusal path (not the layer-2 dev
+        // fallthrough), because that proves the opt-in was honoured.
+        for truthy in ["1", "true", "yes", "on", "TRUE", "Yes", "  1  "] {
+            let err = loader_err(env_pairs(&[
+                (WORKSPACE_HSM_OPT_IN_ENV, truthy),
+                (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+            ]));
+            assert!(
+                err.contains(WORKSPACE_HSM_OPT_IN_ENV),
+                "truthy opt-in {truthy:?} must reach wave-3 refusal; got {err:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn loader_emits_atlas_production_deprecation_when_set_alongside_wave3_opt_in() {
+        // V1.11 wave-3 + L-8 interaction: an operator who sets BOTH
+        // `ATLAS_PRODUCTION=1` and `ATLAS_HSM_WORKSPACE_SIGNER=1`
+        // must still see the V1.12-removal notice for `ATLAS_PRODUCTION`.
+        // The wave-3 layer fires before the wave-2 / dev fallthrough,
+        // so without the explicit `emit_atlas_production_deprecation_if_set`
+        // call at the top of `workspace_signer_loader_with_writer`, the
+        // warning would be silently swallowed on every wave-3 path —
+        // including the trio-missing refusal path exercised here. We
+        // pair the wave-3 opt-in with no-trio so the loader refuses; the
+        // test asserts only on the warning text, not the loader result.
+        let mut warnings = Vec::<u8>::new();
+        let _ = workspace_signer_loader_with_writer(
+            env_pairs(&[
+                (crate::keys::PRODUCTION_GATE_ENV, "1"),
+                (WORKSPACE_HSM_OPT_IN_ENV, "1"),
+                (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+            ]),
+            &mut warnings,
+        );
+        let text = String::from_utf8(warnings).expect("warning text must be UTF-8");
+        assert!(
+            text.contains(crate::keys::PRODUCTION_GATE_ENV),
+            "wave-3 path must surface the ATLAS_PRODUCTION deprecation warning; got {text:?}",
+        );
+        assert!(
+            text.contains("deprecated"),
+            "warning must label the var as deprecated; got {text:?}",
+        );
+        assert!(
+            text.contains("V1.12"),
+            "warning must announce the removal target; got {text:?}",
+        );
+    }
+
+    #[test]
+    fn loader_no_warning_when_atlas_production_unset_under_wave3_opt_in() {
+        // Negative twin of the test above: without `ATLAS_PRODUCTION`,
+        // the wave-3 path produces no deprecation noise. Catches a
+        // future refactor that accidentally hardcodes the warning to
+        // fire on every wave-3 invocation.
+        let mut warnings = Vec::<u8>::new();
+        let _ = workspace_signer_loader_with_writer(
+            env_pairs(&[
+                (WORKSPACE_HSM_OPT_IN_ENV, "1"),
+                (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+            ]),
+            &mut warnings,
+        );
+        assert!(
+            warnings.is_empty(),
+            "no warning expected when ATLAS_PRODUCTION is unset; got {:?}",
+            String::from_utf8_lossy(&warnings),
+        );
+    }
+
+    #[test]
+    fn loader_wave2_fallthrough_when_trio_set_but_wave3_unset() {
+        // Wave-2 fallthrough invariant: when the HSM trio is set but
+        // `ATLAS_HSM_WORKSPACE_SIGNER` is NOT opted in, the loader
+        // MUST fall through to the wave-2 sealed-seed path (i.e. call
+        // `master_seed_loader_with_writer`, which then routes through
+        // `HsmConfig::from_env` + `Pkcs11MasterSeedHkdf::open`). We
+        // can't exercise a real HSM open in a unit test, so we feed
+        // bogus trio values that the wave-2 path will refuse — the
+        // refusal proves the dispatcher routed through wave-2 rather
+        // than the wave-3 layer or the dev gate.
+        //
+        // We use a relative `PKCS11_LIB_ENV` path because the wave-2
+        // `HsmConfig::from_env` validator refuses relative paths
+        // (library-hijack defence), and that refusal text is
+        // platform-portable — unlike the lib-load failure text which
+        // differs across libloading (Linux) vs LoadLibrary (Windows).
+        // Either failure would prove wave-2 routing; pinning on the
+        // absolute-path refusal keeps the test stable across hosts.
+        let err = loader_err(env_pairs(&[
+            (
+                crate::hsm::config::PKCS11_LIB_ENV,
+                "wave2-fallthrough-witness.so",
+            ),
+            (crate::hsm::config::SLOT_ENV, "0"),
+            (
+                crate::hsm::config::PIN_FILE_ENV,
+                "wave2-fallthrough-pin",
+            ),
+            (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+        ]));
+        // Positive: the error must name the wave-2 trio's PKCS#11-lib
+        // env var, which only happens when the dispatcher reached
+        // `HsmConfig::from_env` (called from `master_seed_loader_with_writer`
+        // — i.e. the wave-2 layer). The wave-3 layer's trio-missing
+        // refusal does NOT name this var; its trio-partial refusal
+        // would, but we set all three trio vars here so partial-trio
+        // is structurally not the cause.
+        assert!(
+            err.contains(crate::hsm::config::PKCS11_LIB_ENV),
+            "wave-2 fallthrough must surface a wave-2 HSM-config error; got {err:?}",
+        );
+        // Negative: if the dispatcher mis-routed to the wave-3 layer,
+        // its refusal text mentions `WORKSPACE_HSM_OPT_IN_ENV`. The
+        // wave-2 path NEVER mentions that var (it doesn't read it), so
+        // its absence proves wave-2 routing.
+        assert!(
+            !err.contains(WORKSPACE_HSM_OPT_IN_ENV),
+            "wave-2 fallthrough error MUST NOT mention the wave-3 opt-in env var \
+             (would mean the dispatcher mis-routed); got {err:?}",
+        );
+    }
+
+    #[test]
+    fn per_tenant_identity_via_signer_matches_keys_module_form_for_dev_path() {
+        // The wave-3 trait-routed `per_tenant_identity_via_signer`
+        // MUST produce byte-identical output to the master-seed-
+        // routed `keys::per_tenant_identity_via` for the dev path —
+        // that byte-equivalence is the property that lets the
+        // `derive-pubkey` and `rotate-pubkey-bundle` ceremonies
+        // dispatch through the wave-3 layer without rotating any
+        // V1.10-pinned per-tenant pubkey. Catches a future refactor
+        // that changes the kid construction or the base64 encoding
+        // out from under the loader.
+        let signer = DevWorkspaceSigner::with_dev_seed();
+        for ws in ["alice", "bob", "ws-mcp-default"] {
+            let via_signer = per_tenant_identity_via_signer(&signer, ws)
+                .expect("dev impl is infallible");
+            let via_keys = crate::keys::per_tenant_identity_via(&DevMasterSeedHkdf, ws)
+                .expect("dev impl is infallible");
+            assert_eq!(
+                via_signer.kid, via_keys.kid,
+                "kid must match per_tenant_identity_via for {ws:?}",
+            );
+            assert_eq!(
+                via_signer.pubkey_b64url, via_keys.pubkey_b64url,
+                "pubkey_b64url must match per_tenant_identity_via for {ws:?}",
+            );
+        }
     }
 }
