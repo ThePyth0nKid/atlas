@@ -1,0 +1,163 @@
+# V1.11 Scope A pre-flight — SoftHSM2 byte-equivalence CI lane.
+#
+# Runs the `hsm_byte_equivalence` integration test in
+# `crates/atlas-signer/tests/` against a CI-provisioned SoftHSM2 token.
+# The test answers a single question:
+#
+#   Does importing the V1.9 HKDF-derived 32-byte seed into SoftHSM2
+#   yield the same Ed25519 pubkey as `ed25519_dalek::SigningKey::from_bytes`?
+#
+# If YES: V1.11 Scope A (HSM seal scope wave 3) can ship as a
+# backwards-compatible seed-import migration — old workspace pubkeys
+# survive the HSM-seal upgrade.
+#
+# If NO: Scope A becomes a fresh-rotation event. Documented and
+# escalated via the test's panic message; CI red signals the design
+# branch in `.handoff/v1.11-handoff.md` Scope A section.
+#
+# This workflow does NOT replace the dev-seed CI lane — it adds an
+# HSM-backed lane on top so the PKCS#11 path is exercised end-to-end
+# in CI without needing a hardware token. The token is throwaway
+# (created and destroyed inside the workflow); the PIN is a literal
+# constant that ships with this file because the SoftHSM2 token
+# created here is ephemeral CI-only and disappears with the runner.
+
+name: hsm-byte-equivalence
+
+on:
+  # Manual trigger only for V1.11 — the test runs cleanly on Linux but
+  # has not yet been pinned in matrix CI. Once V1.11 Scope A merges,
+  # promote to `pull_request:` + `push:` so every PR exercises the
+  # HSM path. Keeping it `workflow_dispatch` for now lets us iterate
+  # on the runbook ceremony without flooding PR checks with red runs
+  # if a SoftHSM2 quirk surfaces.
+  workflow_dispatch:
+
+jobs:
+  byte-equivalence:
+    runs-on: ubuntu-latest
+    env:
+      # Hard-coded ephemeral token state. These constants are CI-only;
+      # the SoftHSM2 token they configure is destroyed at the end of
+      # every runner job and never touches a production secret. The PIN
+      # in particular is NOT sensitive — it gates only the throwaway
+      # token created in the next step.
+      SOFTHSM2_TOKEN_LABEL: atlas-byte-equiv-ci
+      SOFTHSM2_PIN: '1234'
+      SOFTHSM2_SO_PIN: '0000'
+      SOFTHSM2_SLOT_INDEX: '0'
+
+    steps:
+      # NOTE — promotion-from-workflow_dispatch checklist (HARD prereqs
+      # before flipping the trigger to `pull_request:` / `push:`):
+      #
+      # 1. Pin EVERY `uses:` in this file to an immutable SHA digest.
+      #    The mutable refs currently in use are:
+      #      - `actions/checkout@v4`         (line below)
+      #      - `dtolnay/rust-toolchain@stable` (further down)
+      #      - `Swatinem/rust-cache@v2`      (further down)
+      #    All three execute with the runner's `GITHUB_TOKEN`; a
+      #    compromised tag move on any of them lets the attacker run
+      #    arbitrary code on every PR (including from forks). Under the
+      #    current `workflow_dispatch`-only trigger the blast radius is
+      #    bounded to human-initiated runs, but PR-triggered execution
+      #    removes that bound entirely.
+      #
+      # 2. Move the SoftHSM2 PIN + SO-PIN out of `env:` literals into
+      #    repository secrets (`${{ secrets.SOFTHSM2_PIN }}` etc.). The
+      #    literal `'1234'` below is intentional under workflow_dispatch
+      #    (the token is throwaway and never touches a real secret), but
+      #    once PR triggers are enabled, `set -x` or a debug step could
+      #    expose the literal in the run log on every PR run. Even
+      #    knowing the SoftHSM2 PIN of a CI-only token is harmless in
+      #    isolation, leaking PIN literals trains operators that PIN
+      #    leakage is fine — a habit that costs us when the same
+      #    workflow shape is copied for a real-secret context.
+      #
+      # The promotion checklist in `.handoff/v1.11-handoff.md` Scope A
+      # section is the canonical owner of these prereqs.
+      - uses: actions/checkout@v4
+
+      - name: Install SoftHSM2 + opensc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y softhsm2 opensc
+
+      - name: Initialise throwaway SoftHSM2 token
+        run: |
+          # Use a per-workflow tokendir so two parallel runs of this
+          # workflow do not race on /var/lib/softhsm. `softhsm2-util
+          # --init-token --free` picks the first uninitialised slot,
+          # which on a fresh install is slot 0 (numerically); the
+          # actual slot id we need (a 32-bit integer assigned by
+          # SoftHSM2 on init) is read out of `--show-slots` below
+          # because SoftHSM2 deliberately randomises it to discourage
+          # hardcoding.
+          mkdir -p "${RUNNER_TEMP}/softhsm-tokens"
+          cat > "${RUNNER_TEMP}/softhsm2.conf" <<EOF
+          directories.tokendir = ${RUNNER_TEMP}/softhsm-tokens
+          objectstore.backend = file
+          log.level = INFO
+          slots.removable = false
+          EOF
+          export SOFTHSM2_CONF="${RUNNER_TEMP}/softhsm2.conf"
+          softhsm2-util --init-token --free \
+            --label "${SOFTHSM2_TOKEN_LABEL}" \
+            --pin "${SOFTHSM2_PIN}" \
+            --so-pin "${SOFTHSM2_SO_PIN}"
+          # Capture the assigned slot id for the test runtime env.
+          SLOT_ID=$(softhsm2-util --show-slots \
+            | awk '/^Slot [0-9]+/{slot=$2} /Label:[[:space:]]+'"${SOFTHSM2_TOKEN_LABEL}"'$/{print slot; exit}')
+          if [ -z "${SLOT_ID}" ]; then
+            echo "FATAL: could not resolve slot id for token ${SOFTHSM2_TOKEN_LABEL}"
+            softhsm2-util --show-slots
+            exit 1
+          fi
+          echo "SOFTHSM2_CONF=${RUNNER_TEMP}/softhsm2.conf" >> "$GITHUB_ENV"
+          echo "ATLAS_HSM_PKCS11_LIB=/usr/lib/softhsm/libsofthsm2.so" >> "$GITHUB_ENV"
+          echo "ATLAS_HSM_SLOT=${SLOT_ID}" >> "$GITHUB_ENV"
+          PIN_FILE="${RUNNER_TEMP}/atlas-hsm.pin"
+          printf '%s' "${SOFTHSM2_PIN}" > "${PIN_FILE}"
+          chmod 0400 "${PIN_FILE}"
+          echo "ATLAS_HSM_PIN_FILE=${PIN_FILE}" >> "$GITHUB_ENV"
+          # The byte-equivalence test's runtime gate. Set to the literal
+          # "1" the test expects; any other value (or unset) skips.
+          echo "ATLAS_TEST_HSM_BYTE_EQUIV=1" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: cargo test (HSM byte-equivalence)
+        # Single test binary, single test invocation — keeps the failure
+        # diagnostic isolated from the rest of `cargo test`. The test
+        # itself owns the SoftHSM2 import + extract + destroy cycle; CI
+        # only provides the env. `--test hsm_byte_equivalence` selects
+        # the integration-test file written for this purpose; the
+        # `--features hsm` brings in cryptoki.
+        #
+        # `--test-threads=1` is mandatory: the binary contains two
+        # tests that each call `Pkcs11::new` + `C_Initialize`. PKCS#11's
+        # `C_Initialize` is process-global (per the v3.0 spec §5.4), and
+        # SoftHSM2 returns `CKR_CRYPTOKI_ALREADY_INITIALIZED` if a second
+        # thread races a fresh init while the first holds the cryptoki
+        # session. Forcing serial test execution sidesteps the race
+        # without pulling `serial_test` into dev-deps.
+        run: cargo test -p atlas-signer --features hsm --test hsm_byte_equivalence -- --nocapture --test-threads=1
+
+      - name: cargo test (HSM operational sanity)
+        # Re-run with the runtime gate cleared to confirm the SKIP path
+        # is exercised cleanly. Defends against a future change that
+        # accidentally makes the HSM-dependent tests run unconditionally
+        # on dev machines without SoftHSM2. Also pinned to a single
+        # thread for parity with the load-bearing run above — even
+        # though both tests SKIP in this configuration, keeping the
+        # invocation identical means the SKIP-path coverage matches
+        # the real-path execution shape.
+        env:
+          ATLAS_TEST_HSM_BYTE_EQUIV: ''
+        run: cargo test -p atlas-signer --features hsm --test hsm_byte_equivalence -- --nocapture --test-threads=1
