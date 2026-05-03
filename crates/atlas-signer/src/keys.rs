@@ -74,88 +74,6 @@ use zeroize::Zeroizing;
 /// test below catches any byte-level drift in the seed at CI time.
 pub const DEV_MASTER_SEED: [u8; 32] = *b"atlas-master-seed-v1-dev-001-00\n";
 
-/// Environment variable that opts an `atlas-signer` invocation OUT of
-/// the dev master seed. Set to `1` in any environment where running
-/// with the source-committed `DEV_MASTER_SEED` would be a security
-/// failure (production, staging touching real customer data, audit
-/// rehearsals against the real key roster).
-///
-/// V1.9 had no sealed-seed loader, so `production_gate` returned an
-/// error to refuse every per-tenant subcommand instead of silently
-/// using the public dev key. V1.10 wave 2 ships the sealed-seed loader
-/// at [`crate::hsm`]; the canonical V1.10 entry point is
-/// [`master_seed_loader`], which dispatches to the PKCS#11 backend
-/// when the HSM env trio is set and otherwise falls through to the
-/// V1.10 wave-1 [`master_seed_gate`] (positive opt-in for the dev
-/// seed). `production_gate` survives as the V1.9 paranoia layer
-/// nested inside [`master_seed_gate_with`].
-pub const PRODUCTION_GATE_ENV: &str = "ATLAS_PRODUCTION";
-
-/// Refuse to use `DEV_MASTER_SEED` if the environment marks this
-/// invocation as production. Returns an error message suitable for
-/// stderr.
-///
-/// The gate fires only on the byte-exact value `"1"`. Any other value
-/// (unset, empty, `"0"`, `"true"`, `"yes"`, `"on"`, `"1 "` with
-/// trailing whitespace, …) allows the dev seed — V1.9 dev/CI
-/// environments run with the env var unset; production rollouts set
-/// `=1` and configure the V1.10 wave-2 sealed-seed loader
-/// (`ATLAS_HSM_PKCS11_LIB` / `ATLAS_HSM_SLOT` / `ATLAS_HSM_PIN_FILE`,
-/// see [`crate::hsm`]) to re-enable per-tenant commands.
-///
-/// **Operator footgun (documented in `OPERATOR-RUNBOOK.md` §1):** the
-/// strict-`"1"` recognition is a deployment trap waiting for someone
-/// who reflexively writes `ATLAS_PRODUCTION=true` (a common K8s/Docker
-/// idiom). That value silently falls through and the dev seed signs.
-/// V1.10 will replace this gate with positive opt-in semantics; until
-/// then, deploy automation must verify the env literally equals `1`.
-///
-/// Implementation: forwards to `production_gate_with(|name|
-/// std::env::var(name).ok())`. Tests use the injection form to avoid
-/// mutating the process environment from inside a parallel cargo
-/// runner (cargo defaults to a thread pool, so `std::env::set_var`
-/// between tests is a data race). The injection seam also foreshadows
-/// V1.10: the sealed-seed loader will inject a seed source the same
-/// way this gate injects an env source.
-///
-/// **V1.10 status:** `production_gate` is no longer the binary's
-/// hot-path entry point. [`master_seed_gate`] subsumes it as the
-/// canonical V1.10 gate (calling `production_gate_with` internally
-/// for the V1.9 paranoia layer). The no-arg form survives for
-/// V1.9 backwards compat and as a stable point that external
-/// embedders (and the in-tree V1.10 `crate::hsm` loader's preflight)
-/// can depend on. Now part of the lib's public surface, so a
-/// missing-call lint no longer fires here — the `#[expect(dead_code)]`
-/// shim from V1.9 was dropped during the V1.10 lib refactor.
-pub fn production_gate() -> Result<(), String> {
-    production_gate_with(|name| std::env::var(name).ok())
-}
-
-/// Test-injection form of `production_gate`. Takes an env reader (a
-/// pure closure mapping a variable name to its optional value) so test
-/// code can drive the gate without touching the global process env.
-///
-/// Public-but-`pub(crate)`-spirit: keep this on the binary's surface
-/// for future in-crate callers (the V1.10 HSM loader will reuse the
-/// same injection style for its seed-source lookup) while signalling
-/// that the gate is the canonical entry point — external embedders
-/// should call `production_gate`, not this one.
-pub fn production_gate_with<F>(env: F) -> Result<(), String>
-where
-    F: Fn(&str) -> Option<String>,
-{
-    match env(PRODUCTION_GATE_ENV).as_deref() {
-        Some("1") => Err(format!(
-            "{PRODUCTION_GATE_ENV}=1 set, but atlas-signer is using the source-committed \
-             DEV_MASTER_SEED. Refusing to derive per-tenant keys against a public dev seed. \
-             V1.10 wave 2 ships a sealed-seed loader at crate::hsm — configure the env trio \
-             (ATLAS_HSM_PKCS11_LIB, ATLAS_HSM_SLOT, ATLAS_HSM_PIN_FILE) and rebuild with \
-             --features hsm. See docs/OPERATOR-RUNBOOK.md §1 for the import ceremony."
-        )),
-        _ => Ok(()),
-    }
-}
-
 /// V1.10 positive-opt-in environment variable. The dev master seed
 /// is now opt-in: an operator must set this variable to a recognised
 /// truthy value before any per-tenant subcommand will sign.
@@ -166,32 +84,37 @@ where
 ///
 /// Anything else — including the env var being unset, empty, or set
 /// to `"0"`, `"false"`, `"no"`, `"off"`, or any other string — fails
-/// the gate. This is the inverse of [`PRODUCTION_GATE_ENV`]: V1.9
-/// asked operators to opt OUT of the dev seed (`ATLAS_PRODUCTION=1`
-/// blocks); V1.10 asks them to opt IN (`ATLAS_DEV_MASTER_SEED=1`
-/// allows). The default is now production-safe.
+/// the gate. The default is production-safe (refuses).
+///
+/// **V1.12 removal note.** V1.9–V1.11 layered a defence-in-depth
+/// `ATLAS_PRODUCTION=1` "paranoia" gate ahead of this opt-in: setting
+/// it refused the dev seed regardless of the opt-in. V1.12 removes
+/// the paranoia gate entirely — its literal-`"1"`-only recognition was
+/// a documented operator footgun, the V1.10+ positive opt-in covers
+/// the same security property without it, and the wave-2 HSM trio
+/// (`ATLAS_HSM_PKCS11_LIB` / `ATLAS_HSM_SLOT` / `ATLAS_HSM_PIN_FILE`)
+/// is now the production audit signal. `ATLAS_PRODUCTION` is silently
+/// ignored from V1.12 onwards.
 pub const DEV_MASTER_SEED_OPT_IN_ENV: &str = "ATLAS_DEV_MASTER_SEED";
 
-/// V1.10 master-seed gate. Returns the [`MasterSeedHkdf`] impl this
-/// invocation should use, or an error message suitable for stderr.
+/// V1.10 master-seed gate (V1.12-simplified). Returns the
+/// [`MasterSeedHkdf`] impl this invocation should use, or an error
+/// message suitable for stderr.
 ///
-/// **Layered checks (defence-in-depth):**
-///   1. **V1.9 paranoia:** if `ATLAS_PRODUCTION=1`, refuse the dev
-///      seed regardless of any V1.10 opt-in. An operator who
-///      explicitly says "this is production" overrides everything;
-///      this preserves V1.9 deployment safety habits across the
-///      V1.9→V1.10 transition.
-///   2. **V1.10 positive opt-in:** require `ATLAS_DEV_MASTER_SEED`
-///      to be a recognised truthy value (`1`, `true`, `yes`, `on`,
-///      case-insensitive). Anything else refuses.
-///   3. **Sealed-seed lookup (V1.10 wave 2, shipped):** lives in
-///      [`master_seed_loader`]. When the HSM env trio
-///      (`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`)
-///      is set, the loader returns
-///      [`crate::hsm::pkcs11::Pkcs11MasterSeedHkdf`] instead of
-///      `DevMasterSeedHkdf` and the gate's layers 1–2 are not
-///      consulted (no dev-seed code path). HSM init failure is fatal
-///      — there is no silent fallback to the dev seed.
+/// **Single check (V1.12):** require `ATLAS_DEV_MASTER_SEED` to be a
+/// recognised truthy value (`1`, `true`, `yes`, `on`, case-
+/// insensitive, surrounding whitespace tolerated). Anything else
+/// refuses. The V1.9-era `ATLAS_PRODUCTION` paranoia layer was
+/// removed in V1.12 — see [`DEV_MASTER_SEED_OPT_IN_ENV`].
+///
+/// **Sealed-seed lookup (V1.10 wave 2, shipped):** lives in
+/// [`master_seed_loader`]. When the HSM env trio
+/// (`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`)
+/// is set, the loader returns
+/// [`crate::hsm::pkcs11::Pkcs11MasterSeedHkdf`] instead of
+/// `DevMasterSeedHkdf` and this gate is not consulted (no dev-seed
+/// code path). HSM init failure is fatal — there is no silent
+/// fallback to the dev seed.
 ///
 /// **Why not auto-detect a sealed seed source?** Explicit opt-in
 /// surfaces the choice in the operator's deploy manifest. An
@@ -201,7 +124,7 @@ pub const DEV_MASTER_SEED_OPT_IN_ENV: &str = "ATLAS_DEV_MASTER_SEED";
 ///
 /// **Why a strict allow-list of truthy values?** V1.9 had a
 /// documented operator footgun: `ATLAS_PRODUCTION=true` silently
-/// allowed the dev seed (only literal `"1"` blocked). V1.10 inverts
+/// allowed the dev seed (only literal `"1"` blocked). V1.10 inverted
 /// the polarity AND the allow-list logic so the safe direction is
 /// the default direction: a typo on opt-in still refuses, instead
 /// of silently allowing.
@@ -223,32 +146,26 @@ pub fn master_seed_gate() -> Result<DevMasterSeedHkdf, String> {
 /// so test code can drive the gate without touching the global
 /// process env.
 ///
-/// Same injection style as [`production_gate_with`]; reuses the
-/// same closure shape so V1.10 callers can supply a single env
-/// source for both the V1.9 paranoia check and the V1.10 opt-in.
+/// Reuses the same closure shape as the wave-2 / wave-3 loaders so a
+/// single env source can drive every gate from a single test fixture.
 pub fn master_seed_gate_with<F>(env: F) -> Result<DevMasterSeedHkdf, String>
 where
     F: Fn(&str) -> Option<String>,
 {
-    // Layer 1: V1.9 paranoia. If the operator says this is
-    // production, refuse the dev seed regardless of opt-in.
-    production_gate_with(&env)?;
-
-    // Layer 2: V1.10 positive opt-in.
     let raw = env(DEV_MASTER_SEED_OPT_IN_ENV).unwrap_or_default();
     let normalised = raw.trim().to_ascii_lowercase();
     match normalised.as_str() {
         "1" | "true" | "yes" | "on" => Ok(DevMasterSeedHkdf),
         _ => Err(format!(
             "{DEV_MASTER_SEED_OPT_IN_ENV} not set to a recognised truthy value \
-             (got {raw:?}). V1.10 inverts the V1.9 gate: the source-committed \
-             DEV_MASTER_SEED now requires positive opt-in. Set \
-             {DEV_MASTER_SEED_OPT_IN_ENV}=1 (or true/yes/on, case-insensitive) \
-             in dev/CI environments. Production should use the V1.10 wave-2 \
-             sealed-seed loader: configure the env trio \
-             (ATLAS_HSM_PKCS11_LIB, ATLAS_HSM_SLOT, ATLAS_HSM_PIN_FILE) and \
-             rebuild with --features hsm. See docs/OPERATOR-RUNBOOK.md §1 \
-             for the V1.9→V1.10 migration and the HSM import ceremony."
+             (got {raw:?}). The source-committed DEV_MASTER_SEED requires \
+             positive opt-in. Set {DEV_MASTER_SEED_OPT_IN_ENV}=1 (or \
+             true/yes/on, case-insensitive) in dev/CI environments. \
+             Production should use the V1.10 wave-2 sealed-seed loader: \
+             configure the env trio (ATLAS_HSM_PKCS11_LIB, ATLAS_HSM_SLOT, \
+             ATLAS_HSM_PIN_FILE) and rebuild with --features hsm. See \
+             docs/OPERATOR-RUNBOOK.md §1 for the gate semantics and the \
+             HSM import ceremony."
         )),
     }
 }
@@ -286,48 +203,16 @@ pub fn master_seed_loader() -> Result<Box<dyn MasterSeedHkdf>, String> {
 /// [`crate::hsm::config::HsmConfig::from_env`] — so a single env source
 /// drives both the HSM trio parse and the dev-seed gate.
 ///
-/// Forwards to [`master_seed_loader_with_writer`] with `std::io::stderr()`
-/// as the deprecation-warning sink. Tests that need to assert on the
-/// warning content (or want to silence it during noise-sensitive runs)
-/// should call `master_seed_loader_with_writer` directly with a
-/// `Vec<u8>` or [`std::io::sink`].
+/// **V1.12 simplification.** V1.11 split this into a writer-form
+/// (`master_seed_loader_with_writer`) so the `ATLAS_PRODUCTION`
+/// deprecation warning could be captured in tests. The deprecation
+/// warning was the writer's only consumer; with `ATLAS_PRODUCTION`
+/// removed in V1.12, the writer parameter has no purpose and the
+/// indirection collapsed back into a single function.
 pub fn master_seed_loader_with<F>(env: F) -> Result<Box<dyn MasterSeedHkdf>, String>
 where
     F: Fn(&str) -> Option<String>,
 {
-    master_seed_loader_with_writer(env, &mut std::io::stderr())
-}
-
-/// V1.11 L-8 entry point. Same dispatch logic as
-/// [`master_seed_loader_with`], but takes a `&mut dyn Write` for the
-/// deprecation warning emitted when [`PRODUCTION_GATE_ENV`] is set.
-///
-/// **Why a writer parameter?** Test code can capture the warning text
-/// in a `Vec<u8>` and assert on it, or pass [`std::io::sink`] to drop
-/// the warning entirely (useful when a test is exercising a deliberately
-/// deprecated configuration and the noise on stderr would clutter the
-/// test runner output). Production callers route through
-/// [`master_seed_loader_with`] which forwards to `std::io::stderr()`.
-///
-/// **Why the warning?** The HSM trio (V1.10 wave 2) is now the
-/// production audit signal. `ATLAS_PRODUCTION=1` carried the V1.9
-/// paranoia gate forward as belt-and-braces, but it has the
-/// literal-`"1"`-only recognition footgun (an operator who reflexively
-/// writes `ATLAS_PRODUCTION=true` gets silent fallthrough). V1.11
-/// emits a deprecation warning whenever the env var is observed with
-/// non-whitespace content; V1.12 will remove the gate entirely. The
-/// warning fires *before* the layered gates so it surfaces even when
-/// the gate ultimately refuses the configuration.
-pub fn master_seed_loader_with_writer<F, W>(
-    env: F,
-    warn_out: &mut W,
-) -> Result<Box<dyn MasterSeedHkdf>, String>
-where
-    F: Fn(&str) -> Option<String>,
-    W: std::io::Write,
-{
-    emit_atlas_production_deprecation_if_set(&env, warn_out);
-
     // Layer 1: HSM trio. If any of the three env vars is set, we
     // commit to sealed-seed mode; partial trios refuse via
     // `HsmConfig::from_env`.
@@ -340,48 +225,6 @@ where
     // Layer 2: dev seed via the V1.10 wave-1 gate.
     let dev = master_seed_gate_with(&env)?;
     Ok(Box::new(dev))
-}
-
-/// V1.11 L-8 — emit the [`PRODUCTION_GATE_ENV`] deprecation warning to
-/// `warn_out` when the env var is observed with non-whitespace content.
-///
-/// **Why factored out.** V1.11 wave-3 Phase C added a sibling loader
-/// ([`crate::workspace_signer::workspace_signer_loader_with_writer`])
-/// that takes the wave-3 sealed per-workspace path before reaching the
-/// wave-2 master-seed loader. Without this helper the wave-3 path would
-/// silently bypass the deprecation warning — operator who sets BOTH
-/// `ATLAS_PRODUCTION=1` and `ATLAS_HSM_WORKSPACE_SIGNER=1` would never
-/// see the V1.12-removal notice. The helper fires the warning *before*
-/// any gate check so the operator sees the migration notice regardless
-/// of which loader path or layer is ultimately taken.
-///
-/// The `trim().is_empty()` filter ignores misconfigured pipelines that
-/// emit `ATLAS_PRODUCTION=` with no value — only meaningful settings
-/// trip the warning. Writes via `writeln!` and ignores write errors —
-/// a failed write to stderr should not block the loader.
-pub(crate) fn emit_atlas_production_deprecation_if_set<F, W>(env: &F, warn_out: &mut W)
-where
-    F: Fn(&str) -> Option<String>,
-    W: std::io::Write,
-{
-    if env(PRODUCTION_GATE_ENV)
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false)
-    {
-        let _ = writeln!(
-            warn_out,
-            "warning: {PRODUCTION_GATE_ENV} is deprecated and scheduled for \
-             removal in V1.12. V1.10 inverted the master-seed gate to positive \
-             opt-in: the dev seed now requires {DEV_MASTER_SEED_OPT_IN_ENV}=1 \
-             (truthy values: 1/true/yes/on, case-insensitive), which makes the \
-             V1.9 paranoia check redundant. For production, configure the HSM \
-             trio ({}, {}, {}) — that is the V1.10+ production audit signal. \
-             See docs/OPERATOR-RUNBOOK.md §1.",
-            crate::hsm::config::PKCS11_LIB_ENV,
-            crate::hsm::config::SLOT_ENV,
-            crate::hsm::config::PIN_FILE_ENV,
-        );
-    }
 }
 
 /// Maximum byte length of a `workspace_id`. Bounding the input here
@@ -605,11 +448,11 @@ pub enum MasterSeedError {
 /// This was the V1.9 production path. V1.10 wave 2 replaces it at the
 /// call site with [`crate::hsm::pkcs11::Pkcs11MasterSeedHkdf`] when
 /// the HSM env trio is set; [`master_seed_loader`] handles the
-/// dispatch so the binary never sees the dev seed in HSM mode.
-/// [`production_gate`] continues to refuse the dev seed when
-/// `ATLAS_PRODUCTION=1`, layered inside [`master_seed_gate_with`] —
-/// so even with the HSM trio absent, the dev impl can never reach
-/// a production per-tenant signing path.
+/// dispatch so the binary never sees the dev seed in HSM mode. The
+/// V1.10 positive opt-in ([`master_seed_gate`], gated on
+/// `ATLAS_DEV_MASTER_SEED`) refuses by default, so even with the HSM
+/// trio absent, the dev impl never reaches a production per-tenant
+/// signing path without explicit operator intent.
 ///
 /// Zero-sized: cloning and copying are free; the impl is stateless
 /// because the seed lives in the static [`DEV_MASTER_SEED`] constant.
@@ -671,9 +514,8 @@ pub fn derive_workspace_signing_key_via<H: MasterSeedHkdf + ?Sized>(
 /// [`MasterSeedHkdf`] trait, with no gate check.
 ///
 /// V1.9 had `derive_workspace_signing_key_default` on the binary's
-/// hot path (gated by `production_gate`). V1.10 inverts the gate to
-/// positive opt-in via [`master_seed_gate`]; the binary now selects
-/// the trait impl through the gate and calls
+/// hot path. V1.10 introduced positive opt-in via [`master_seed_gate`];
+/// the binary now selects the trait impl through the gate and calls
 /// [`derive_workspace_signing_key_via`] directly. This convenience
 /// remains for the in-crate test harness (golden vectors, signature
 /// round-trips, validate_workspace_id smoke).
@@ -1110,87 +952,16 @@ mod tests {
         }
     }
 
-    /// Helper: build an env reader that returns `value` for `key` and
-    /// `None` for everything else. Keeps the test bodies tight and
-    /// makes the data-vs-policy separation visible.
-    fn env_with(key: &'static str, value: Option<&'static str>) -> impl Fn(&str) -> Option<String> {
-        move |name| {
-            if name == key { value.map(|s| s.to_string()) } else { None }
-        }
-    }
-
-    // The pre-V1.10-warm-up tests for this gate flipped the process env
-    // via `unsafe { std::env::set_var }`. Cargo defaults to a thread
-    // pool per test binary, so two such tests racing in the same
-    // module corrupt each other's view of the variable. The injection
-    // form below is race-free and also pre-builds the V1.10 seam: when
-    // the HSM loader needs to inject its own seed source, it will use
-    // the same closure pattern.
-
-    #[test]
-    fn production_gate_blocks_when_env_set_to_one() {
-        let result = production_gate_with(env_with(PRODUCTION_GATE_ENV, Some("1")));
-        assert!(result.is_err(), "production gate must reject ATLAS_PRODUCTION=1");
-        let msg = result.unwrap_err();
-        assert!(
-            msg.contains("DEV_MASTER_SEED"),
-            "error must name the constant the operator needs to grep for; got {msg:?}",
-        );
-    }
-
-    #[test]
-    fn production_gate_allows_when_env_unset() {
-        let result = production_gate_with(env_with(PRODUCTION_GATE_ENV, None));
-        assert!(result.is_ok(), "production gate must allow when env unset");
-    }
-
-    #[test]
-    fn production_gate_allows_when_env_empty() {
-        // Empty value is treated identically to unset — only the
-        // literal "1" trips the gate. V1.9 design choice: a
-        // misconfigured pipeline that emits `ATLAS_PRODUCTION=` (with
-        // no value) should not silently behave like production-gated;
-        // it should behave like dev. V1.10 inverts this entirely
-        // (positive opt-in), so this test pins the V1.9 behaviour
-        // before the inversion lands.
-        let result = production_gate_with(env_with(PRODUCTION_GATE_ENV, Some("")));
-        assert!(result.is_ok(), "empty ATLAS_PRODUCTION must not trip the V1.9 gate");
-    }
-
-    #[test]
-    fn production_gate_allows_truthy_strings_other_than_one() {
-        // Conservative-by-V1.9-design: only "1" trips the gate. The
-        // OPERATOR-RUNBOOK warns prominently that "true", "yes", "on"
-        // do NOT trip it today; documenting that contract via test so
-        // a future "be liberal in what you accept" patch trips CI
-        // before reaching production.
-        for v in ["0", "true", "yes", "on", "production", "TRUE", "1 "] {
-            let result = production_gate_with(env_with(PRODUCTION_GATE_ENV, Some(v)));
-            assert!(
-                result.is_ok(),
-                "value {v:?} must not trip the V1.9 gate (only literal \"1\" does)",
-            );
-        }
-    }
-
-    #[test]
-    fn production_gate_default_uses_process_env() {
-        // Sanity: the public `production_gate()` is the
-        // `production_gate_with(std::env::var)` wrapper. We don't
-        // mutate the env here — we just confirm the wrapper compiles
-        // and returns something. The actual policy is covered by the
-        // injection-form tests above.
-        let _ = production_gate();
-    }
-
     use crate::test_support::env_pairs;
 
-    // V1.10 master_seed_gate — positive opt-in semantics, layered on
-    // top of V1.9 ATLAS_PRODUCTION paranoia. The tests below pin both
-    // the security boundary (refuse-by-default, refuse-on-typo,
-    // refuse-when-production-flag-set) and the operator UX (accept
-    // common truthy spellings case-insensitively, tolerate stray
-    // whitespace from quoting/escaping in shell scripts).
+    // V1.10 master_seed_gate — positive opt-in semantics. V1.12
+    // removed the V1.9 `ATLAS_PRODUCTION` paranoia layer (it had a
+    // documented "only literal `1` trips it" footgun, and the
+    // positive opt-in covers the same security property). Tests
+    // below pin the surviving boundary (refuse-by-default,
+    // refuse-on-typo) and the operator UX (accept common truthy
+    // spellings case-insensitively, tolerate stray whitespace from
+    // quoting/escaping in shell scripts).
 
     #[test]
     fn master_seed_gate_refuses_when_opt_in_unset() {
@@ -1288,23 +1059,27 @@ mod tests {
     }
 
     #[test]
-    fn master_seed_gate_atlas_production_overrides_opt_in() {
-        // Defence-in-depth: if the operator has set ATLAS_PRODUCTION=1
-        // (V1.9 sense — "this is production, refuse dev seed"), that
-        // refusal MUST stand even if ATLAS_DEV_MASTER_SEED=1 is also
-        // set. A misconfigured pipeline that ships both flags should
-        // not silently degrade to dev-seed signing.
-        let result = master_seed_gate_with(env_pairs(&[
-            (PRODUCTION_GATE_ENV, "1"),
-            (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
-        ]));
-        let err = result.expect_err(
-            "ATLAS_PRODUCTION=1 must override the V1.10 opt-in (V1.9 paranoia layer)",
-        );
-        assert!(
-            err.contains(PRODUCTION_GATE_ENV),
-            "error must surface the V1.9 paranoia variant first; got {err:?}",
-        );
+    fn master_seed_gate_ignores_atlas_production_v1_12() {
+        // V1.12 removal pinning: the V1.9 `ATLAS_PRODUCTION` paranoia
+        // var is silently ignored at the gate. With the positive
+        // opt-in set, NO value of `ATLAS_PRODUCTION` may refuse — a
+        // regression that re-introduced the paranoia gate (whether
+        // strict-"1"-only like V1.9 or any-non-empty like a sloppy
+        // refactor) would be caught by at least one of these probes.
+        // The value sweep mirrors `master_seed_loader_ignores_atlas_production_v1_12`
+        // so the gate test is self-contained and does not depend on
+        // the loader test for value-coverage.
+        for value in ["1", "true", "false", "yes", "0", "anything"] {
+            let result = master_seed_gate_with(env_pairs(&[
+                ("ATLAS_PRODUCTION", value),
+                (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+            ]));
+            assert!(
+                result.is_ok(),
+                "ATLAS_PRODUCTION={value:?} must be ignored from V1.12 onwards; \
+                 the positive opt-in is now the sole dev-seed gate",
+            );
+        }
     }
 
     #[test]
@@ -1447,150 +1222,23 @@ mod tests {
     }
 
     #[test]
-    fn master_seed_loader_atlas_production_overrides_dev_opt_in() {
-        // Layered defence carries through to the loader: even with
-        // ATLAS_DEV_MASTER_SEED=1 set, ATLAS_PRODUCTION=1 still
-        // refuses the dev path. This pins the V1.9 paranoia layer's
-        // behaviour through the loader-dispatch wrapper.
-        //
-        // V1.11 L-8: this test now uses `master_seed_loader_with_writer`
-        // with `std::io::sink()` to swallow the deprecation warning,
-        // keeping cargo test output uncluttered while still exercising
-        // the gate refusal. The warning emission itself is covered by
-        // dedicated tests below.
-        let mut sink = std::io::sink();
-        let result = master_seed_loader_with_writer(
-            env_pairs(&[
-                (PRODUCTION_GATE_ENV, "1"),
-                (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
-            ]),
-            &mut sink,
-        );
-        let err = match result {
-            Ok(_) => panic!("expected loader to refuse with ATLAS_PRODUCTION=1"),
-            Err(e) => e,
-        };
-        assert!(
-            err.contains(PRODUCTION_GATE_ENV),
-            "ATLAS_PRODUCTION=1 must override the dev opt-in even through the loader; \
-             got {err:?}",
-        );
-    }
-
-    // V1.11 L-8 — ATLAS_PRODUCTION deprecation warning. Verifies the
-    // writer-based seam emits the warning text under the documented
-    // conditions and stays silent in the unset / empty cases.
-
-    #[test]
-    fn master_seed_loader_emits_atlas_production_deprecation_warning() {
-        // Whenever ATLAS_PRODUCTION is observed with non-whitespace
-        // content, the loader must write a deprecation warning to the
-        // supplied writer BEFORE any gate check runs (so the operator
-        // sees the migration notice even on the gate-refuses path).
-        // We pair it with ATLAS_DEV_MASTER_SEED=1 here so the gate
-        // ultimately refuses (production_gate fires); the test asserts
-        // only on the warning content, not the loader return value.
-        let mut warnings = Vec::<u8>::new();
-        let _ = master_seed_loader_with_writer(
-            env_pairs(&[
-                (PRODUCTION_GATE_ENV, "1"),
-                (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
-            ]),
-            &mut warnings,
-        );
-        let text = String::from_utf8(warnings).expect("warning text must be UTF-8");
-        assert!(
-            text.contains(PRODUCTION_GATE_ENV),
-            "warning must name the env var so operators can grep for it; got {text:?}",
-        );
-        assert!(
-            text.contains("deprecated"),
-            "warning must label the var as deprecated; got {text:?}",
-        );
-        assert!(
-            text.contains("V1.12"),
-            "warning must announce the removal target so operators have a deprecation \
-             window; got {text:?}",
-        );
-        assert!(
-            text.contains(DEV_MASTER_SEED_OPT_IN_ENV),
-            "warning must reference the V1.10 positive-opt-in env var (the replacement \
-             for the V1.9 paranoia layer); got {text:?}",
-        );
-        assert!(
-            text.contains(crate::hsm::config::PKCS11_LIB_ENV),
-            "warning must reference the HSM trio (the V1.10+ production audit signal); \
-             got {text:?}",
-        );
-        assert!(
-            text.contains("OPERATOR-RUNBOOK"),
-            "warning must point operators at the migration doc; got {text:?}",
-        );
-    }
-
-    #[test]
-    fn master_seed_loader_no_warning_when_atlas_production_unset() {
-        // Default deployment (ATLAS_PRODUCTION not in env): no
-        // deprecation noise. The warning is only meaningful when the
-        // operator has actively set the deprecated var.
-        let mut warnings = Vec::<u8>::new();
-        let _ = master_seed_loader_with_writer(
-            env_pairs(&[(DEV_MASTER_SEED_OPT_IN_ENV, "1")]),
-            &mut warnings,
-        );
-        assert!(
-            warnings.is_empty(),
-            "no warning expected when ATLAS_PRODUCTION is unset; got {:?}",
-            String::from_utf8_lossy(&warnings),
-        );
-    }
-
-    #[test]
-    fn master_seed_loader_no_warning_when_atlas_production_empty_or_whitespace() {
-        // Misconfigured pipelines that emit `ATLAS_PRODUCTION=` (with no
-        // value) or `ATLAS_PRODUCTION="   "` are NOT operator intent to
-        // mark production — the V1.9 production_gate already treats
-        // these as unset (only literal `"1"` trips the gate). The
-        // deprecation warning mirrors that semantic: don't blame the
-        // operator for a pipeline-emitted empty value they didn't write.
-        for value in ["", "   ", "\t\n"] {
-            let mut warnings = Vec::<u8>::new();
-            let _ = master_seed_loader_with_writer(
-                env_pairs(&[
-                    (PRODUCTION_GATE_ENV, value),
-                    (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
-                ]),
-                &mut warnings,
-            );
-            assert!(
-                warnings.is_empty(),
-                "no warning expected for pipeline-empty ATLAS_PRODUCTION={value:?}; \
-                 got {:?}",
-                String::from_utf8_lossy(&warnings),
-            );
-        }
-    }
-
-    #[test]
-    fn master_seed_loader_warning_fires_for_any_non_empty_value() {
-        // Mirror the V1.10 master_seed_gate's tolerance: V1.9 operators
-        // who reflexively wrote ATLAS_PRODUCTION=true (the documented
-        // V1.9 footgun) get the same deprecation notice as those who
-        // wrote =1. The warning is about the env var's existence, not
-        // about whether the gate would fire on the value.
+    fn master_seed_loader_ignores_atlas_production_v1_12() {
+        // V1.12 removal pinning at the loader level: the V1.9
+        // `ATLAS_PRODUCTION` paranoia env var is silently ignored.
+        // With the V1.10 positive opt-in set and no HSM trio, the
+        // loader MUST succeed and return the dev impl regardless of
+        // any value of ATLAS_PRODUCTION. A regression that
+        // re-introduced the paranoia gate would re-introduce the
+        // literal-"1"-only footgun this test guards against.
         for value in ["1", "true", "false", "yes", "0", "anything"] {
-            let mut warnings = Vec::<u8>::new();
-            let _ = master_seed_loader_with_writer(
-                env_pairs(&[
-                    (PRODUCTION_GATE_ENV, value),
-                    (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
-                ]),
-                &mut warnings,
-            );
-            let text = String::from_utf8(warnings).expect("UTF-8");
+            let result = master_seed_loader_with(env_pairs(&[
+                ("ATLAS_PRODUCTION", value),
+                (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+            ]));
             assert!(
-                text.contains("deprecated"),
-                "warning must fire for ATLAS_PRODUCTION={value:?}; got {text:?}",
+                result.is_ok(),
+                "ATLAS_PRODUCTION={value:?} must be ignored from V1.12 onwards; \
+                 the loader must dispatch to the dev path on the positive opt-in",
             );
         }
     }

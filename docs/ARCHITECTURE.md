@@ -1,4 +1,4 @@
-# Atlas — System Architecture (V1.9)
+# Atlas — System Architecture (V1.12)
 
 This document is the system-design reference for Atlas. It describes the
 trust property the system exists to enforce, the data model that carries
@@ -9,8 +9,12 @@ shipped), V1.6 (live Sigstore Rekor v1 submission — shipped), V1.7
 (anchor-chain tip-rotation + Sigstore shard roster — shipped), V1.8
 (precision-preserving anchor JSON pipeline + Sigstore-deferred
 coverage carve-out — shipped), V1.9 (per-tenant Atlas anchoring keys
-via HKDF-SHA256 — shipped), and V2 (full COSE_Sign1, Cedar policy
-enforcement, SPIFFE attestation).
+via HKDF-SHA256 — shipped), V1.10 (master-seed gate inversion + wave-2
+PKCS#11 sealed-seed loader — shipped), V1.11 (wave-3 sealed
+per-workspace signer via `CKM_EDDSA` — shipped), V1.12
+(`ATLAS_PRODUCTION` paranoia layer removal + ARCHITECTURE sweep —
+shipped), and V2 (full COSE_Sign1, Cedar policy enforcement, SPIFFE
+attestation).
 
 It is written for three audiences:
 
@@ -401,12 +405,19 @@ per-tenant kids are rejected. Lenient mode accepts both. V1.5–V1.8
 bundles continue to verify in lenient mode. Strict mode is the V1.9
 security boundary.
 
-**Production gate.** All V1.9 per-tenant subcommands
-(`derive-key`, `derive-pubkey`, `rotate-pubkey-bundle`, and
-`sign --derive-from-workspace`) refuse to run when
-`ATLAS_PRODUCTION=1` is set. The `DEV_MASTER_SEED` is a
-source-committed dev constant; V1.10 closes this with HSM/TPM
-sealing of the master seed.
+**Production gate (V1.9 — superseded by V1.10, removed in V1.12).**
+V1.9 shipped a *negative* paranoia gate: per-tenant subcommands
+refused to run when `ATLAS_PRODUCTION=1` was set. The opt-out
+shape was a footgun (forgetting the env var let the
+source-committed `DEV_MASTER_SEED` sign production traffic); V1.10
+inverted the gate to a positive opt-in
+(`ATLAS_DEV_MASTER_SEED=1` required to admit the dev seed) and
+shipped the wave-2 PKCS#11 sealed-seed loader. V1.12 removed the
+V1.9 paranoia layer entirely — the V1.10 positive opt-in covers
+the same security property without the literal-`"1"`-only
+recognition footgun, and the wave-2 HSM trio is now the
+production audit signal. See §7.4 for the V1.10 master-seed gate
+and §7.5 for the V1.11 wave-3 sealed per-workspace signer.
 
 **Signer-internal derivation.** The MCP hot path uses
 `atlas-signer sign --derive-from-workspace <ws>`, which derives the
@@ -429,7 +440,101 @@ ceremony, including atomic-replace and inter-operator concurrency
 responsibilities (which sit on the operator side — the signer reads
 stdin and writes stdout).
 
-### 7.4 Constant-time hash equality
+### 7.4 Master-seed gate + wave-2 sealed-seed loader (V1.10 — shipped, V1.12-simplified)
+
+V1.10 ships in two coordinated waves that together close the
+V1.9 master-seed-as-source-committed-constant residual.
+
+**Wave 1 — gate inversion (positive opt-in).** The V1.9
+negative-opt-out gate (refuse when `ATLAS_PRODUCTION=1`) is
+replaced by a positive-opt-in gate
+(`keys::master_seed_gate`): per-tenant subcommands refuse to start
+unless `ATLAS_DEV_MASTER_SEED` is a recognised truthy value (`1`,
+`true`, `yes`, `on`, ASCII case-insensitive, surrounding
+whitespace tolerated). A deployment that forgets the env var
+fails closed with an actionable error rather than silently
+signing with the source-committed dev seed.
+
+**Wave 2 — PKCS#11 sealed-seed loader.** When the HSM env trio
+(`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`)
+is set, `keys::master_seed_loader` opens the PKCS#11 module
+**first** and routes per-tenant derives through
+[`Pkcs11MasterSeedHkdf`](../crates/atlas-signer/src/hsm/pkcs11.rs)
+(gated behind the `hsm` Cargo feature). HKDF-SHA256 runs **inside**
+the HSM token via `CKM_HKDF_DERIVE`; the master seed bytes never
+enter Atlas address space. HSM open / derive failure is **fatal**
+— there is no silent fallback to the dev seed. The wave-1 gate is
+not consulted in this mode.
+
+**MasterSeedHkdf trait.** The wave-1 dev impl
+(`DevMasterSeedHkdf`) and wave-2 HSM impl
+(`Pkcs11MasterSeedHkdf`) both implement
+[`MasterSeedHkdf`](../crates/atlas-signer/src/keys.rs); per-tenant
+subcommands derive via
+`derive_workspace_signing_key_via<H: MasterSeedHkdf + ?Sized>` so
+the call sites are backend-agnostic. The buffer-out shape
+(`derive_for(info, out: &mut [u8; 32])`) is zeroize-friendly:
+sealed implementations wipe scratch space on every exit path.
+
+**V1.12 simplification.** V1.9–V1.11 layered the V1.9
+`ATLAS_PRODUCTION=1` paranoia gate ahead of the wave-1 opt-in for
+defence-in-depth. V1.12 removed it: (a) the literal-`"1"`-only
+recognition was a documented operator footgun, (b) the wave-1
+positive opt-in covers the same security property without the
+footgun, and (c) the wave-2 HSM trio is now the production audit
+signal — `env | grep ATLAS_` shows whether a deployment is
+sealed-seed (trio set, opt-in unset) or dev (trio unset, opt-in
+set). `ATLAS_PRODUCTION` is silently ignored from V1.12 onwards.
+
+See `docs/OPERATOR-RUNBOOK.md` §1 for the gate truth table and §2
+for the wave-2 HSM master-seed import ceremony.
+
+### 7.5 Wave-3 sealed per-workspace signer (V1.11 — shipped)
+
+V1.10 wave 2 sealed the *master seed* inside the HSM but the
+per-tenant Ed25519 *scalar* still transited Atlas address space
+in a `Zeroizing` buffer between the HSM-side HKDF derive and the
+dalek-side signature. V1.11 wave-3 closes that residual: when the
+operator opts in via `ATLAS_HSM_WORKSPACE_SIGNER=1` AND the HSM
+trio is set, per-workspace Ed25519 keypairs are generated **on
+the device** with `Extractable=false` and signed with `CKM_EDDSA`.
+The scalar never enters Atlas address space; only the
+ready-formed 64-byte signature crosses back into the signer
+process.
+
+**WorkspaceSigner trait.** The wave-1/wave-2 dev path
+(`DevWorkspaceSigner`, wrapping a `Box<dyn MasterSeedHkdf>`) and
+wave-3 HSM path
+([`Pkcs11WorkspaceSigner`](../crates/atlas-signer/src/hsm/pkcs11_workspace.rs))
+both implement
+[`WorkspaceSigner`](../crates/atlas-signer/src/workspace_signer.rs).
+Per-tenant subcommands route through
+`per_tenant_identity_via_signer` and `WorkspaceSigner::sign` so
+the binary's call sites are backend-agnostic across all three
+layers (dev / wave-2 / wave-3).
+
+**Three-layer dispatcher.** `workspace_signer_loader` selects the
+backend:
+1. `ATLAS_HSM_WORKSPACE_SIGNER=1` + HSM trio → wave-3
+   `Pkcs11WorkspaceSigner` (per-workspace keys live in the HSM).
+   Trio missing under this opt-in is a fail-closed refusal —
+   wave-3 has no dev fallback.
+2. HSM trio only → wave-2 `DevWorkspaceSigner` over
+   `Pkcs11MasterSeedHkdf` (master seed sealed; per-tenant
+   derive in-process).
+3. Neither → wave-1 dev path, gated on `ATLAS_DEV_MASTER_SEED=1`.
+
+**Multi-token redundancy trade-off.** Wave-2 supported "import
+the same sealed master seed into multiple tokens" for
+cross-token redundancy. Wave-3 generates each keypair with the
+device's own entropy, so two tokens cannot agree on a
+per-workspace pubkey without exporting (which `Extractable=false`
+forbids). Deployments requiring redundancy must either stay on
+wave-2 OR accept a fresh provision (= every per-tenant pubkey
+rotates) as the recovery path on token loss. See
+`docs/OPERATOR-RUNBOOK.md` §wave-3 for the migration semantics.
+
+### 7.6 Constant-time hash equality
 
 Both `pubkey_bundle_hash` and per-event `event_hash` comparisons go
 through `crate::ct::ct_eq_str`, which is `subtle::ConstantTimeEq` on
@@ -855,17 +960,23 @@ Headline:
   `format!("atlas-anchor:{trace.workspace_id}")`. Mixed legacy +
   per-tenant kids are rejected. V1.5–V1.8 bundles continue to verify in
   lenient mode.
-- **Production gate:** All V1.9 per-tenant subcommands (`derive-key`,
-  `derive-pubkey`, `rotate-pubkey-bundle`, `sign --derive-from-workspace`)
-  refuse to run when `ATLAS_PRODUCTION=1` is set. The `DEV_MASTER_SEED`
-  is a source-committed dev constant; V1.10 closes this with HSM/TPM
-  sealing.
+- **Production gate (V1.9 — superseded V1.10, removed V1.12):** All V1.9
+  per-tenant subcommands (`derive-key`, `derive-pubkey`,
+  `rotate-pubkey-bundle`, `sign --derive-from-workspace`) originally
+  refused to run when `ATLAS_PRODUCTION=1` was set. V1.10 superseded this
+  negative opt-out with a positive opt-in (`ATLAS_DEV_MASTER_SEED=1`
+  required to admit the dev seed) — see §V1.10 below. V1.12 removed the
+  `ATLAS_PRODUCTION` env var entirely (the literal-`"1"`-only recognition
+  was a documented operator footgun, and the V1.10 positive opt-in covers
+  the same security property without it). From V1.12 onwards the variable
+  is silently ignored. The `DEV_MASTER_SEED` is still a source-committed
+  dev constant; the V1.10 wave-2 HSM trio is the production replacement.
 - **Signer-internal derivation:** MCP hot path uses
   `atlas-signer sign --derive-from-workspace <ws>` — secret material is
   derived inside the signer process and never crosses the TS↔Rust
   boundary. Bundle assembly uses `atlas-signer derive-pubkey` (public
   key only). The `derive-key` subcommand (which emits the secret) is
-  ceremony-only and gated by the production gate.
+  ceremony-only and gated by the V1.10 positive opt-in.
 - **Rotate-pubkey-bundle ceremony:** `atlas-signer rotate-pubkey-bundle
   --workspace <ws>` reads a `PubkeyBundle` from stdin and emits the
   bundle with the per-tenant kid + pubkey added. Idempotent: re-runs
@@ -883,6 +994,89 @@ Headline:
   the derived public keys for two fixed workspace_ids against the
   `DEV_MASTER_SEED`, so any unintended change to the HKDF info-prefix
   or master seed trips CI before customer impact.
+
+### V1.10 — master-seed gate inversion + sealed-seed loader (shipped)
+
+- **Wave 1 — gate inversion:** Negative opt-out
+  (`ATLAS_PRODUCTION=1` → refuse) replaced by positive opt-in
+  (`ATLAS_DEV_MASTER_SEED=1` → admit dev seed; default refuses). Forgetting
+  the env var fails closed with an actionable error rather than silently
+  signing with the source-committed dev seed. Accepted truthy values:
+  `1` / `true` / `yes` / `on` (ASCII case-insensitive, surrounding
+  whitespace tolerated). Implemented via `master_seed_gate` +
+  `master_seed_loader` in `crates/atlas-signer/src/keys.rs`. See §7.4 for
+  the trust-model write-up.
+- **Wave 2 — sealed-seed loader:** PKCS#11 backend at
+  `crates/atlas-signer/src/hsm/` (gated behind the `hsm` Cargo feature)
+  closes the V1.9 master-seed residual risk. The HSM trio
+  (`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`) routes
+  HKDF-SHA256 to `CKM_HKDF_DERIVE` *inside* the HSM via the
+  `MasterSeedHkdf` trait. The master seed never enters Atlas address
+  space. HSM init failure is fatal — there is no silent fallback to the
+  dev seed when the trio is set.
+- **Trio takes precedence over dev opt-in:** When all three
+  `ATLAS_HSM_*` vars are set, the loader signs against the sealed master
+  seed inside the HSM and the dev opt-in is unreachable. From V1.10
+  wave 2 onwards the HSM trio (with `--features hsm`) is the sole
+  production audit signal.
+- **Test-driven boundary:** Loader logic accepts an injected env-reader
+  closure (`env_pairs` helper in `test_support.rs`) so the entire wave-1
+  truth table and wave-2 trio-precedence semantics are testable without
+  touching process env. CI exercises 200+ env-permutation tests across
+  the master-seed surface.
+
+### V1.11 — wave-3 sealed per-workspace signer (shipped)
+
+- **CKM_EDDSA inside HSM:** Per-workspace Ed25519 signing key is sealed
+  inside the HSM and signs via `CKM_EDDSA`. The per-workspace signing
+  key never enters Atlas address space (the V1.10 wave-2 master seed
+  is sealed; V1.11 wave-3 seals the *derived* per-workspace key as
+  well). See §7.5 for the trust-model write-up.
+- **WorkspaceSigner trait:** Two implementations behind the same trait
+  (`crates/atlas-signer/src/workspace_signer.rs`):
+  `DevWorkspaceSigner` (in-process Ed25519 over the
+  HKDF-derived seed) and `Pkcs11WorkspaceSigner` (CKM_EDDSA inside the
+  HSM, gated by `--features hsm`).
+- **Three-layer dispatcher:** `workspace_signer_loader_with` selects
+  one of three signing backends based on env: wave-3 sealed
+  (`ATLAS_HSM_WORKSPACE_SIGNER=1` + HSM trio →
+  `Pkcs11WorkspaceSigner`), wave-2 sealed-seed (HSM trio without
+  wave-3 opt-in → `DevWorkspaceSigner` over `Pkcs11MasterSeedHkdf`),
+  wave-1 dev (`ATLAS_DEV_MASTER_SEED=1` only → `DevWorkspaceSigner`
+  over `DevMasterSeedHkdf`). Every other env shape refuses to start
+  with an actionable error.
+- **Multi-token redundancy trade-off:** The wave-3 sealed signer trades
+  HKDF-mathematical determinism (wave-2) for HSM-keystore determinism
+  (wave-3): rotating to a new HSM token requires re-importing the
+  per-workspace key under the new token's wrapping key, since the
+  derived key is no longer reproducible from the master seed alone.
+  The runbook covers the two-HSM ceremony for redundancy.
+
+### V1.12 — operator-surface simplification (shipped)
+
+- **`ATLAS_PRODUCTION` env var removed.** The V1.9 negative gate became
+  the V1.10 positive opt-in; from V1.12 onwards the V1.9 variable is
+  silently ignored across the entire crate (master-seed gate, master-seed
+  loader, workspace-signer loader, and import-ceremony scripts). Three
+  reasons drove the removal: (1) the literal-`"1"`-only recognition was
+  a documented operator footgun (`ATLAS_PRODUCTION=true` silently behaved
+  as unset); (2) the V1.10 positive opt-in covers the same security
+  property without the footgun; (3) the V1.10 wave-2 HSM trio (with
+  `--features hsm`) is now the sole production audit signal. See
+  §V1.10 above and §7.4 for the trust-model write-up of the simplified
+  surface.
+- **Documentation sweep.** ARCHITECTURE.md, OPERATOR-RUNBOOK.md,
+  SECURITY-NOTES.md, and atlas-mcp-server/README.md were updated in a
+  single coherent commit so that the documented operator surface
+  matches the runtime behaviour. The runbook §1 truth tables collapsed
+  from 4→3 rows (master-seed gate) and 5→4 rows (master-seed loader);
+  the V1.9 paranoia-layer rows were removed since the runtime no
+  longer admits them.
+- **Migration:** Existing operators who still set `ATLAS_PRODUCTION=1`
+  in their deployment scripts should remove the line — V1.12 silently
+  ignores it, but leaving it in place makes audit logs misleading. The
+  V1.10 positive opt-in (`ATLAS_DEV_MASTER_SEED=1`) and the V1.10 wave-2
+  HSM trio remain the supported production-readiness signals.
 
 ### V2 — full COSE + policy + SPIFFE
 

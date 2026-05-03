@@ -16,10 +16,11 @@
 //! second audit signal — `ATLAS_HSM_PKCS11_LIB` /
 //! `ATLAS_HSM_SLOT` / `ATLAS_HSM_PIN_FILE` — that names a sealed
 //! seed source. A correctly-deployed production environment sets
-//! the HSM trio AND `ATLAS_PRODUCTION=1` AND leaves
-//! `ATLAS_DEV_MASTER_SEED` unset; an auditor reading
-//! `env | grep ATLAS_` can verify the deployment configuration in
-//! one snapshot.
+//! the HSM trio AND leaves `ATLAS_DEV_MASTER_SEED` unset (V1.12
+//! removed the V1.9 `ATLAS_PRODUCTION` paranoia layer; the HSM
+//! trio is now the sole production audit signal). An auditor
+//! reading `env | grep ATLAS_` can verify the deployment
+//! configuration in one snapshot.
 //!
 //! ## Why a feature, not a sibling crate?
 //!

@@ -61,7 +61,7 @@ use ed25519_dalek::Signer;
 use atlas_trust_core::per_tenant_kid_for;
 
 use crate::keys::{
-    derive_workspace_signing_key_via, master_seed_loader_with_writer,
+    derive_workspace_signing_key_via, master_seed_loader_with,
     validate_workspace_id, MasterSeedError, MasterSeedHkdf, PerTenantIdentity,
 };
 
@@ -441,41 +441,16 @@ pub fn workspace_signer_loader() -> Result<Box<dyn WorkspaceSigner>, String> {
 /// trio parse (delegated to [`crate::hsm::config::HsmConfig::from_env`]),
 /// and the wave-2 / dev-seed fallback.
 ///
-/// Forwards to [`workspace_signer_loader_with_writer`] with
-/// `std::io::stderr()` as the deprecation-warning sink (the warning
-/// fires for `ATLAS_PRODUCTION` set, see
-/// [`crate::keys::master_seed_loader_with_writer`]).
+/// **V1.12 simplification.** V1.11 routed through a writer-form
+/// (`workspace_signer_loader_with_writer`) so the
+/// `ATLAS_PRODUCTION` deprecation warning could be captured for
+/// assertion. With `ATLAS_PRODUCTION` removed in V1.12 the writer
+/// parameter has no purpose and the indirection collapsed back into a
+/// single function.
 pub fn workspace_signer_loader_with<F>(env: F) -> Result<Box<dyn WorkspaceSigner>, String>
 where
     F: Fn(&str) -> Option<String>,
 {
-    workspace_signer_loader_with_writer(env, &mut std::io::stderr())
-}
-
-/// V1.11 wave-3 Phase C entry point that takes both an env reader AND
-/// a `&mut dyn Write` for the wave-2 deprecation warning sink.
-/// Mirrors [`crate::keys::master_seed_loader_with_writer`] so wave-3
-/// tests can capture the warning text for assertion (or pipe it to
-/// [`std::io::sink`] when the test is exercising a deliberately-
-/// deprecated configuration and the noise on stderr would clutter
-/// the test runner output).
-pub fn workspace_signer_loader_with_writer<F, W>(
-    env: F,
-    warn_out: &mut W,
-) -> Result<Box<dyn WorkspaceSigner>, String>
-where
-    F: Fn(&str) -> Option<String>,
-    W: std::io::Write,
-{
-    // V1.11 L-8: emit the ATLAS_PRODUCTION deprecation warning *before*
-    // any gate check, so an operator who sets both `ATLAS_PRODUCTION=1`
-    // and `ATLAS_HSM_WORKSPACE_SIGNER=1` still sees the V1.12-removal
-    // notice. Without this call the wave-3 path would silently swallow
-    // the warning when wave-3 is opted in (the wave-2
-    // master_seed_loader_with_writer below is only reached on the
-    // fallthrough branch).
-    crate::keys::emit_atlas_production_deprecation_if_set(&env, warn_out);
-
     // Layer 1: wave-3 opt-in. Truthy values match the wave-1 dev-seed
     // gate's allow-list so an operator who learned `ATLAS_DEV_MASTER_SEED=1`
     // can use the same spelling here without surprise rejection.
@@ -509,12 +484,12 @@ where
     }
 
     // Layer 2: wave-2 / dev signer. The underlying
-    // `master_seed_loader_with_writer` performs its own dispatch
-    // between the sealed-seed loader (HSM trio set) and the dev gate
-    // (HSM trio absent + dev opt-in). Wrap whatever it returns in
+    // `master_seed_loader_with` performs its own dispatch between
+    // the sealed-seed loader (HSM trio set) and the dev gate (HSM
+    // trio absent + dev opt-in). Wrap whatever it returns in
     // `DevWorkspaceSigner` so the binary's call sites see one trait
     // surface regardless of where the master seed actually lives.
-    let hkdf = master_seed_loader_with_writer(&env, warn_out)?;
+    let hkdf = master_seed_loader_with(&env)?;
     Ok(Box::new(DevWorkspaceSigner::new(Arc::from(hkdf))))
 }
 
@@ -945,59 +920,27 @@ mod tests {
     }
 
     #[test]
-    fn loader_emits_atlas_production_deprecation_when_set_alongside_wave3_opt_in() {
-        // V1.11 wave-3 + L-8 interaction: an operator who sets BOTH
-        // `ATLAS_PRODUCTION=1` and `ATLAS_HSM_WORKSPACE_SIGNER=1`
-        // must still see the V1.12-removal notice for `ATLAS_PRODUCTION`.
-        // The wave-3 layer fires before the wave-2 / dev fallthrough,
-        // so without the explicit `emit_atlas_production_deprecation_if_set`
-        // call at the top of `workspace_signer_loader_with_writer`, the
-        // warning would be silently swallowed on every wave-3 path —
-        // including the trio-missing refusal path exercised here. We
-        // pair the wave-3 opt-in with no-trio so the loader refuses; the
-        // test asserts only on the warning text, not the loader result.
-        let mut warnings = Vec::<u8>::new();
-        let _ = workspace_signer_loader_with_writer(
-            env_pairs(&[
-                (crate::keys::PRODUCTION_GATE_ENV, "1"),
-                (WORKSPACE_HSM_OPT_IN_ENV, "1"),
-                (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
-            ]),
-            &mut warnings,
-        );
-        let text = String::from_utf8(warnings).expect("warning text must be UTF-8");
+    fn loader_ignores_atlas_production_v1_12_under_wave3_opt_in() {
+        // V1.12 removal pinning at the wave-3 layer: setting
+        // `ATLAS_PRODUCTION` alongside the wave-3 opt-in MUST NOT
+        // change the loader's behaviour. The trio-missing refusal
+        // text below is identical to the no-ATLAS_PRODUCTION case
+        // because the V1.9 paranoia layer is gone — there is no
+        // residual code path consulting that env var.
+        let err = loader_err(env_pairs(&[
+            ("ATLAS_PRODUCTION", "1"),
+            (WORKSPACE_HSM_OPT_IN_ENV, "1"),
+            (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
+        ]));
         assert!(
-            text.contains(crate::keys::PRODUCTION_GATE_ENV),
-            "wave-3 path must surface the ATLAS_PRODUCTION deprecation warning; got {text:?}",
+            err.contains(WORKSPACE_HSM_OPT_IN_ENV),
+            "wave-3 trio-missing refusal must surface the wave-3 opt-in env var \
+             regardless of ATLAS_PRODUCTION; got {err:?}",
         );
         assert!(
-            text.contains("deprecated"),
-            "warning must label the var as deprecated; got {text:?}",
-        );
-        assert!(
-            text.contains("V1.12"),
-            "warning must announce the removal target; got {text:?}",
-        );
-    }
-
-    #[test]
-    fn loader_no_warning_when_atlas_production_unset_under_wave3_opt_in() {
-        // Negative twin of the test above: without `ATLAS_PRODUCTION`,
-        // the wave-3 path produces no deprecation noise. Catches a
-        // future refactor that accidentally hardcodes the warning to
-        // fire on every wave-3 invocation.
-        let mut warnings = Vec::<u8>::new();
-        let _ = workspace_signer_loader_with_writer(
-            env_pairs(&[
-                (WORKSPACE_HSM_OPT_IN_ENV, "1"),
-                (DEV_MASTER_SEED_OPT_IN_ENV, "1"),
-            ]),
-            &mut warnings,
-        );
-        assert!(
-            warnings.is_empty(),
-            "no warning expected when ATLAS_PRODUCTION is unset; got {:?}",
-            String::from_utf8_lossy(&warnings),
+            !err.contains("ATLAS_PRODUCTION"),
+            "ATLAS_PRODUCTION must not appear in the refusal message — V1.12 \
+             removed it from the gate logic entirely; got {err:?}",
         );
     }
 
@@ -1006,7 +949,7 @@ mod tests {
         // Wave-2 fallthrough invariant: when the HSM trio is set but
         // `ATLAS_HSM_WORKSPACE_SIGNER` is NOT opted in, the loader
         // MUST fall through to the wave-2 sealed-seed path (i.e. call
-        // `master_seed_loader_with_writer`, which then routes through
+        // `master_seed_loader_with`, which then routes through
         // `HsmConfig::from_env` + `Pkcs11MasterSeedHkdf::open`). We
         // can't exercise a real HSM open in a unit test, so we feed
         // bogus trio values that the wave-2 path will refuse — the
@@ -1034,7 +977,7 @@ mod tests {
         ]));
         // Positive: the error must name the wave-2 trio's PKCS#11-lib
         // env var, which only happens when the dispatcher reached
-        // `HsmConfig::from_env` (called from `master_seed_loader_with_writer`
+        // `HsmConfig::from_env` (called from `master_seed_loader_with`
         // — i.e. the wave-2 layer). The wave-3 layer's trio-missing
         // refusal does NOT name this var; its trio-partial refusal
         // would, but we set all three trio vars here so partial-trio

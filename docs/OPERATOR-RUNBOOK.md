@@ -1,4 +1,4 @@
-# Atlas — Operator Runbook (V1.11)
+# Atlas — Operator Runbook (V1.12)
 
 This document is the operator's reference for Atlas ceremonies that
 sit *outside* the agent-driven hot path: workspace key migration,
@@ -22,32 +22,24 @@ constant in `atlas-signer/src/keys.rs` (source-committed, public,
 inverts the gate semantics so the dev seed is now a positive
 opt-in.
 
-### V1.10 — current behaviour (LIVE)
+### V1.10 — current behaviour (LIVE; V1.12-simplified)
 
 The gate is **positive opt-in**: the dev seed signs only when the
 operator has explicitly authorised it. Per-tenant subcommands hit
 the gate first; if the gate refuses, the binary exits with code 2
 and prints an actionable error to stderr.
 
-The gate has two layered checks (defence-in-depth):
+**Single check (V1.12).** `ATLAS_DEV_MASTER_SEED` must be a
+recognised truthy value (`1`, `true`, `yes`, `on`, ASCII case-
+insensitive, leading/trailing whitespace tolerated). Anything else
+— including unset, empty, `0`, `false`, `no`, `off`, or any typo —
+refuses.
 
-1. **V1.9 paranoia layer.** If `ATLAS_PRODUCTION=1` is set, the gate
-   refuses *unconditionally* — even if `ATLAS_DEV_MASTER_SEED=1` is
-   also set. An operator who explicitly says "this is production"
-   overrides every dev-opt-in. This preserves V1.9 deployment
-   safety habits.
-2. **V1.10 positive opt-in.** `ATLAS_DEV_MASTER_SEED` must be a
-   recognised truthy value (`1`, `true`, `yes`, `on`, ASCII case-
-   insensitive, leading/trailing whitespace tolerated). Anything
-   else — including unset, empty, `0`, `false`, `no`, `off`, or any
-   typo — refuses.
-
-| `ATLAS_PRODUCTION`        | `ATLAS_DEV_MASTER_SEED` | Gate                       |
-|---------------------------|-------------------------|----------------------------|
-| unset                     | unset/empty             | **refuses** (V1.10 default)|
-| unset                     | `1` / `true` / `yes` / `on` | **allows** dev seed   |
-| unset                     | `0` / `false` / typo    | **refuses**                |
-| `1`                       | anything                | **refuses** (V1.9 paranoia)|
+| `ATLAS_DEV_MASTER_SEED`        | Gate                          |
+|--------------------------------|-------------------------------|
+| unset/empty                    | **refuses** (V1.10 default)   |
+| `1` / `true` / `yes` / `on`    | **allows** dev seed           |
+| `0` / `false` / typo / other   | **refuses**                   |
 
 Per-tenant subcommands subject to the gate:
 
@@ -55,6 +47,24 @@ Per-tenant subcommands subject to the gate:
 - `atlas-signer derive-pubkey --workspace <ws>`
 - `atlas-signer rotate-pubkey-bundle --workspace <ws>`
 - `atlas-signer sign --derive-from-workspace <ws>`
+
+> **V1.12 removal of the V1.9 `ATLAS_PRODUCTION` paranoia layer.**
+> V1.9–V1.11 ran a defence-in-depth `ATLAS_PRODUCTION=1` paranoia
+> gate ahead of the positive opt-in: setting it refused the dev
+> seed regardless of `ATLAS_DEV_MASTER_SEED`. V1.12 removes that
+> layer entirely. Three reasons:
+>
+> 1. The literal-`"1"`-only recognition was a documented operator
+>    footgun (`=true`/`=yes`/`=on` silently fell through).
+> 2. The V1.10 positive opt-in covers the same security property
+>    (refuse-by-default, refuse-on-typo) without the footgun.
+> 3. The wave-2 HSM trio (`ATLAS_HSM_PKCS11_LIB` /
+>    `ATLAS_HSM_SLOT` / `ATLAS_HSM_PIN_FILE`) is now the production
+>    audit signal: `env | grep ATLAS_` shows whether the deploy is
+>    sealed-seed or dev.
+>
+> `ATLAS_PRODUCTION` is silently ignored from V1.12 onwards. The
+> V1.11 deprecation warning has been removed alongside the gate.
 
 > **Why a strict allow-list of truthy values?**
 >
@@ -80,17 +90,17 @@ no-cycles rule prevented the binary from dispatching to a sibling
 that itself depended on `atlas-signer` for the `MasterSeedHkdf`
 trait. Same operator opt-in semantics, no Cargo cycle.)
 
-The loader adds a third layer above the V1.9 paranoia + V1.10
-positive-opt-in gates documented above:
+The loader adds a sealed-seed lookup that takes precedence over the
+V1.10 positive-opt-in gate documented above:
 
-3. **Sealed-seed lookup (HSM trio first).** When the HSM env trio is
+2. **Sealed-seed lookup (HSM trio first).** When the HSM env trio is
    set — `ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`
    — the loader opens the PKCS#11 module **first** and uses
    [`Pkcs11MasterSeedHkdf`](../crates/atlas-signer/src/hsm/pkcs11.rs)
    for every per-tenant derive. The seed bytes never enter Atlas
    address space; HKDF-SHA256 runs **inside** the HSM via
    `CKM_HKDF_DERIVE`. HSM open / derive failure is **fatal** — there
-   is no silent fallback to the dev seed. Layers 1 and 2 are not
+   is no silent fallback to the dev seed. The dev gate is not
    consulted in this mode.
 
    Partial trios (one or two of the three set) refuse with an
@@ -98,13 +108,12 @@ positive-opt-in gates documented above:
    the most common operator footgun and silent fallback would defeat
    the audit signal.
 
-| `ATLAS_HSM_*` trio | `ATLAS_PRODUCTION` | `ATLAS_DEV_MASTER_SEED` | Loader                      |
-|--------------------|--------------------|-------------------------|-----------------------------|
-| all three set      | any                | any                     | **PKCS#11 sealed seed**     |
-| partial (1 or 2)   | any                | any                     | **refuses** (config error)  |
-| none set           | unset              | `1`/`true`/`yes`/`on`   | dev seed (positive opt-in)  |
-| none set           | `1`                | any                     | **refuses** (V1.9 paranoia) |
-| none set           | unset              | unset / typo            | **refuses** (V1.10 default) |
+| `ATLAS_HSM_*` trio | `ATLAS_DEV_MASTER_SEED` | Loader                      |
+|--------------------|-------------------------|-----------------------------|
+| all three set      | any                     | **PKCS#11 sealed seed**     |
+| partial (1 or 2)   | any                     | **refuses** (config error)  |
+| none set           | `1`/`true`/`yes`/`on`   | dev seed (positive opt-in)  |
+| none set           | unset / typo            | **refuses** (V1.10 default) |
 
 > **Why HSM-first dispatch?** An operator who has set up a sealed
 > deploy expects the loader to use it. Falling through to the dev
@@ -136,17 +145,17 @@ fail-closed stub and refuses every derive call.
 # 1. Build atlas-signer with the PKCS#11 backend present.
 cargo build --release -p atlas-signer --features hsm
 
-# 2. Declare this is production (V1.9 paranoia layer; redundant
-#    when the HSM trio is set, but defence-in-depth costs nothing).
-export ATLAS_PRODUCTION=1
-
-# 3. Configure the HSM trio. All three required — partial config
-#    refuses to start with an actionable error.
+# 2. Configure the HSM trio. All three required — partial config
+#    refuses to start with an actionable error. The trio is the
+#    V1.12 production audit signal: an auditor reading
+#    `env | grep ATLAS_` sees these three vars and knows the
+#    deployment is sealed-seed (V1.12 removed the V1.9-era
+#    `ATLAS_PRODUCTION=1` paranoia var; setting it has no effect).
 export ATLAS_HSM_PKCS11_LIB=/usr/lib/softhsm/libsofthsm2.so   # absolute path to the PKCS#11 module
 export ATLAS_HSM_SLOT=0                                        # token slot number (decimal)
 export ATLAS_HSM_PIN_FILE=/var/run/atlas/hsm.pin               # path to user PIN file (mode 0400)
 
-# 4. Per-tenant subcommands now derive against the sealed master
+# 3. Per-tenant subcommands now derive against the sealed master
 #    seed inside the HSM. No seed material ever crosses into Atlas
 #    address space; HKDF-SHA256 runs inside the device.
 atlas-signer derive-pubkey --workspace alice
@@ -156,13 +165,14 @@ Master-seed import is a one-time ceremony — see §2 below before
 running any of the per-tenant subcommands against a fresh HSM
 token.
 
-### Migrating from V1.9 to V1.10
+### Migrating from V1.9 to V1.10 (and V1.11/V1.12 follow-ups)
 
-| You used to run...                    | V1.10 equivalent                                   |
+| You used to run...                    | V1.12 equivalent                                   |
 |---------------------------------------|----------------------------------------------------|
 | dev/CI: env unset                     | `export ATLAS_DEV_MASTER_SEED=1`                   |
 | production: `ATLAS_PRODUCTION=1` only | configure the HSM trio (§2) + build `--features hsm` |
 | dev: `ATLAS_PRODUCTION=true` (typo'd) | replace with `export ATLAS_DEV_MASTER_SEED=1`      |
+| any env still setting `ATLAS_PRODUCTION` | unset it — V1.12 silently ignores the var       |
 
 V1.9 dev/CI environments that ran with `ATLAS_PRODUCTION` unset will
 now refuse per-tenant subcommands at the gate. The migration is a
@@ -170,10 +180,14 @@ one-line addition to the deploy script. The error message points at
 this runbook section.
 
 V1.9 production environments that relied on `ATLAS_PRODUCTION=1` to
-refuse the dev seed are still safe — that gate fires unchanged.
-What V1.10 wave 2 adds is the *positive* path: with the HSM trio
-configured the binary signs against a sealed master seed, so
-production deploys are no longer blocked at the gate.
+refuse the dev seed: V1.12 removed that gate. The replacement
+production audit signal is the wave-2 HSM trio
+(`ATLAS_HSM_PKCS11_LIB` / `ATLAS_HSM_SLOT` / `ATLAS_HSM_PIN_FILE`)
+plus the absence of `ATLAS_DEV_MASTER_SEED`. With the HSM trio
+configured the binary signs against a sealed master seed and the
+dev gate is unreachable. Setting `ATLAS_PRODUCTION` from V1.12
+onwards has no effect — neither refusing the dev seed nor emitting
+the V1.11 deprecation warning (which was also removed in V1.12).
 
 ### Failure-mode reference
 
@@ -192,15 +206,13 @@ with exit code 2. Sample messages:
   hsm. See docs/OPERATOR-RUNBOOK.md §1 for the V1.9→V1.10
   migration and the HSM import ceremony.
   ```
-* **V1.9 paranoia override (HSM trio absent, ATLAS_PRODUCTION=1):**
-  ```
-  derive-key: ATLAS_PRODUCTION=1 set, but atlas-signer is using the
-  source-committed DEV_MASTER_SEED. Refusing to derive per-tenant
-  keys against a public dev seed. V1.10 wave 2 ships a sealed-seed
-  loader at crate::hsm — configure the env trio (ATLAS_HSM_PKCS11_LIB,
-  ATLAS_HSM_SLOT, ATLAS_HSM_PIN_FILE) and rebuild with --features
-  hsm. See docs/OPERATOR-RUNBOOK.md §1 for the import ceremony.
-  ```
+> **Removed in V1.12: V1.9 paranoia override message.**
+> V1.9–V1.11 also emitted a refusal message keyed off
+> `ATLAS_PRODUCTION=1` ("set, but atlas-signer is using the
+> source-committed DEV_MASTER_SEED"). V1.12 removed the gate that
+> produced it. If your monitoring greps for that text, switch the
+> match to the V1.10 default-refuse message above (the migration
+> path is identical: configure the HSM trio).
 
 Operators reading these messages should grep for the relevant env
 var name and either set/unset it correctly or escalate the runbook
@@ -375,11 +387,12 @@ install -m 0400 -o atlas -g atlas /dev/stdin "${PIN_FILE}" \
 #     have already finished above.
 unset SO_PIN USER_PIN
 
-# 6. Configure the trio + start the signer.
+# 6. Configure the trio + start the signer. (V1.12: the HSM trio is
+#    the sole production audit signal; the V1.9-era ATLAS_PRODUCTION
+#    var is silently ignored from V1.12 onwards.)
 export ATLAS_HSM_PKCS11_LIB=/usr/lib/softhsm/libsofthsm2.so
 export ATLAS_HSM_SLOT=0
 export ATLAS_HSM_PIN_FILE="${PIN_FILE}"
-export ATLAS_PRODUCTION=1   # belt-and-braces; HSM-mode does not need it but defence-in-depth costs nothing
 
 # 7. Smoke-test by deriving a workspace pubkey. The pubkey is
 #    deterministic for a given (sealed-seed, workspace_id) pair;
@@ -909,9 +922,11 @@ exits non-zero.
 ### Procedure
 
 ```bash
-# 1. Ensure the production gate is OFF in the dev session running
-#    the ceremony (the dev seed is required to derive the pubkey).
-unset ATLAS_PRODUCTION
+# 1. Ensure the dev master-seed gate is opted in for the dev session
+#    running the ceremony (the dev seed is required to derive the
+#    pubkey). V1.12 removed the V1.9 ATLAS_PRODUCTION paranoia gate;
+#    the positive opt-in below is the only one required.
+export ATLAS_DEV_MASTER_SEED=1
 
 # 2. Read the existing bundle, run rotate, write atomically.
 WS=alice
@@ -1102,8 +1117,10 @@ rotation strategy with the HSM threat model in mind.
 | Migrate workspace bundle to V1.9 | `atlas-signer rotate-pubkey-bundle --workspace <ws>` | yes | yes (operator-side `mv`) |
 | Rotate anchor chain | `atlas-signer rotate-chain --confirm <workspace>` | no | yes (operator-side) |
 | Derive workspace pubkey for inspection | `atlas-signer derive-pubkey --workspace <ws>` | yes | n/a (read-only) |
-| Production-gate enforcement (V1.10 — deprecated, V1.12 removal) | set `ATLAS_PRODUCTION=1` | n/a | n/a |
+| Production-gate enforcement (V1.12+) | configure the HSM trio (§2) — V1.9 `ATLAS_PRODUCTION=1` removed | n/a | n/a |
 
-See [ARCHITECTURE.md §7.3](ARCHITECTURE.md) for the per-tenant key
-trust model and [SECURITY-NOTES.md](SECURITY-NOTES.md) for the full
-threat model.
+See [ARCHITECTURE.md §7.3](ARCHITECTURE.md) (V1.9 per-tenant key trust
+model), [§7.4](ARCHITECTURE.md) (V1.10 master-seed gate + wave-2
+sealed-seed loader, V1.12-simplified) and [§7.5](ARCHITECTURE.md)
+(V1.11 wave-3 sealed per-workspace signer); see
+[SECURITY-NOTES.md](SECURITY-NOTES.md) for the full threat model.

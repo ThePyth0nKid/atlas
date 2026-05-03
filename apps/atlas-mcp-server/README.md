@@ -116,10 +116,12 @@ that admits the source-committed dev master seed (per-tenant
 subcommands refuse to start otherwise). For a production deployment,
 omit `ATLAS_DEV_MASTER_SEED`, build `atlas-signer` with
 `--features hsm`, and configure the V1.10 wave-2 sealed-seed trio
-(`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`)
-plus `ATLAS_PRODUCTION=1`. The HSM trio takes precedence over the
-dev gate: when set, the loader signs against the sealed master
-seed inside the HSM and the dev opt-in is unreachable. See
+(`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`).
+The HSM trio takes precedence over the dev gate: when set, the
+loader signs against the sealed master seed inside the HSM and the
+dev opt-in is unreachable. (V1.12 removed the V1.9-era
+`ATLAS_PRODUCTION=1` paranoia layer; the HSM trio is now the sole
+production audit signal.) See
 [../../docs/OPERATOR-RUNBOOK.md](../../docs/OPERATOR-RUNBOOK.md)
 §2 for the import ceremony.
 
@@ -127,13 +129,15 @@ seed inside the HSM and the dev opt-in is unreachable. See
 
 ## V1.5 / V1.6 / V1.7 / V1.8 / V1.9 / V1.10 boundaries
 
-- **Master-seed gate inversion (V1.10 wave 1).** Per-tenant
-  subcommands refuse to start unless `ATLAS_DEV_MASTER_SEED=1` is
-  explicitly set (and the V1.9 paranoia gate `ATLAS_PRODUCTION=1` is
-  *unset*, since that gate retains primacy). The V1.9 negative gate
-  has been replaced with a positive opt-in: forgetting the env var
-  now fails closed with an actionable error rather than silently
-  signing with the source-committed dev seed. **Local development
+- **Master-seed gate inversion (V1.10 wave 1; V1.12-simplified).**
+  Per-tenant subcommands refuse to start unless
+  `ATLAS_DEV_MASTER_SEED=1` is explicitly set. V1.12 removed the
+  V1.9-era `ATLAS_PRODUCTION` paranoia layer (it had a documented
+  literal-`1`-only footgun, and the positive opt-in covers the same
+  security property). The V1.9 negative gate has been replaced with
+  a positive opt-in: forgetting the env var now fails closed with
+  an actionable error rather than silently signing with the
+  source-committed dev seed. **Local development
   setup:** export `ATLAS_DEV_MASTER_SEED=1` once before `pnpm dev`
   (or wire it into your shell profile / `.envrc`). The smoke test
   (`pnpm --filter atlas-mcp-server smoke`) sets it programmatically

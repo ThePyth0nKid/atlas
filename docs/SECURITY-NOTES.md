@@ -1,6 +1,6 @@
-# Atlas Verifier — Defended Attack Surface (V1.11)
+# Atlas Verifier — Defended Attack Surface (V1.12)
 
-This document describes what the V1.11 verifier (`atlas-trust-core`, exposed as
+This document describes what the V1.12 verifier (`atlas-trust-core`, exposed as
 `atlas-verify-cli` and `atlas-verify-wasm`) actually defends against. It is
 written for auditors and security reviewers who want to know "what does this
 verifier protect, and where are the limits" without reading Rust.
@@ -303,11 +303,13 @@ does NOT imply them:
   HSM/TPM sealing of the master seed.
 - **`DEV_MASTER_SEED` is a source-committed constant.** The dev master
   seed in `crates/atlas-signer/src/keys.rs` is fixed across builds for
-  reproducibility. Any production deployment MUST set
-  `ATLAS_PRODUCTION=1` (which causes the per-tenant subcommands to
-  refuse to run with the dev seed) and either supply a sealed-seed
-  loader (V1.10) or otherwise replace `DEV_MASTER_SEED` before going
-  live.
+  reproducibility. Any production deployment MUST configure the V1.10
+  wave-2 sealed-seed loader (set the HSM trio
+  `ATLAS_HSM_PKCS11_LIB` / `ATLAS_HSM_SLOT` / `ATLAS_HSM_PIN_FILE`
+  and build with `--features hsm`) and leave `ATLAS_DEV_MASTER_SEED`
+  unset. (V1.9 historically gated the dev seed via
+  `ATLAS_PRODUCTION=1`; V1.12 removed that var — the wave-2 HSM trio
+  is now the production audit signal.)
 - **Side-channel attacks beyond hash equality.** Constant-time compare
   is wired on hash and bundle-hash equality. Other code paths (CBOR
   encoding, JSON parsing, Merkle proof recomputation) make standard
@@ -356,18 +358,20 @@ makes no network call.
   a workspace's bundle to legacy form bypasses per-tenant isolation.
   Strict mode is the real security boundary for V1.9-issued data;
   document the gap.
-- **Production gate (V1.9 — superseded by V1.10):** All V1.9 per-tenant
-  subcommands (`derive-key`, `derive-pubkey`, `rotate-pubkey-bundle`, and
-  `sign --derive-from-workspace`) called `keys::production_gate()`, which
-  refused to run when `ATLAS_PRODUCTION=1` was set. V1.9 had no sealed-seed
-  loader; the gate ensured a production environment could not silently sign
-  with the source-committed dev master seed. The opt-out shape was a
-  footgun (residual #6 below): forgetting the env var let the dev seed
-  through. V1.10 supersedes this with a positive opt-in
+- **Production gate (V1.9 — superseded by V1.10, removed in V1.12):**
+  All V1.9 per-tenant subcommands (`derive-key`, `derive-pubkey`,
+  `rotate-pubkey-bundle`, and `sign --derive-from-workspace`) called
+  `keys::production_gate()`, which refused to run when
+  `ATLAS_PRODUCTION=1` was set. V1.9 had no sealed-seed loader; the
+  gate ensured a production environment could not silently sign with
+  the source-committed dev master seed. The opt-out shape was a
+  footgun (residual #6 below): forgetting the env var let the dev
+  seed through. V1.10 superseded this with a positive opt-in
   `keys::master_seed_gate()` — see *Master-seed gate inversion (V1.10)*
-  below. The V1.9 paranoia check is preserved as the inner layer:
-  `ATLAS_PRODUCTION=1` still refuses the dev seed regardless of the V1.10
-  opt-in, so a deployment with both set still fails closed.
+  below. V1.11 layered a deprecation warning on `ATLAS_PRODUCTION`,
+  and **V1.12 removed both the gate function and the warning entirely**:
+  the env var is silently ignored from V1.12 onwards. The V1.10
+  positive opt-in is now the sole dev-seed gate.
 - **Workspace_id ingress validation:** `keys::validate_workspace_id`
   rejects empty strings, non-ASCII-printable bytes (control chars,
   Unicode confusables), and the `:` delimiter. The verifier itself
@@ -423,9 +427,10 @@ makes no network call.
   unreachable from the production code path. Dev/CI deployments that
   cannot run an HSM continue to fall through to V1.10 wave 1's
   positive opt-in (`ATLAS_DEV_MASTER_SEED=1` required to admit the
-  dev seed) layered on top of the V1.9 paranoia gate
-  (`ATLAS_PRODUCTION=1` still refuses the dev seed unconditionally).
-  See *Master-seed gate inversion (V1.10)* below for the gate's
+  dev seed). V1.12 removed the V1.9-era `ATLAS_PRODUCTION` paranoia
+  layer that V1.10–V1.11 carried alongside the opt-in — the
+  positive opt-in is now the sole dev-seed gate. See
+  *Master-seed gate inversion (V1.10)* below for the gate's
   audit semantics.
 - **Master-seed rotation invalidates every historical
   `pubkey_bundle_hash`.** A workspace's per-tenant pubkey is a
@@ -444,7 +449,8 @@ makes no network call.
   bundle-of-issuance, not the bundle-of-now. V1.10's sealed-seed loader
   inherits this property: rotating the *sealed* seed has the same
   effect as rotating the source-committed dev seed.
-- **[CLOSED in V1.10] The production gate is opt-out, not opt-in.**
+- **[CLOSED in V1.10, V1.9 paranoia layer REMOVED in V1.12] The
+  production gate is opt-out, not opt-in.**
   V1.9 shipped `production_gate()` as a *negative* guard — it blocked
   per-tenant signing only when `ATLAS_PRODUCTION=1` was explicitly
   set. A production deployment that forgot to set the env var would
@@ -454,28 +460,34 @@ makes no network call.
   refuse to start unless `ATLAS_DEV_MASTER_SEED=1` is *positively
   asserted*. A deployment that forgets the env var now fails closed
   with an actionable error, not "happily signs with public-source
-  keys". The V1.9 `ATLAS_PRODUCTION=1` paranoia check is preserved as
-  the inner layer for defence-in-depth. See *Master-seed gate
+  keys". V1.10–V1.11 preserved the V1.9 `ATLAS_PRODUCTION=1` check
+  as a defence-in-depth inner layer; V1.12 removed it (the
+  positive opt-in covers the same security property without the
+  literal-`"1"`-only footgun). See *Master-seed gate
   inversion (V1.10)* below.
 
 ---
 
-## Master-seed gate inversion (V1.10 — in scope)
+## Master-seed gate inversion (V1.10 — in scope; V1.12-simplified)
 
 V1.10 wave 1 closes the V1.9 footgun where forgetting
 `ATLAS_PRODUCTION=1` silently allowed the source-committed
 `DEV_MASTER_SEED` to sign production traffic. The gate is now
 positive: per-tenant subcommands refuse to start unless an explicit
-dev opt-in is wired, *and* the V1.9 paranoia check still passes.
+dev opt-in is wired.
 
-- **Layered defence:** `keys::master_seed_gate()` calls
-  `production_gate_with()` first, so a deployment with
-  `ATLAS_PRODUCTION=1` refuses the dev seed regardless of the V1.10
-  opt-in. Only deployments with `ATLAS_PRODUCTION` unset *and*
-  `ATLAS_DEV_MASTER_SEED=1` set obtain a `DevMasterSeedHkdf`. All
-  four `(ATLAS_PRODUCTION × ATLAS_DEV_MASTER_SEED)` combinations are
-  enumerated in `docs/OPERATOR-RUNBOOK.md` §1 with the security
-  outcome.
+- **Single check (V1.12-simplified):** `keys::master_seed_gate()`
+  consults `ATLAS_DEV_MASTER_SEED` only. A deployment with
+  `ATLAS_DEV_MASTER_SEED=1` set obtains a `DevMasterSeedHkdf`;
+  anything else refuses. V1.10–V1.11 layered the V1.9
+  `ATLAS_PRODUCTION=1` paranoia check ahead of the opt-in for
+  defence-in-depth; **V1.12 removed that layer** because (a) its
+  literal-`"1"`-only recognition was a documented operator footgun,
+  (b) the positive opt-in covers the same security property without
+  the footgun, and (c) the wave-2 HSM trio is now the production
+  audit signal. The two `ATLAS_DEV_MASTER_SEED` outcomes (set to a
+  recognised truthy value, or anything else) are enumerated in
+  `docs/OPERATOR-RUNBOOK.md` §1 with the security outcome.
 - **Strict allow-list, not "anything truthy":** The gate accepts the
   values `1`, `true`, `yes`, `on` (ASCII case-insensitive,
   surrounding whitespace tolerated) and refuses anything else,
@@ -522,13 +534,15 @@ dev opt-in is wired, *and* the V1.9 paranoia check still passes.
   trios refuse to start, so a host snapshot showing all three set
   AND `ATLAS_DEV_MASTER_SEED` unset AND the binary built with
   `--features hsm` is the production-ready signature.
-- **Adversary tests:** 21 new unit tests in
+- **Adversary tests:** unit tests in
   `crates/atlas-signer/src/keys.rs` cover the gate's allow-list,
-  layered V1.9 paranoia precedence (`ATLAS_PRODUCTION=1` overrides
-  even with `ATLAS_DEV_MASTER_SEED=1` set), error-message stability,
-  trait dispatch through `&dyn`, equivalence between the trait-routed
-  and explicit-seed paths, and Send+Sync witness on
-  `DevMasterSeedHkdf`. The MCP smoke test
+  V1.12 ignore semantics for `ATLAS_PRODUCTION` (the var must NOT
+  refuse the dev seed under any value once the opt-in is set —
+  pinned by `master_seed_gate_ignores_atlas_production_v1_12` and
+  `master_seed_loader_ignores_atlas_production_v1_12`),
+  error-message stability, trait dispatch through `&dyn`,
+  equivalence between the trait-routed and explicit-seed paths,
+  and Send+Sync witness on `DevMasterSeedHkdf`. The MCP smoke test
   (`pnpm --filter atlas-mcp-server smoke`) sets
   `ATLAS_DEV_MASTER_SEED=1` once at the top of `main()` so CI
   exercises the same gate operators do, and the bundle hashes
@@ -578,13 +592,12 @@ spelled out in *Master-seed exfiltration is full compromise* above.
 - **Production-readiness preflight is partial.** The HSM-first
   dispatch in `master_seed_loader` makes init failure fatal (no
   silent fallback to dev seed when the trio is set), which is the
-  load-bearing audit guarantee. A separate orthogonal lint —
-  refusing to start when `ATLAS_PRODUCTION=1` is set with neither
-  the HSM trio nor `ATLAS_DEV_MASTER_SEED=1` — is left as a
-  V1.10.1 preflight tightening; today the dev opt-in plus
-  `ATLAS_PRODUCTION=1` combination still refuses at the gate, so
-  the gap is "config yells with two distinct error messages" not
-  "config silently signs unsafely".
+  load-bearing audit guarantee. (V1.10–V1.11 noted a follow-up
+  lint that would refuse to start when `ATLAS_PRODUCTION=1` was
+  set without the HSM trio; **V1.12 obviated this** by removing
+  the `ATLAS_PRODUCTION` env var from the gate logic entirely.
+  An operator who still exports it sees no behaviour change and
+  no warning — the var is silently ignored.)
 
 ---
 
@@ -651,14 +664,15 @@ address space when wave-3 is opted in.
   the dev signature. Partial trios refuse to start, so a
   contradictory snapshot is not possible at runtime.
 - **wave-3 invariant tests:** `crates/atlas-signer/src/workspace_signer.rs`
-  pins the dispatcher's three-layer dispatch order across nine
+  pins the dispatcher's three-layer dispatch order across multiple
   test scenarios: dev fallthrough, wave-2 fallthrough, wave-3
   routing, trio-missing refusal under wave-3 opt-in, partial-trio
   refusal under wave-3 opt-in, falsy-opt-in fallthrough, the
-  truthy allow-list match (`1`/`true`/`yes`/`on`), the
-  `ATLAS_PRODUCTION` deprecation-warning interaction with
-  wave-3, and the `derive-key`-refused-under-wave-3 trait
-  contract. The phase-A determinism witnesses
+  truthy allow-list match (`1`/`true`/`yes`/`on`), the V1.12
+  ignore semantics for `ATLAS_PRODUCTION` under wave-3 opt-in
+  (the env var must not change wave-3 behaviour and must not
+  appear in the refusal text), and the
+  `derive-key`-refused-under-wave-3 trait contract. The phase-A determinism witnesses
   (`v1.11 wave-3 phase-a determinism witness`) lock the
   byte-equivalence of the dev wave-3 path to V1.10's
   HKDF-derived signatures — refactoring the trait surface
@@ -726,13 +740,17 @@ profile.
   "memory-disclosure on the signer host no longer yields the
   per-tenant scalar"; an attacker who controls the cryptoki
   module at load time still controls what `C_Sign` does.
-- **`ATLAS_PRODUCTION` deprecation is in flight.** The V1.11 L-8
-  follow-up adds a deprecation warning when `ATLAS_PRODUCTION` is
-  set under any layer (wave-3, wave-2, or dev), targeting V1.12
-  removal. Deployments still using the V1.9-era paranoia layer
-  see the warning on every `atlas-signer` invocation and should
-  schedule the migration to "drop `ATLAS_PRODUCTION`, rely on
-  the V1.10+ positive-opt-in semantics" before the V1.12 cutover.
+- **`ATLAS_PRODUCTION` removed in V1.12.** V1.11 L-8 added a
+  deprecation warning when `ATLAS_PRODUCTION` was set under any
+  layer (wave-3, wave-2, or dev), targeting V1.12 removal. **V1.12
+  removed both the gate function and the warning entirely.** The
+  env var is silently ignored from V1.12 onwards. Deployments that
+  still export it see no behaviour change and no warning; the
+  V1.10+ positive opt-in is now the sole dev-seed gate, and the
+  HSM trio (wave-2 + wave-3) is the production audit signal.
+  V1.11-issued deployment logs containing the deprecation warning
+  text remain valid forensic artefacts; V1.12+ logs will not
+  reference the var.
 
 ---
 

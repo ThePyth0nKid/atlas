@@ -92,9 +92,10 @@
 //!     (`derive-key`, `derive-pubkey`, `rotate-pubkey-bundle`,
 //!     `sign --derive-from-workspace`) refuse to start unless the
 //!     operator sets `ATLAS_DEV_MASTER_SEED=1` (truthy values:
-//!     `1`/`true`/`yes`/`on`, case-insensitive). The V1.9 paranoia
-//!     gate `ATLAS_PRODUCTION=1` retains primacy and overrides the
-//!     opt-in.
+//!     `1`/`true`/`yes`/`on`, case-insensitive). V1.12 removed the
+//!     V1.9-era `ATLAS_PRODUCTION` paranoia layer — the positive
+//!     opt-in is now the sole dev-seed gate, and the wave-2 HSM trio
+//!     is the production audit signal.
 //!   * **Wave 2 — sealed-seed loader.** Setting the HSM trio
 //!     (`ATLAS_HSM_PKCS11_LIB`, `ATLAS_HSM_SLOT`, `ATLAS_HSM_PIN_FILE`)
 //!     dispatches to [`atlas_signer::hsm::pkcs11::Pkcs11MasterSeedHkdf`]

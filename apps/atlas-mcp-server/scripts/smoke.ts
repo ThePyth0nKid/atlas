@@ -45,9 +45,10 @@ function fail(msg: string): never {
 }
 
 async function main(): Promise<void> {
-  // V1.10 gate inversion: per-tenant signer subcommands now require
-  // positive opt-in via `ATLAS_DEV_MASTER_SEED=1` (formerly the
-  // ATLAS_PRODUCTION negative opt-out). The smoke is test
+  // V1.10 gate inversion (V1.12-simplified): per-tenant signer
+  // subcommands require positive opt-in via `ATLAS_DEV_MASTER_SEED=1`.
+  // V1.12 removed the V1.9-era `ATLAS_PRODUCTION` paranoia layer; the
+  // positive opt-in is now the sole dev-seed gate. The smoke is test
   // infrastructure simulating a properly-configured dev environment;
   // we set the var here so child spawns of `atlas-signer` inherit it
   // and the gate allows the dev seed. Real dev workflows (`pnpm dev`)
