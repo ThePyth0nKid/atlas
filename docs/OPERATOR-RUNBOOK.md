@@ -474,9 +474,21 @@ atlas-signer derive-pubkey --workspace canary-import-test
   object and used to construct an Ed25519 signing key in process
   memory, then zeroized.
 - Filesystem-level snapshot of the signer host does not contain
-  the seed. The PIN file does, but PIN file access without PKCS#11
-  module access yields nothing — the seed is not derivable from
-  the PIN alone.
+  the seed itself — the seed is sealed inside the HSM. The PIN
+  file does sit on the filesystem, and the seed is not derivable
+  from the PIN alone, but both `${ATLAS_HSM_PIN_FILE}` and
+  `${ATLAS_HSM_PKCS11_LIB}` are reachable from a single
+  environment-disclosure vector (`/proc/<pid>/environ`, a heap
+  dump, or any shell sharing the signer's environment), so an
+  attacker who lands one typically lands both — at which point
+  they hold the signer's full `C_Login`-then-derive capability
+  for the lifetime of the PIN's validity. **Filesystem ACLs on
+  the PIN file are therefore a *required* operational control,
+  mirroring the module-path ACL discussion in the TOCTOU bullet
+  below** — mode `0400` (signer-runtime user read-only, no
+  group, no others), tmpfs-backed so reboot wipes the host-side
+  surface, and the secrets-manager source of truth must be
+  rotated on any suspected disclosure.
 - Source-code disclosure does not yield the seed (V1.10 fix to the
   V1.9 residual risk that the dev seed was source-committed).
 
@@ -552,10 +564,11 @@ generated via `CKM_EC_EDWARDS_KEY_PAIR_GEN`, persisted as
 For an HSM-backed deployment that opts into wave-3, no per-tenant
 secret bytes ever reach Atlas address space — even transiently.
 
-> **wave-3 changes per-tenant pubkeys.** V1.9–V1.10 derived
-> per-tenant pubkeys deterministically from `(master_seed,
-> workspace_id)` via HKDF-SHA256. wave-3 generates the keypair
-> *inside* the HSM with hardware entropy; the resulting pubkeys are
+> **wave-3 changes per-tenant pubkeys.** The V1.9 dev path and
+> V1.10 wave-2 sealed-seed path both derive per-tenant pubkeys
+> deterministically from `(master_seed, workspace_id)` via
+> HKDF-SHA256. wave-3 generates the keypair *inside* the HSM
+> with hardware entropy; the resulting pubkeys are
 > NOT byte-equivalent to the V1.9–V1.10 derivation. Every active
 > workspace's `PubkeyBundle.keys[atlas-anchor:<ws>]` rotates on
 > first wave-3 sign. Operators MUST run §4 (`rotate-pubkey-bundle`)
