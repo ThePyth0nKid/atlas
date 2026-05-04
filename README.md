@@ -16,7 +16,7 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**V1.15 Welle A + Welle B shipped — Welle A: const-time KID-equality invariant (every wire-side KID compare in production code routes through `crate::ct::ct_eq_str`, source-level anti-drift pin in `tests/const_time_kid_invariant.rs`); Welle B: dual-channel WASM distribution (`@atlas-trust/verify-wasm` tarballs uploaded to GitHub Releases on every `v*` tag alongside the existing npm publish, with SHA256 manifest for offline verification — see [OPERATOR-RUNBOOK §12](docs/OPERATOR-RUNBOOK.md)). V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm + browser playground.**
+**V1.15 CLOSED (Welle A + Welle B + Welle C shipped) — Welle A: const-time KID-equality invariant (every wire-side KID compare in production code routes through `crate::ct::ct_eq_str`, source-level anti-drift pin in `tests/const_time_kid_invariant.rs`); Welle B: dual-channel WASM distribution (`@atlas-trust/verify-wasm` tarballs uploaded to GitHub Releases on every `v*` tag alongside the existing npm publish, with SHA256 manifest for offline verification — see [OPERATOR-RUNBOOK §12](docs/OPERATOR-RUNBOOK.md)); Welle C: consumer-side reproducibility runbook (exact-version pinning across npm / pnpm / Bun lockfiles, SLSA L3 provenance via `npm audit signatures`, reproduce-from-source fallback — see [CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md)). V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm + browser playground.**
 
 Trust-core crate + Rekor anchoring + per-tenant key derivation + HSM-backed signing + independent
 witness attestor (V1.5 mock-issuer, V1.6 live Sigstore Rekor v1, V1.7 anchor-chain + shard
@@ -120,8 +120,14 @@ byte-identical `npm pack` tarballs (web + node) plus a `tarball-sha256.txt`
 manifest as GitHub Release assets alongside the existing npm publish, so an
 auditor whose primary channel is unreachable can `gh release download`,
 `sha256sum --check`, and `npm install ./local.tgz` against the same SLSA L3
-provenance attestation. Graph-database integration and policy-engine follow
-in V2.
+provenance attestation. V1.15 Welle C closes the V1.15 distribution-resilience
+story on the consumer side: a new `docs/CONSUMER-RUNBOOK.md` documents
+exact-version pinning across npm / pnpm / Bun lockfiles, SLSA L3 provenance
+verification via `npm audit signatures`, the GH-Releases backup-channel
+install flow, and the reproduce-from-source fallback (clone at the tagged
+commit, `cargo install wasm-pack --locked`, `wasm-pack build`, byte-compare)
+for the both-channels-unreachable scenario. Graph-database integration and
+policy-engine follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
   trust property, write/export flows, V1 → V1.15 → V2 boundaries.
@@ -132,6 +138,10 @@ in V2.
   commissioning (verifier-side §10 + HSM-backed witness §11),
   WASM verifier backup-channel install (V1.15 Welle B §12),
   CI lane reference.
+- [docs/CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md) — downstream
+  npm-consumer reproducibility: exact-version pinning, lockfile
+  integrity, SLSA L3 provenance verification, reproduce-from-source
+  fallback (V1.15 Welle C).
 - [docs/COMPLIANCE-MAPPING.md](docs/COMPLIANCE-MAPPING.md) —
   clause-by-clause regulatory mapping (EU AI Act, GAMP 5, ICH E6(R3),
   DORA, GDPR).
@@ -181,6 +191,16 @@ atlas-verify-cli verify-trace bundle.json -k pubkey-bundle.json
 Or open the zero-build-step playground at `apps/wasm-playground/` — drop
 a `*.trace.json` + `*.pubkey-bundle.json`, click Verify. Same Rust
 verifier core, byte-identical to the native CLI's output.
+
+### For npm consumers — pinning + provenance verification
+
+If you embed `@atlas-trust/verify-wasm` in production tooling, see
+[docs/CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md) for the full
+consumer-side reproducibility guide: exact-version pinning across
+npm / pnpm / Bun lockfiles, SLSA L3 provenance verification via
+`npm audit signatures`, the V1.15 Welle B GitHub-Releases backup-
+channel install flow, and the reproduce-from-source fallback when
+both channels are unreachable.
 
 No network calls. No talking to our server. Bit-identical determinism —
 the same input produces byte-identical signing-input bytes whether the

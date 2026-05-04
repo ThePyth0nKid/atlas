@@ -1370,7 +1370,7 @@ Headline:
   and the same `VerifyOutcome` as the native CLI. Scope E is a new
   *distribution channel*, not a new trust surface.
 
-### V1.15 — Const-time KID-equality invariant + dual-channel WASM distribution (shipped: Welle A + Welle B)
+### V1.15 — Const-time KID-equality invariant + dual-channel WASM distribution + consumer reproducibility runbook (shipped: Welle A + Welle B + Welle C)
 
 - **Const-time KID compares everywhere.** V1.5 routed every *hash*
   comparison (bundle hash, event hash, anchored hash, chain head /
@@ -1437,14 +1437,39 @@ Headline:
   equivalence, operator-driven failover) and
   [OPERATOR-RUNBOOK.md](OPERATOR-RUNBOOK.md) §12 for the backup-
   channel install ceremony.
-- **What V1.15 is NOT yet.** The remaining V1.15-planned Welle (C:
-  lock-file pinning runbook for downstream npm consumers,
-  documenting how to commit `package-lock.json` SHA512 integrity
-  values, when to verify SLSA provenance, and how to re-pin after
-  a backup-channel install) is documented in
-  `.handoff/v1.15-handoff.md` and remains independent of the trust-
-  core crate boundary. Welle B is the upload side; Welle C will be
-  the consumer side.
+- **Consumer-side reproducibility runbook (Welle C).**
+  [docs/CONSUMER-RUNBOOK.md](CONSUMER-RUNBOOK.md) closes the V1.15
+  distribution-resilience story on the consumer side. Documents
+  exact-version pinning across `package-lock.json` /
+  `pnpm-lock.yaml` / `bun.lockb` (each layer protects against a
+  different threat: version pin defeats unaudited-minor-bump,
+  lockfile SHA512 integrity defeats registry-side replacement,
+  SLSA L3 provenance via `npm audit signatures` defeats forged-
+  but-byte-different tarballs that would pass the first two
+  layers); strict-install flags (`npm ci`, `pnpm install
+  --frozen-lockfile`, `bun install --frozen-lockfile`); the GH-
+  Releases backup-channel install flow with mandatory step-3 SHA512
+  cross-verify against `npm view … dist.integrity`; and the
+  reproduce-from-source fallback (`git checkout v<tag>`,
+  `cargo install wasm-pack --version $WASM_PACK_VERSION --locked`,
+  `wasm-pack build`, byte-compare against the published artefact)
+  for the both-channels-unreachable scenario. Welle B is the upload
+  side; Welle C is the consumer side; together they make the V1.15
+  Welle B byte-identical-determinism trust property load-bearing
+  for downstream installs, not just for the publish workflow.
+- **Welle C trust property unchanged.** Pure-doc commit, no
+  verifier-logic change. The trust property load-bearing for
+  reproduce-from-source is the V1.5 byte-determinism pins
+  (`signing_input_byte_determinism_pin`,
+  `bundle_hash_byte_determinism_pin`) plus the V1.14 Scope E SLSA
+  L3 OIDC provenance attestation; Welle C documents how a downstream
+  consumer composes these into a verifiable install path.
+- **V1.15 is now CLOSED.** All three planned Wellen (A const-time-
+  KID, B GH-Releases backup, C consumer runbook) shipped on
+  2026-05-04. V1.16 candidates (browser-runtime hardening if a
+  hosting decision lands, multi-issuer Sigstore redundancy, auto-
+  verify CI action for downstream consumers) are documented in
+  `.handoff/v1.15-handoff.md` for the next session.
 
 ### V2 — full COSE + policy + SPIFFE
 

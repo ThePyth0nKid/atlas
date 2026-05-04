@@ -1857,6 +1857,14 @@ the HSM).
 
 ## 12. WASM verifier — backup-channel install via GitHub Releases (V1.15 Welle B)
 
+> **Audience note.** This section is the *operator-side* runbook —
+> what the Atlas team running the publish lane needs to know, plus
+> the auditor flow when npmjs.org is unreachable. For the
+> *consumer-side* perspective (lockfile pinning, SLSA provenance
+> verification on every CI install, reproduce-from-source fallback
+> when both channels fail), see
+> [CONSUMER-RUNBOOK.md](CONSUMER-RUNBOOK.md) (V1.15 Welle C).
+
 `@atlas-trust/verify-wasm` ships through two channels by design:
 
 1. **Primary — npmjs.org.** `npm install @atlas-trust/verify-wasm`.

@@ -1699,11 +1699,12 @@ verifiable against either channel's bytes (same SHA, same commit SHA).
   monitoring) that V1.15 explicitly defers.
 - **Lock-file pinning recommendations for downstream consumers.**
   The auditor-side reproducibility story — what `package-lock.json`
-  / `pnpm-lock.yaml` / `yarn.lock` line should consumers commit, how
+  / `pnpm-lock.yaml` / `bun.lockb` line should consumers commit, how
   to re-pin after a backup-channel install, when to verify SLSA
-  provenance — is V1.15 Welle C territory (planned, not yet
-  shipped). Welle B is the upload side; Welle C will be the
-  consumer side.
+  provenance — shipped as V1.15 Welle C in
+  [CONSUMER-RUNBOOK.md](CONSUMER-RUNBOOK.md). Welle B is the upload
+  side; Welle C is the consumer side; together they close the V1.15
+  distribution-resilience story end-to-end.
 - **Browser-runtime hardening.** The playground at
   `apps/wasm-playground/` is unaffected by Welle B: it still loads
   the local `wasm-pack` output via relative paths, with no CSP and
