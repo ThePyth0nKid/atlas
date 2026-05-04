@@ -136,9 +136,17 @@ fn gen_key(secret_path: &PathBuf, pubkey_path: &PathBuf) -> Result<(), String> {
         .map_err(|e| format!("write pubkey to {}: {e}", pubkey_path.display()))?;
 
     eprintln!(
-        "atlas-witness gen-key: wrote secret to {} (mode 0o600 on Unix; chmod 0400 to disable later overwrite) and pubkey to {}",
-        secret_path.display(),
-        pubkey_path.display(),
+        "atlas-witness gen-key:\n  \
+         secret -> {secret} (Unix: mode 0o600 set atomically at create; \
+         IMMEDIATELY run `chmod 0400 {secret}` to drop owner-write — \
+         leaving 0o600 lets a compromised process overwrite the key)\n  \
+         pubkey -> {pubkey} (NON-SENSITIVE — public material; default \
+         umask is fine, NO chmod required, NO 0400 needed)\n  \
+         next: paste the hex pubkey into ATLAS_WITNESS_V1_ROSTER \
+         (crates/atlas-trust-core/src/witness.rs) and bump the crate \
+         version per OPERATOR-RUNBOOK §10.",
+        secret = secret_path.display(),
+        pubkey = pubkey_path.display(),
     );
     Ok(())
 }

@@ -112,6 +112,23 @@ jobs:
           # from `secrets.*`, but the fallback literal ('1234') is NOT
           # masked, so the explicit `set +x` is the load-bearing guard
           # for the fork-PR case.
+          #
+          # Orthogonal exposure (NOT addressed by `set +x`):
+          # `softhsm2-util --init-token --pin "${SOFTHSM2_PIN}" --so-pin
+          # "${SOFTHSM2_SO_PIN}"` below puts the PIN onto the process
+          # argv list. On Linux the PIN is readable via
+          # `/proc/<pid>/cmdline` from any process with sufficient
+          # permissions for the entire lifetime of the `softhsm2-util`
+          # invocation; the window closes only when the process exits
+          # (one-shot init per job — bound is structural, not
+          # time-based). OPERATOR-RUNBOOK §2 covers the wider PIN-argv
+          # discussion (production deploys MUST use the
+          # ATLAS_HSM_PIN_FILE path, never argv). The residual risk is
+          # accepted here because the runner is single-tenant, the PIN
+          # is a throwaway literal scoped to this one job, and the
+          # exposure ends with the one-shot process exit. Removing
+          # `set +x` does NOT close this orthogonal hole — both
+          # defences are needed independently.
           set +x
           # Use a per-workflow tokendir so two parallel runs of this
           # workflow do not race on /var/lib/softhsm. `softhsm2-util

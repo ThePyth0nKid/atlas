@@ -1,6 +1,6 @@
-# Atlas Verifier — Defended Attack Surface (V1.12)
+# Atlas Verifier — Defended Attack Surface (V1.13)
 
-This document describes what the V1.12 verifier (`atlas-trust-core`, exposed as
+This document describes what the V1.13 verifier (`atlas-trust-core`, exposed as
 `atlas-verify-cli` and `atlas-verify-wasm`) actually defends against. It is
 written for auditors and security reviewers who want to know "what does this
 verifier protect, and where are the limits" without reading Rust.
@@ -812,6 +812,135 @@ The trust-property invariants under test are documented inline in
 each lane's workflow file header (`.github/workflows/`); the
 operator-facing failure-handling sketches live in
 `docs/OPERATOR-RUNBOOK.md` §8.
+
+---
+
+## wave-c — independent witness cosignature (V1.13 — in scope)
+
+V1.13 introduces an independent witness cosignature primitive on top
+of the V1.7 anchor chain. A witness is a third party (organisationally
+independent from the issuer) who signs over `chain_head_for(batch)`
+to attest "I observed the chain at this head." The verifier accepts
+signatures only against the pinned `ATLAS_WITNESS_V1_ROSTER`
+(genesis-empty in this version; populated via the wave-C-2
+commissioning ceremony documented in
+`docs/OPERATOR-RUNBOOK.md` §10).
+
+The trust-property addition over V1.12: a forger producing a tampered
+trace must now compromise NOT ONLY the issuer's signing key BUT ALSO
+`require_witness_threshold` independent witness keys. With `M=2-of-N`
+or higher, this materially raises forgery cost — a single
+compromised key (issuer OR witness) is no longer sufficient.
+
+### Wave-C-1 (lenient default) — what landed
+
+- **Per-batch witness slot.** `AnchorBatch.witnesses:
+  Vec<WitnessSig>` carries Ed25519 signatures over
+  `ATLAS_WITNESS_DOMAIN || chain_head_for(batch).to_bytes()`. The
+  domain prefix `b"atlas-witness-v1:"` is distinct from
+  `ANCHOR_CHAIN_DOMAIN` so a chain-head cannot be replayed as a
+  witness signing input or vice versa.
+- **Pinned roster boundary.** `ATLAS_WITNESS_V1_ROSTER:
+  &[(&str, [u8; 32])]` is `&'static`, baked into the trust-core
+  crate at compile time. There is no JSON/env mechanism to add a
+  witness at runtime — commissioning is a code-side change subject
+  to the same source-control review path as a Sigstore log-pubkey
+  rotation. A runtime knob would defeat the trust property.
+- **Lenient evidence row.** Wave-C-1 surfaces a `witnesses` row in
+  `VerifyOutcome.evidence`: failures (unknown kid, bad signature,
+  duplicate kid) appear as `ok=false` with the per-failure
+  breakdown rendered via `WitnessFailure::Display`, but DO NOT
+  invalidate the trace. This lets operators commission and observe
+  cosigners in lower environments before flipping strict mode in
+  production.
+- **Duplicate-kid defence.** The per-batch verifier
+  (`verify_witnesses_against_roster`) runs a `BTreeMap<&str, usize>`
+  pre-pass over the witness slice and rejects every occurrence of a
+  repeated kid as a failure — none counted as verified. Without
+  this, an issuer could satisfy a 3-of-3 quorum by attaching the
+  same valid signature three times under one commissioned key.
+
+### Wave-C-2 (strict mode) — what landed
+
+- **Threshold flag.** `VerifyOptions.require_witness_threshold:
+  usize` (with `0` as the lenient sentinel preserving wave-C-1
+  behaviour) and `atlas-verify-cli --require-witness <N>` reject any
+  trace whose chain-aggregated `verified` count is below the
+  threshold. The check fires regardless of chain presence — a
+  chain-less trace under `--require-witness 1` MUST fail because
+  it cannot possibly carry witness coverage.
+- **Cross-batch dedup.** `aggregate_witnesses_across_chain_with_roster`
+  walks every batch and threads a `BTreeSet<String>` of
+  already-verified kids. A kid that re-appears in a later batch
+  surfaces as a `WitnessFailure` ("duplicate witness_kid across
+  batches") WITHOUT incrementing the global verified count.
+  Preserves M-of-N independence: one compromised witness key cannot
+  satisfy threshold N by signing N batches.
+- **`MAX_WITNESS_KID_LEN = 256`.** Wire-side `witness_kid` cap
+  fires before any roster work; the rejection cost is constant in
+  the input length. The shared `sanitize_kid_for_diagnostic` helper
+  collapses oversized kids to `"<oversize: N bytes>"` placeholders
+  at every site that copies the wire-side string into a
+  `WitnessFailure`, so an attacker submitting a multi-megabyte kid
+  cannot amplify log volume across the per-witness diagnostic + the
+  lenient evidence row's `rendered.join("; ")`.
+- **`ChainHeadHex` newtype** (`atlas-trust-core::anchor`). Strict
+  64-char lowercase-hex constructor + `as_str` / `to_bytes` /
+  `into_inner` / `Display`. Distinguishes "freshly recomputed head"
+  (typed `ChainHeadHex`) from "wire-side string" (`String`) at
+  function-signature granularity, removing a class of refactoring
+  bug where a wire field could silently flow into a recomputed-head
+  slot. `decode_chain_head` delegates to `ChainHeadHex::new` so the
+  length+lowercase invariant has a single source of truth.
+- **Structured failures.** `WitnessVerifyOutcome.failures:
+  Vec<WitnessFailure>` (was `Vec<String>` in wave-C-1) carries the
+  kid + a structured `TrustError`. `WitnessFailure.batch_index` is
+  `pub(crate)` with a public getter — external callers of the
+  per-batch verifier cannot misread the always-`None` field as
+  meaningful, while the chain aggregator owns populating it.
+
+### Trust property after wave-C-2
+
+  `verified == count(distinct kids whose pubkey is in
+   ATLAS_WITNESS_V1_ROSTER AND whose Ed25519-strict signature over
+   ATLAS_WITNESS_DOMAIN || chain_head_bytes validates AND no other
+   batch in the chain already attributed verification to that kid)`
+
+Strict mode adds the invariant `verified >= require_witness_threshold`
+as a hard reject. Lenient mode (`require_witness_threshold = 0`) is
+the wave-C-1 default and surfaces the same `verified` count as
+informational evidence without enforcement.
+
+### Residual risks (V1.13)
+
+- **Genesis-empty production roster.** Until commissioning lands,
+  `ATLAS_WITNESS_V1_ROSTER` is empty and strict mode is operationally
+  unreachable through `verify_trace_with`. The strict-mode passing
+  path is exercised by unit tests in `verify.rs::tests` against a
+  test roster (the `_with_roster` aggregator is `pub(crate)` for
+  this purpose). This is intentional — wave-C-1 / C-2 ship the
+  primitive; the operational rollout is a separate ceremony.
+- **Witness-issuer collusion.** A witness colluding with the issuer
+  defeats independence — the witness signs whatever head the issuer
+  computes, regardless of whether the underlying events are honest.
+  Mitigation is organisational (witnesses must be drawn from
+  organisationally-independent parties with their own incentives to
+  attest honestly), not cryptographic.
+- **What strict mode does NOT cover.** Witness cosignature attests
+  to chain-head observation, not to the per-event payload contents.
+  An issuer with valid signing keys can still produce a trace whose
+  events misrepresent reality; witnesses confirm only that the
+  issuer is not retroactively rewriting what they previously
+  published. The orthogonal defence — Sigstore Rekor anchoring of
+  the bundle hash — covers the "issuer rewriting their own bundle"
+  case (see V1.6+V1.7 sections above).
+- **Witness key compromise.** A single compromised witness key
+  cannot satisfy threshold N >= 2 alone (the cross-batch dedup
+  ensures one kid contributes at most one verified signature across
+  the entire chain). N=1 strict mode is essentially "any commissioned
+  witness must sign" — useful as a deployment-readiness signal but
+  not as a defence against witness compromise. Operators should
+  start at N=1 to validate the commissioning ceremony, then raise.
 
 ---
 

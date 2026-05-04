@@ -84,6 +84,19 @@ jobs:
           # for the fork-PR case. (Mirrors the rationale in
           # hsm-byte-equivalence.yml — kept inline here so a future
           # editor cannot remove `set +x` without seeing the why.)
+          #
+          # Orthogonal exposure (NOT addressed by `set +x`):
+          # `softhsm2-util --init-token --pin "${SOFTHSM2_PIN}" --so-pin
+          # "${SOFTHSM2_SO_PIN}"` below puts the PIN onto the process
+          # argv list, readable via `/proc/<pid>/cmdline` for the
+          # entire lifetime of the invocation; the window closes only
+          # when the one-shot process exits (structural bound, not
+          # time-based). See OPERATOR-RUNBOOK §2 for the production
+          # PIN-argv discussion (production deploys MUST use
+          # ATLAS_HSM_PIN_FILE, never argv). Acceptable here:
+          # single-tenant runner, throwaway literal PIN, exposure ends
+          # with the one-shot process exit. Removing `set +x` does NOT
+          # close this orthogonal hole — both defences are needed.
           set +x
           mkdir -p "${RUNNER_TEMP}/softhsm-tokens"
           cat > "${RUNNER_TEMP}/softhsm2.conf" <<EOF

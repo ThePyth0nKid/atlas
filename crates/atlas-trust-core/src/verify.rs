@@ -1022,6 +1022,23 @@ pub(crate) fn aggregate_witnesses_across_chain_with_roster(
 /// wave C-2), so a strict default would universally pass with "0 of 0
 /// verified" — uninformative — while flipping to a true threshold
 /// without operator opt-in would surprise existing deployments.
+///
+/// # `detail` is a human-readable rendering, NOT structured data
+///
+/// The `detail` string concatenates `WitnessFailure::Display` output
+/// for operator log-grepping. **Programmatic auditor tooling** that
+/// needs structured `Vec<WitnessFailure>` access (kid + structured
+/// `TrustError` + optional `batch_index`) MUST NOT parse the
+/// human-readable detail string — render is non-stable across crate
+/// versions. Library-level callers obtain the structured rollup by
+/// calling [`aggregate_witnesses_across_chain`] directly on the
+/// chain (the same call this function consumes), then iterating
+/// `outcome.failures`. Promoting the structured payload to a
+/// first-class `VerifyEvidence` field is deferred until either
+/// `TrustError` gains `Serialize` (currently `Debug + Clone + Error`
+/// only — see `crate::error::TrustError`) or a dedicated wire-stable
+/// `WitnessFailureWire` projection lands; both are wave-C-3 / V1.14
+/// candidates.
 fn witness_evidence_from_aggregate(aggregate: &WitnessVerifyOutcome) -> VerifyEvidence {
     if aggregate.presented == 0 {
         VerifyEvidence {

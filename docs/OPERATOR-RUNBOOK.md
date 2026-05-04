@@ -1,4 +1,4 @@
-# Atlas — Operator Runbook (V1.12)
+# Atlas — Operator Runbook (V1.13)
 
 This document is the operator's reference for Atlas ceremonies that
 sit *outside* the agent-driven hot path: workspace key migration,
@@ -1212,9 +1212,170 @@ For `sigstore-rekor-nightly` failures:
 | Rotate anchor chain | `atlas-signer rotate-chain --confirm <workspace>` | no | yes (operator-side) |
 | Derive workspace pubkey for inspection | `atlas-signer derive-pubkey --workspace <ws>` | yes | n/a (read-only) |
 | Production-gate enforcement (V1.12+) | configure the HSM trio (§2) — V1.9 `ATLAS_PRODUCTION=1` removed | n/a | n/a |
+| Witness commissioning (V1.13 wave-C-2 — see §10) | edit `ATLAS_WITNESS_V1_ROSTER`, rebuild verifier, deploy with `--require-witness <N>` | no (commissioning is a code-side change) | n/a (verifier-side) |
 
 See [ARCHITECTURE.md §7.3](ARCHITECTURE.md) (V1.9 per-tenant key trust
 model), [§7.4](ARCHITECTURE.md) (V1.10 master-seed gate + wave-2
 sealed-seed loader, V1.12-simplified) and [§7.5](ARCHITECTURE.md)
 (V1.11 wave-3 sealed per-workspace signer); see
 [SECURITY-NOTES.md](SECURITY-NOTES.md) for the full threat model.
+
+---
+
+## 10. Witness commissioning ceremony (V1.13 wave-C-2)
+
+V1.13 introduces an independent witness cosignature attestor: an
+external party that signs over `chain_head_for(batch)` to vouch
+that they observed the chain at that head. The verifier accepts
+witnesses against a *pinned, source-controlled roster*
+(`ATLAS_WITNESS_V1_ROSTER` in `crates/atlas-trust-core/src/witness.rs`).
+Wave-C-1 wired the lenient default (any presented witness surfaces
+in evidence; failures do not block); wave-C-2 promotes this to
+operationally load-bearing via the strict-mode threshold flag.
+
+### Why commissioning is a code-side change, not a config knob
+
+The roster is `&'static [(&'static str, [u8; 32])]` baked into the
+trust-core crate at compile time. There is no JSON/env mechanism to
+add a witness at runtime. This is intentional:
+
+  * The trust property is "verification only against pinned,
+    source-controlled keys." A runtime knob would let an attacker
+    who compromised the verifier's environment add a key — every
+    witness becomes attacker-controlled, threshold defence
+    collapses.
+  * Reproducibility: the same trace + the same trust-core build
+    must yield byte-identical evidence. A runtime roster would
+    silently change verifier output across deployments.
+
+Cost: commissioning a new witness requires a verifier rebuild +
+redeploy. This is by design — the cadence of commissioning ceremonies
+should be operator-deliberate, not casual.
+
+### When to run
+
+  * Before flipping any deployment to `--require-witness <N>` for
+    `N >= 1`. Strict mode against the genesis-empty roster will
+    reject every trace (0 verified < 1 required).
+  * When adding an additional cosigner to raise the threshold from
+    M-of-N to (M+1)-of-(N+1).
+  * When rotating a compromised witness key out of the roster.
+
+### Procedure
+
+```bash
+# 0. Pre-flight: confirm the witness counterparty has generated
+#    their Ed25519 keypair using a process YOU trust (sealed key
+#    storage on their end is the witness's responsibility, not
+#    Atlas's). They send you ONLY the 32-byte raw pubkey.
+#    NEVER accept a private key — defeats the independence property.
+
+# 1. Choose a kid that uniquely names the witness in
+#    auditor-readable form. Suggested format:
+#      "witness-<org>-<purpose>-<rotation-counter>"
+#    Example: "witness-acme-sec-eu-2026-q2"
+#    Constraints (enforced by the verifier):
+#      * Length <= MAX_WITNESS_KID_LEN (256 bytes)
+#      * Must be unique within the roster (duplicate-kid pre-pass
+#        would reject every signature carrying the duplicated kid)
+#      * Must be source-controlled in the same commit that adds
+#        the pubkey — auditors review them as one diff
+
+# 2. Edit the pinned roster in trust-core. Locate the constant:
+#    crates/atlas-trust-core/src/witness.rs:
+#        pub const ATLAS_WITNESS_V1_ROSTER:
+#            &[(&str, [u8; 32])] = &[];
+#    Append your `(kid, pubkey-bytes)` tuple. Use the
+#    `[u8; 32]` literal directly — no base64 indirection — so the
+#    pubkey is reviewable byte-by-byte in the source diff.
+
+# 3. Run the workspace test suite. The
+#    `roster_kids_within_length_cap` test enforces the
+#    MAX_WITNESS_KID_LEN cap at compile time; CI rejects an
+#    over-long kid before the binary ever lands.
+#        cargo test --workspace
+
+# 4. Get the change reviewed. The reviewer checks:
+#    (a) the kid format matches the suggested convention,
+#    (b) the pubkey bytes match what the witness counterparty
+#        published OUT-OF-BAND (e.g., on their corporate page,
+#        in a signed announcement) — never trust a pubkey that
+#        arrived via the same channel as the change request,
+#    (c) the rotation-counter in the kid is incremented if a
+#        prior witness from the same org is being replaced.
+
+# 5. Merge, tag, build, deploy the verifier. Operators verifying
+#    traces with the new witness must be running THIS verifier
+#    build or later — older builds reject the new kid as "not in
+#    pinned roster". Coordinate the rollout with downstream
+#    auditors before flipping --require-witness.
+
+# 6. Once the new verifier is deployed everywhere, raise the
+#    threshold:
+#        atlas-verify-cli verify-trace <trace.json> -k <bundle.json> \
+#            --require-witness <N>
+#    where N is the desired M-of-N quorum. Start with N=1 to
+#    confirm the new witness is actually signing in production
+#    before raising further.
+```
+
+### Verifying the commissioning
+
+After redeployment:
+
+```bash
+# 1. Pull a recent trace bundle from a workspace whose chain
+#    includes a batch the new witness has cosigned.
+
+# 2. Run the verifier with the strict threshold matching the
+#    expected witness count.
+atlas-verify-cli verify-trace trace.json -k bundle.json \
+    --require-witness 1 --output json | jq '.evidence[] |
+    select(.check == "witnesses-threshold")'
+
+# 3. The output must show:
+#    {
+#      "check": "witnesses-threshold",
+#      "ok": true,
+#      "detail": "1 of 1 required witness attestor(s) verified (strict mode)"
+#    }
+#    If `ok` is false, the witness signature did not validate —
+#    confirm the issuer is actually attaching cosignatures (the
+#    `witnesses` evidence row above shows the per-witness breakdown).
+```
+
+### Rotation, revocation, threat model
+
+  * **Rotation**: replace the `(kid, pubkey)` tuple with an
+    incremented rotation-counter in the kid. Old kid stays
+    unrecognised after redeployment — any trace still carrying a
+    cosignature under the old kid surfaces as "not in pinned
+    roster", which is the correct disposition.
+  * **Revocation**: remove the tuple from the roster. Same effect
+    as rotation but without a replacement — drops the witness
+    from the quorum entirely. Operators must lower
+    `--require-witness <N>` accordingly or strict mode rejects
+    every trace until a replacement is commissioned.
+  * **Compromise of one witness key**: cross-batch dedup
+    (V1.13 wave-C-2) ensures one compromised key cannot satisfy
+    threshold N by signing N batches under the same kid. The
+    aggregator counts each kid at most once across the chain.
+    Defence-in-depth: an `M-of-N` threshold with `M >= 2` requires
+    compromising `M` independent witnesses to forge — a real cost
+    increase versus single-witness mode.
+  * **What strict mode does NOT defend against**: a malicious
+    *issuer* with valid signing keys can still produce traces; the
+    witness check confirms third-party observation of the chain
+    head, not that the underlying events are honest. See
+    [SECURITY-NOTES.md](SECURITY-NOTES.md) §wave-c for the full
+    threat model and the lenient/strict mode trust-property table.
+
+### Trust property
+
+`verified == count(distinct kids whose pubkey is in
+ATLAS_WITNESS_V1_ROSTER AND whose Ed25519-strict signature over
+ATLAS_WITNESS_DOMAIN || chain_head_bytes validates AND no other
+batch in the chain already attributed verification to that kid)`.
+
+`require_witness_threshold = N` rejects any trace whose chain
+yields `verified < N`. `N = 0` is the wave-C-1 lenient default.

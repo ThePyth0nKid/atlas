@@ -1,4 +1,4 @@
-# Atlas — System Architecture (V1.12)
+# Atlas — System Architecture (V1.13)
 
 This document is the system-design reference for Atlas. It describes the
 trust property the system exists to enforce, the data model that carries
@@ -1091,6 +1091,58 @@ Headline:
   inline header documenting its trigger surface, the invariant under
   test, and the rationale for SHA-pinned actions + paths-filter +
   permissions block.
+
+### V1.13 — independent witness cosignature (shipped: wave-C-1 lenient + wave-C-2 strict)
+
+- **Wave-C-1 — lenient witness primitive.** A new
+  `WitnessSig { witness_kid: String, signature: String }` slot on
+  every `AnchorBatch` carries Ed25519 signatures over
+  `ATLAS_WITNESS_DOMAIN || chain_head_for(batch).to_bytes()` from
+  third-party cosigners drawn from the pinned
+  `ATLAS_WITNESS_V1_ROSTER` (genesis-empty in this version; populated
+  via the wave-C-2 commissioning ceremony). The verifier surfaces a
+  `witnesses` evidence row in lenient disposition: failures and
+  unknown kids do not invalidate a trace, but auditors see the
+  per-witness breakdown via `WitnessFailure::Display`. Wave-C-1's
+  duplicate-`witness_kid` defence rejects every occurrence of a
+  repeated kid as a failure (the dedup key is `witness_kid`, not the
+  signature bytes) — preventing an issuer from satisfying an M-of-N
+  quorum by attaching N entries under one commissioned kid.
+- **Wave-C-2 — strict-mode threshold.** A new option
+  `VerifyOptions.require_witness_threshold: usize` (with `0` as the
+  lenient sentinel) and the matching CLI flag
+  `atlas-verify-cli --require-witness <N>` promote the witness
+  check to operationally load-bearing: traces with `verified < N`
+  fail (`witnesses-threshold` evidence row carries `ok=false` and a
+  matching error lands in `VerifyOutcome.errors`). The
+  `aggregate_witnesses_across_chain_with_roster` function deduplicates
+  kids across batches via a `BTreeSet<String>` so one compromised key
+  cannot satisfy threshold N by signing N batches under the same
+  kid — preserving M-of-N independence as a load-bearing trust
+  property.
+- **`ChainHeadHex` newtype.** Wraps the canonical 64-char lowercase
+  hex of `chain_head_for(batch)`. The strict constructor rejects
+  any other shape; the production producer (`chain_head_for`)
+  bypasses the constructor on the hot path and a `debug_assert`
+  guards against future `hex` crate behavioural drift. Surfaces the
+  "freshly recomputed head" vs "wire-side string" boundary in the
+  type system so a wire field cannot silently flow into a
+  recomputed-head slot during refactoring.
+- **`MAX_WITNESS_KID_LEN = 256`.** Wire-side `witness_kid` cap fires
+  before any roster lookup; oversized kids never echo in
+  diagnostics — `sanitize_kid_for_diagnostic` collapses them to
+  `"<oversize: N bytes>"` placeholders so an attacker submitting a
+  multi-megabyte kid cannot amplify log volume across the per-witness
+  failure record + lenient evidence row's `rendered.join("; ")`.
+- **Trust property addition (wave-C-2).** `verified ==
+  count(distinct kids whose pubkey is in ATLAS_WITNESS_V1_ROSTER AND
+  whose Ed25519-strict signature over ATLAS_WITNESS_DOMAIN ||
+  chain_head_bytes validates AND no other batch in the chain already
+  attributed verification to that kid)`. Strict mode adds the
+  invariant `verified >= require_witness_threshold` as a hard reject.
+  See [SECURITY-NOTES.md](SECURITY-NOTES.md) §wave-c for the threat
+  model and [OPERATOR-RUNBOOK.md §10](OPERATOR-RUNBOOK.md) for the
+  commissioning ceremony.
 
 ### V2 — full COSE + policy + SPIFFE
 

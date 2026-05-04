@@ -189,6 +189,19 @@ pub fn decode_chain_head(chain_head_hex: &str) -> TrustResult<[u8; 32]> {
 /// event-id semantics into an intermediate state. Inlining keeps the
 /// witness trust domain self-contained and the error shape correct from
 /// the first failure point.
+///
+/// # Production callers MUST pass [`ATLAS_WITNESS_V1_ROSTER`]
+///
+/// The `roster` parameter is exposed as a free slice for **testability
+/// only**: unit tests in this module construct ad-hoc rosters with
+/// freshly generated keypairs to drive each fail-closed branch. The
+/// production verifier ([`crate::verify::verify_trace_with`] →
+/// `aggregate_witnesses_across_chain` → `witness_evidence_from_aggregate`)
+/// always passes [`ATLAS_WITNESS_V1_ROSTER`], the source-controlled
+/// pinned roster — never an env var, file read, or runtime-mutable
+/// source. A future caller in this crate that passes a different
+/// roster in the production path would silently widen the trust
+/// surface; reviewers should reject any such call site.
 pub fn verify_witness_against_roster(
     witness: &WitnessSig,
     chain_head_hex: &str,
@@ -382,6 +395,18 @@ pub struct WitnessVerifyOutcome {
 /// witness_kid" in the lenient evidence row before strict mode is
 /// even enabled) and means a future threshold check can trust that
 /// `verified` already counts only kid-distinct cosignatures.
+///
+/// # Production callers MUST pass [`ATLAS_WITNESS_V1_ROSTER`]
+///
+/// Same testability/production contract as
+/// [`verify_witness_against_roster`]: the `roster` parameter is a free
+/// slice for unit-test ergonomics; production code in this crate
+/// (called via [`crate::verify::verify_trace_with`]) always passes
+/// [`ATLAS_WITNESS_V1_ROSTER`]. The cross-batch dedup that the
+/// chain aggregator layers on top of this function only holds if
+/// every batch is verified against the same roster — passing
+/// different rosters across batches in a future refactor would
+/// silently break the dedup invariant.
 pub fn verify_witnesses_against_roster(
     witnesses: &[WitnessSig],
     chain_head_hex: &str,
