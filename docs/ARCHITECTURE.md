@@ -1,4 +1,4 @@
-# Atlas — System Architecture (V1.15)
+# Atlas — System Architecture (V1.16)
 
 This document is the system-design reference for Atlas. It describes the
 trust property the system exists to enforce, the data model that carries
@@ -1470,6 +1470,45 @@ Headline:
   hosting decision lands, multi-issuer Sigstore redundancy, auto-
   verify CI action for downstream consumers) are documented in
   `.handoff/v1.15-handoff.md` for the next session.
+
+### V1.16 — Browser-runtime hardening of the WASM playground (shipped: Welle A)
+
+- **Strict CSP + SRI + Trusted Types on `apps/wasm-playground/`.** The
+  V1.14 Scope E playground page is hardened against UI-side injection
+  for any deployment beyond pure local-dev. The application code is
+  extracted from inline `<script type="module">` into a sibling
+  `app.js`, allowing a strict CSP without `'unsafe-inline'` on
+  `script-src` and a `sha384` Subresource Integrity hash on the
+  loading `<script>` tag. CSP is shipped via `<meta http-equiv>` so
+  the policy travels with the page bytes (no dependency on the hosting
+  provider sending a `Content-Security-Policy` HTTP header).
+- **Sink-free application discipline.** `app.js` uses only
+  `textContent`, `className`, and `style.display` — no `innerHTML`, no
+  `eval`, no `new Function`, no `setTimeout(string)`, no `*.src` from
+  user input. The CSP enforces this with `require-trusted-types-for
+  'script'; trusted-types 'none'` — any future regression that
+  re-introduces a script-related sink fails at the browser boundary,
+  not at code-review time. This is the load-bearing TT setting for
+  sink-free apps.
+- **Anti-drift validator `tools/playground-csp-check.sh`.** Pure-bash
+  validator (no Node/Python dependency) re-asserts the CSP directives,
+  the SRI hash on `app.js`, and the absence of `'unsafe-inline'` /
+  `'unsafe-eval'` on `script-src` on every run. `--update-sri` flag
+  re-pins the hash after a legitimate `app.js` edit.
+- **Trust property unchanged.** V1.16 Welle A is delivery-side
+  hardening — the verifier's correctness, byte-determinism pins,
+  signature integrity, hash-chain integrity, and anchor verification
+  are unchanged from V1.15. What V1.16 buys is *resistance to UI-side
+  injection* in a hosted playground deployment.
+- **What V1.16 Welle A is NOT yet:** WASM-binary SRI (the
+  `wasm-pack`-emitted loader uses `WebAssembly.instantiateStreaming`,
+  which has no declarative SRI hook — the `WebAssembly.compile`
+  integrity-check spec is proposal stage); service-worker pinning;
+  JS-side input-size cap (the Rust verifier already caps allocation
+  via `MAX_ITEMS_PER_LEVEL`); hosting decision and DNS pinning. These
+  are V1.16 Welle B / V1.17+ candidates documented in
+  [docs/SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-d "What scope-d
+  does NOT cover".
 
 ### V2 — full COSE + policy + SPIFFE
 

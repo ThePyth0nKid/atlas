@@ -16,7 +16,7 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**V1.15 CLOSED (Welle A + Welle B + Welle C shipped) — Welle A: const-time KID-equality invariant (every wire-side KID compare in production code routes through `crate::ct::ct_eq_str`, source-level anti-drift pin in `tests/const_time_kid_invariant.rs`); Welle B: dual-channel WASM distribution (`@atlas-trust/verify-wasm` tarballs uploaded to GitHub Releases on every `v*` tag alongside the existing npm publish, with SHA256 manifest for offline verification — see [OPERATOR-RUNBOOK §12](docs/OPERATOR-RUNBOOK.md)); Welle C: consumer-side reproducibility runbook (exact-version pinning across npm / pnpm / Bun lockfiles, SLSA L3 provenance via `npm audit signatures`, reproduce-from-source fallback — see [CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md)). V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm + browser playground.**
+**V1.16 Welle A shipped — browser-runtime hardening for `apps/wasm-playground/`: strict CSP via `<meta http-equiv>` (`default-src 'none'`, `script-src 'self' 'wasm-unsafe-eval'` — no `'unsafe-inline'`, no `'unsafe-eval'`), Subresource Integrity (sha384) on the application JS, Trusted Types enforcement (`require-trusted-types-for 'script'; trusted-types 'none'` against a sink-free `app.js`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. Anti-drift pin in `tools/playground-csp-check.sh` (pure-bash CI validator). V1.15 CLOSED previously (Welle A const-time KID-equality invariant, Welle B dual-channel WASM distribution via GitHub Releases — see [OPERATOR-RUNBOOK §12](docs/OPERATOR-RUNBOOK.md), Welle C consumer-side reproducibility runbook — see [CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md)). V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm + browser playground.**
 
 Trust-core crate + Rekor anchoring + per-tenant key derivation + HSM-backed signing + independent
 witness attestor (V1.5 mock-issuer, V1.6 live Sigstore Rekor v1, V1.7 anchor-chain + shard
@@ -126,11 +126,21 @@ exact-version pinning across npm / pnpm / Bun lockfiles, SLSA L3 provenance
 verification via `npm audit signatures`, the GH-Releases backup-channel
 install flow, and the reproduce-from-source fallback (clone at the tagged
 commit, `cargo install wasm-pack --locked`, `wasm-pack build`, byte-compare)
-for the both-channels-unreachable scenario. Graph-database integration and
-policy-engine follow in V2.
+for the both-channels-unreachable scenario. V1.16 Welle A hardens the WASM
+playground at `apps/wasm-playground/` for any deployment beyond pure
+local-dev: application code is extracted from inline `<script>` into
+`app.js` so the page can ship a strict `<meta http-equiv>` CSP without
+`'unsafe-inline'` / `'unsafe-eval'` on `script-src`, with sha384 SRI on
+the loading `<script>` tag and Trusted Types enforced (sink-free
+`app.js` discipline; any future regression that introduces `innerHTML`
+/ `eval` / `setTimeout(string)` / `*.src = userInput` fails at the
+browser boundary). A pure-bash anti-drift validator
+(`tools/playground-csp-check.sh`) re-asserts the CSP directives + SRI
+hash on every CI run. Graph-database integration and policy-engine
+follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
-  trust property, write/export flows, V1 → V1.15 → V2 boundaries.
+  trust property, write/export flows, V1 → V1.16 → V2 boundaries.
 - [docs/SECURITY-NOTES.md](docs/SECURITY-NOTES.md) — defended attack
   surface, per-test mapping for auditors.
 - [docs/OPERATOR-RUNBOOK.md](docs/OPERATOR-RUNBOOK.md) — production

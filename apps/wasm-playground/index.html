@@ -3,7 +3,75 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Atlas — In-Browser Verifier (V1.14)</title>
+
+  <!--
+    V1.16 Welle A — browser-runtime hardening.
+
+    Strict CSP shipped via <meta http-equiv> so the policy travels with
+    the page and does NOT depend on a hosting provider sending the right
+    Content-Security-Policy HTTP header. Defence-in-depth either way: a
+    correctly-configured host SHOULD set the same policy as a header (which
+    enables `frame-ancestors`, technically meta-tag-ignored), but the
+    meta-tag policy is enough to block inline-script injection / TrustedTypes
+    sink abuse / unauthorised network egress in a static-hosting deployment.
+
+      default-src 'none'                — deny-by-default; every other
+                                          fetch directive that falls back to
+                                          default-src therefore stays at 'none'
+                                          (img-src, font-src, media-src,
+                                          object-src, frame-src, child-src,
+                                          manifest-src, worker-src, …).
+      script-src 'self' 'wasm-unsafe-eval'
+                                        — allow same-origin <script> + dynamic
+                                          import('./pkg/...') + the dedicated
+                                          WebAssembly.compile/instantiate
+                                          keyword. 'wasm-unsafe-eval' does NOT
+                                          enable JavaScript eval()/new Function.
+      style-src 'self' 'unsafe-inline'  — keep the small inline <style> block
+                                          below. CSS-injection is a much lower-
+                                          severity sink than script injection
+                                          (no JS exec, no DOM API access),
+                                          and avoiding 'unsafe-inline' here
+                                          would force a build step. Tradeoff
+                                          accepted; revisit if a build pipeline
+                                          gets introduced for other reasons.
+      connect-src 'self'                — needed for the dynamic
+                                          import('./pkg/...') WASM-loader
+                                          fetch.
+      form-action 'none'                — no <form> on this page; lock it down
+                                          so future-injected forms can't post.
+      frame-ancestors 'none'            — clickjacking defence (this directive
+                                          is meta-tag-ignored in most browsers
+                                          but a hosting provider applying the
+                                          same policy as a header will honour
+                                          it; harmless to declare here).
+      base-uri 'none'                   — block <base href="…"> attacks that
+                                          would re-anchor every relative URL.
+      require-trusted-types-for 'script'
+                                        — enforce TrustedHTML/TrustedScriptURL
+                                          at every script-related sink. This
+                                          file uses ONLY safe sinks (textContent,
+                                          className, style.display) — see
+                                          app.js:1-19 for the discipline.
+      trusted-types 'none'              — no policy creation allowed. Combined
+                                          with require-trusted-types-for, ANY
+                                          attempt to assign a string to a
+                                          script-sink fails at the browser
+                                          boundary, not at code-review time.
+                                          A future regression that introduces
+                                          innerHTML / document.write / eval
+                                          / setTimeout(string) / etc. will
+                                          throw TypeError immediately.
+
+    Anti-drift: tools/playground-csp-check.sh re-asserts these invariants
+    in a single `bash` step suitable for CI. If a future edit relaxes the
+    policy, the script fails loud.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; require-trusted-types-for 'script'; trusted-types 'none'" />
+  <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+  <meta name="referrer" content="no-referrer" />
+
+  <title>Atlas — In-Browser Verifier (V1.16)</title>
   <style>
     :root {
       --fg: #1a1a1a;
@@ -142,7 +210,8 @@
       Verify an Atlas trace bundle entirely in your browser. No network call.
       The same Rust verifier core that runs in the native CLI, compiled to
       WebAssembly. V1.14 — includes <code>witness_failures</code> wire-surface
-      (Scope J).
+      (Scope J). V1.16 — page hardened with strict CSP, Subresource Integrity
+      on application JS, and Trusted Types enforcement.
     </p>
 
     <div id="error-banner" class="error-banner"></div>
@@ -173,106 +242,37 @@
     </section>
 
     <p class="footer">
+      <strong>Loaded verifier:</strong>
+      <code id="verifier-version">(initialising…)</code> <br />
       <strong>Local dev:</strong> run
       <code>wasm-pack build crates/atlas-verify-wasm --target web --release --out-dir ../../apps/wasm-playground/pkg</code>
       from the repo root, then serve this directory with any static file server
       (<code>npx serve apps/wasm-playground</code> or
       <code>python3 -m http.server</code>). <br />
       <strong>Production:</strong> after V1.14 release, the published artefact
-      is available at <code>@atlas-trust/verify-wasm</code> on npm.
+      is available at <code>@atlas-trust/verify-wasm</code> on npm. <br />
+      <strong>Hardening:</strong> page ships strict CSP + SRI on
+      <code>app.js</code> + Trusted Types enforcement. Editing
+      <code>app.js</code> requires re-running
+      <code>tools/playground-csp-check.sh --update-sri</code> to refresh the
+      sha384 hash on the loading <code>&lt;script&gt;</code> tag.
     </p>
   </main>
 
-  <script type="module">
-    // The WASM module is loaded from ./pkg/, populated by `wasm-pack
-    // build --out-dir ../../apps/wasm-playground/pkg`. Loading via
-    // dynamic import lets us surface a friendly error if pkg/ is missing
-    // (the most common dev-time foot-gun for first-time setup).
+  <!--
+    V1.16 Welle A: application code lives in app.js (extracted from inline
+    <script type="module"> to comply with the strict CSP — `script-src
+    'self'` without 'unsafe-inline'). The integrity= attribute pins the
+    expected sha384 of app.js bytes; if the served bytes don't match, the
+    browser refuses to execute the module and surfaces a console error.
+    crossorigin="anonymous" makes the credentials mode explicit (no cookies
+    sent) and is required for SRI checking on module scripts.
 
-    const banner = document.getElementById('error-banner');
-    const traceInput = document.getElementById('trace-input');
-    const bundleInput = document.getElementById('bundle-input');
-    const verifyBtn = document.getElementById('verify-btn');
-    const verdictEl = document.getElementById('verdict');
-    const outputPanel = document.getElementById('output-panel');
-    const outputEl = document.getElementById('outcome-output');
-
-    function showError(msg) {
-      banner.textContent = msg;
-      banner.style.display = 'block';
-    }
-
-    function clearError() {
-      banner.textContent = '';
-      banner.style.display = 'none';
-    }
-
-    let wasmModule = null;
-    try {
-      const mod = await import('./pkg/atlas_verify_wasm.js');
-      // wasm-pack emits a default export that initialises the wasm
-      // binary. Calling it (with no args) loads `pkg/atlas_verify_wasm_bg.wasm`
-      // sibling-relative.
-      await mod.default();
-      wasmModule = mod;
-      console.log('Atlas verifier loaded, version:', mod.verifier_version());
-    } catch (err) {
-      showError(
-        'Failed to load WASM module from ./pkg/. Run `wasm-pack build ' +
-        'crates/atlas-verify-wasm --target web --release --out-dir ' +
-        '../../apps/wasm-playground/pkg` from the repo root, then reload. ' +
-        '(' + (err && err.message ? err.message : String(err)) + ')'
-      );
-      verifyBtn.disabled = true;
-      throw err;
-    }
-
-    // Enable verify button only once both files are picked.
-    function refreshEnableState() {
-      verifyBtn.disabled = !(traceInput.files.length && bundleInput.files.length);
-    }
-    traceInput.addEventListener('change', refreshEnableState);
-    bundleInput.addEventListener('change', refreshEnableState);
-
-    async function readFileAsText(file) {
-      // FileReader returns a binary string by default; we want text
-      // decoded as UTF-8 (Atlas JSON is canonical UTF-8). Using
-      // file.text() is the modern shorthand and avoids a manual
-      // FileReader dance.
-      return await file.text();
-    }
-
-    verifyBtn.addEventListener('click', async () => {
-      clearError();
-      verdictEl.textContent = '';
-      verdictEl.className = 'verdict';
-      outputPanel.style.display = 'none';
-      outputEl.textContent = '';
-
-      if (!wasmModule) {
-        showError('WASM module not loaded.');
-        return;
-      }
-
-      try {
-        const traceText = await readFileAsText(traceInput.files[0]);
-        const bundleText = await readFileAsText(bundleInput.files[0]);
-        const outcome = wasmModule.verify_trace_json(traceText, bundleText);
-        const valid = outcome && outcome.valid === true;
-        verdictEl.textContent = valid ? 'VALID — all checks passed' : 'INVALID — see outcome below';
-        verdictEl.className = 'verdict ' + (valid ? 'valid' : 'invalid');
-        outputEl.textContent = JSON.stringify(outcome, null, 2);
-        outputPanel.style.display = 'block';
-      } catch (err) {
-        // The WASM bindings throw a JsValue with a string we forwarded
-        // from Rust (`bundle parse: ...` or `verify: ...`); surface it
-        // verbatim so the auditor sees the exact failure mode.
-        showError(
-          'Verification raised an error: ' +
-          (err && err.message ? err.message : String(err))
-        );
-      }
-    });
-  </script>
+    Maintenance: after editing app.js, run
+      tools/playground-csp-check.sh --update-sri
+    to refresh the sha384 hash below. The CI variant (no flag) just
+    asserts the hash matches and fails the build if not.
+  -->
+  <script type="module" src="app.js" integrity="sha384-x2GpUe9H7Srr1SXZCDK4QJ41ookQHgQk3yKTawCzfPMZ6eHEPjYGEm8GG9v+1icq" crossorigin="anonymous"></script>
 </body>
 </html>
