@@ -64,6 +64,22 @@ enum Command {
         /// Defaults to false so V1.5/V1.6 bundles continue to verify.
         #[arg(long)]
         require_anchor_chain: bool,
+
+        /// V1.13 wave C-2 strict mode: minimum number of distinct
+        /// witness cosignatures (kid-distinct, sig-valid, verified
+        /// against `ATLAS_WITNESS_V1_ROSTER`) required across the
+        /// trace's anchor-chain history. `0` (default) is lenient —
+        /// witness coverage is reported but not required. `>= 1` is
+        /// strict — verification fails if fewer witnesses verify than
+        /// the threshold (or if the trace has no `anchor_chain`).
+        ///
+        /// Trust note: lenient mode treats traces without witness
+        /// coverage as valid; strict mode is the security boundary
+        /// for the V1.13 second-trust-domain property. Same lenient/
+        /// strict shape as `--require-anchor-chain` and
+        /// `--require-per-tenant-keys`.
+        #[arg(long, default_value_t = 0)]
+        require_witness: usize,
     },
 }
 
@@ -78,11 +94,13 @@ fn main() -> ExitCode {
             require_per_tenant_keys,
             require_anchors,
             require_anchor_chain,
+            require_witness,
         } => {
             let opts = VerifyOptions {
                 require_per_tenant_keys,
                 require_anchors,
                 require_anchor_chain,
+                require_witness_threshold: require_witness,
             };
             match run_verify_trace(&trace, &pubkey_bundle, &output, &opts) {
                 Ok(true) => ExitCode::from(0),
@@ -121,11 +139,11 @@ fn run_verify_trace(
 
 fn print_human(outcome: &atlas_trust_core::verify::VerifyOutcome, opts: &VerifyOptions) {
     println!();
-    let strict_tag = if opts.require_per_tenant_keys || opts.require_anchors || opts.require_anchor_chain {
-        " (strict mode)"
-    } else {
-        ""
-    };
+    let any_strict = opts.require_per_tenant_keys
+        || opts.require_anchors
+        || opts.require_anchor_chain
+        || opts.require_witness_threshold > 0;
+    let strict_tag = if any_strict { " (strict mode)" } else { "" };
     if outcome.valid {
         println!("  \u{2713} VALID — all checks passed{strict_tag}");
     } else {
@@ -133,16 +151,24 @@ fn print_human(outcome: &atlas_trust_core::verify::VerifyOutcome, opts: &VerifyO
     }
     println!();
     println!("  Verifier: {}", outcome.verifier_version);
-    if opts.require_per_tenant_keys || opts.require_anchors || opts.require_anchor_chain {
-        let mut flags = Vec::new();
+    if any_strict {
+        let mut flags: Vec<String> = Vec::new();
         if opts.require_per_tenant_keys {
-            flags.push("require_per_tenant_keys");
+            flags.push("require_per_tenant_keys".to_string());
         }
         if opts.require_anchors {
-            flags.push("require_anchors");
+            flags.push("require_anchors".to_string());
         }
         if opts.require_anchor_chain {
-            flags.push("require_anchor_chain");
+            flags.push("require_anchor_chain".to_string());
+        }
+        if opts.require_witness_threshold > 0 {
+            // Surface the threshold value (not just the flag name) —
+            // operator needs to know whether they ran 1-of-N or M-of-N.
+            flags.push(format!(
+                "require_witness={}",
+                opts.require_witness_threshold,
+            ));
         }
         println!("  Strict flags: {}", flags.join(", "));
     }

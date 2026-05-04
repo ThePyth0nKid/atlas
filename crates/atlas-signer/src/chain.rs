@@ -124,7 +124,10 @@ pub fn extend_chain_with_batch(
             .map_err(|e| format!("compute existing tail head: {e}"))?;
         let snapshot = AnchorChain {
             history: existing.clone(),
-            head: recomputed_tip,
+            // V1.13 wave-C-2: `chain_head_for` returns `ChainHeadHex`;
+            // unwrap to the wire-side `String` for serde-compatible
+            // assignment to `AnchorChain.head`.
+            head: recomputed_tip.into_inner(),
         };
         let outcome = verify_anchor_chain(&snapshot);
         if !outcome.ok {
@@ -152,7 +155,9 @@ pub fn extend_chain_with_batch(
                 "anchor-chain exceeded u64::MAX batches; structural impossibility tripped"
                     .to_string()
             })?;
-            (next_index, head)
+            // `previous_head` on the wire is a String; unwrap the
+            // V1.13 `ChainHeadHex` newtype here.
+            (next_index, head.into_inner())
         }
         None => (0u64, ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD.to_string()),
     };
@@ -277,7 +282,12 @@ pub fn build_chain_export_from_jsonl(jsonl_bytes: &[u8]) -> Result<AnchorChain, 
     }
     let head = chain_head_for(history.last().unwrap())
         .map_err(|e| format!("chain-export: compute head: {e}"))?;
-    let chain = AnchorChain { history, head };
+    // V1.13 wave-C-2: unwrap the typed ChainHeadHex to the wire-side String
+    // for the AnchorChain.head field (kept String-typed for serde compat).
+    let chain = AnchorChain {
+        history,
+        head: head.into_inner(),
+    };
 
     let outcome = verify_anchor_chain(&chain);
     if !outcome.ok {
@@ -503,7 +513,10 @@ mod tests {
         assert_eq!(history[2].previous_head, chain_head_for(&b1).unwrap());
 
         let head = chain_head_for(history.last().unwrap()).unwrap();
-        let chain = AnchorChain { history, head: head.clone() };
+        let chain = AnchorChain {
+            history,
+            head: head.as_str().to_string(),
+        };
         let outcome = verify_anchor_chain(&chain);
         assert!(
             outcome.ok,
@@ -511,7 +524,13 @@ mod tests {
             outcome.errors,
         );
         assert_eq!(outcome.batches_walked, 3);
-        assert_eq!(outcome.recomputed_head.as_deref(), Some(head.as_str()));
+        // V1.13 wave-C-2: recomputed_head is Option<ChainHeadHex>; compare
+        // via as_str() to keep the assertion shape uniform with other
+        // string-typed comparisons in this test.
+        assert_eq!(
+            outcome.recomputed_head.as_ref().map(|h| h.as_str()),
+            Some(head.as_str()),
+        );
         assert_eq!(b2.batch_index, 2);
     }
 

@@ -9,7 +9,13 @@ pub type TrustResult<T> = Result<T, TrustError>;
 ///
 /// Marked `#[non_exhaustive]` so adding new failure modes in the verifier
 /// is not a SemVer-breaking change for downstream `match` arms.
-#[derive(Debug, Error)]
+///
+/// `Clone` is derived (V1.13 wave-C-2) so structured failure aggregates
+/// like `WitnessVerifyOutcome.failures` can store owned copies of the
+/// per-failure error without forcing callers to invent placeholder
+/// variants. All current variants hold only `String`, so `Clone` is
+/// shallow and SemVer-stable as new variants are added.
+#[derive(Debug, Clone, Error)]
 #[non_exhaustive]
 pub enum TrustError {
     /// Schema version mismatch between trace and verifier build.

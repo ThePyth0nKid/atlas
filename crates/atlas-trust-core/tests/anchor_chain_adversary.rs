@@ -70,7 +70,11 @@ fn build_valid_chain(n: usize) -> AnchorChain {
     let mut prev_head = ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD.to_string();
     for i in 0..n {
         let batch = fixture_batch(i as u64, 1_745_000_000 + i as i64, &prev_head);
-        prev_head = chain_head_for(&batch).expect("chain_head_for fixture");
+        // V1.13 wave-C-2: chain_head_for returns ChainHeadHex; unwrap
+        // to wire-side String for AnchorBatch.previous_head + AnchorChain.head.
+        prev_head = chain_head_for(&batch)
+            .expect("chain_head_for fixture")
+            .into_inner();
         history.push(batch);
     }
     AnchorChain {
@@ -191,7 +195,7 @@ fn chain_previous_head_mismatch_rejected() {
     // The convenience head no longer matches either, but we want the
     // primary error to be the previous_head mismatch — fix .head so
     // the test isolates the link-mismatch error specifically.
-    chain.head = chain_head_for(&chain.history[2]).unwrap();
+    chain.head = chain_head_for(&chain.history[2]).unwrap().into_inner();
     let outcome = atlas_trust_core::anchor::verify_anchor_chain(&chain);
     assert!(!outcome.ok);
     assert!(
@@ -250,7 +254,7 @@ fn chain_genesis_previous_head_must_be_sentinel() {
     let mut chain = build_valid_chain(1);
     chain.history[0].previous_head =
         "1111111111111111111111111111111111111111111111111111111111111111".to_string();
-    chain.head = chain_head_for(&chain.history[0]).unwrap();
+    chain.head = chain_head_for(&chain.history[0]).unwrap().into_inner();
     let outcome = atlas_trust_core::anchor::verify_anchor_chain(&chain);
     assert!(
         !outcome.ok,
@@ -383,9 +387,9 @@ fn chain_coordinated_two_batch_rewrite_rejected() {
     let stray_prev =
         "f00dface00000000f00dface00000000f00dface00000000f00dface00000000".to_string();
     let sub_1 = fixture_batch(1, 1_745_000_500, &stray_prev);
-    let sub_1_head = chain_head_for(&sub_1).unwrap();
+    let sub_1_head = chain_head_for(&sub_1).unwrap().into_inner();
     let sub_2 = fixture_batch(2, 1_745_000_600, &sub_1_head);
-    let sub_2_head = chain_head_for(&sub_2).unwrap();
+    let sub_2_head = chain_head_for(&sub_2).unwrap().into_inner();
 
     // Splice: keep honest[0], replace honest[1] and honest[2] with
     // substitutes, keep honest[3] as-is. honest[3].previous_head no
@@ -501,7 +505,7 @@ fn trace_anchor_with_swapped_proof_rejected_by_coverage() {
         previous_head: ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD.to_string(),
         witnesses: Vec::new(),
     };
-    let head = chain_head_for(&batch).unwrap();
+    let head = chain_head_for(&batch).unwrap().into_inner();
     let chain = AnchorChain {
         history: vec![batch],
         head,

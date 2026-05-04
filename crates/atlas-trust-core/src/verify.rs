@@ -17,7 +17,11 @@ use crate::hashchain::{check_event_hashes, check_parent_links, compute_tips};
 use crate::per_tenant::per_tenant_kid_for;
 use crate::pubkey_bundle::PubkeyBundle;
 use crate::trace_format::{AnchorChain, AnchorEntry, AnchorKind, AtlasTrace};
-use crate::witness::{verify_witnesses_against_roster, ATLAS_WITNESS_V1_ROSTER};
+use crate::error::TrustError;
+use crate::witness::{
+    sanitize_kid_for_diagnostic, verify_witnesses_against_roster, WitnessFailure,
+    WitnessVerifyOutcome, ATLAS_WITNESS_V1_ROSTER,
+};
 
 /// Caller-tunable verification options.
 ///
@@ -60,6 +64,34 @@ pub struct VerifyOptions {
     /// isolation. Strict mode is the real security boundary; document
     /// the gap when communicating about V1.9 to auditors.
     pub require_per_tenant_keys: bool,
+
+    /// V1.13 wave C-2: minimum number of distinct witness signatures
+    /// (i.e., kid-distinct, sig-valid `WitnessSig` entries verified
+    /// against `ATLAS_WITNESS_V1_ROSTER`) that must accompany the
+    /// trace's `anchor_chain` for the trace to verify.
+    ///
+    /// `0` (default) = lenient = wave-C-1 behaviour preserved: failed
+    /// witnesses surface in the `witnesses` evidence row but do NOT
+    /// push to `errors`, and a chain-less trace continues to verify.
+    ///
+    /// `>= 1` = strict = the count of verified witnesses across the
+    /// chain must be `>=` this value. A trace with no `anchor_chain`,
+    /// or a chain with fewer kid-distinct verified cosignatures than
+    /// the threshold, fails verification. The check is independent of
+    /// chain presence — strict mode requires real witness coverage,
+    /// not a side-effect of chain presence.
+    ///
+    /// Trust-trade-off note: same shape as `require_per_tenant_keys`.
+    /// Lenient mode accepts traces without witness coverage; strict
+    /// mode is the real security boundary for the V1.13 second-trust-
+    /// domain property. Auditors who want the witness invariant must
+    /// opt in via `--require-witness <N>` on the verifier CLI.
+    ///
+    /// Duplicate-`witness_kid` defence (wave C-1): a duplicated kid
+    /// counts every occurrence as a failure (none is verified), so
+    /// repeating one valid signature N times under a single
+    /// commissioned key cannot satisfy a threshold of N.
+    pub require_witness_threshold: usize,
 }
 
 /// Full verification result, suitable for showing in a UI / CLI.
@@ -76,18 +108,23 @@ pub struct VerifyOutcome {
 }
 
 impl VerifyOutcome {
-    /// True if any `witnesses` evidence row failed (`ok: false`).
+    /// True if the lenient `witnesses` evidence row reported failures
+    /// (`ok: false`). Independent of the strict-mode `--require-witness`
+    /// threshold check, which lives in its own
+    /// `witnesses-threshold` evidence row and is reflected in
+    /// `outcome.errors` directly.
     ///
-    /// V1.13 wave C-1 surfaces witness verification failures as
-    /// `ok: false` evidence rows but does NOT push them to `errors` —
-    /// `valid` stays true (lenient mode). Wave C-2 will introduce
-    /// `opts.require_witness_threshold`; the strict-mode logic must
-    /// look at the witnesses evidence row, NOT at `errors`. This helper
-    /// gives C-2 a named API to call instead of the fragile inline
-    /// filter (`evidence.iter().any(|e| e.check == "witnesses" && !e.ok)`)
-    /// that would otherwise be scattered at the strict-mode site —
-    /// making it harder to wire the threshold up against the wrong
-    /// source.
+    /// V1.13 wave C-1's lenient disposition surfaces witness
+    /// verification failures as `ok: false` evidence rows but does NOT
+    /// push them to `errors` — `valid` stays true (so an issuer that
+    /// attaches witnesses BEFORE the corresponding pubkey is
+    /// commissioned does not break verification). This helper gives
+    /// auditor tooling and CLI summaries a typed accessor for "did the
+    /// lenient witness row report any failure?" without scanning
+    /// evidence by string-match. Strict-mode callers do NOT need this
+    /// helper: the threshold check pushes its own `witnesses-threshold`
+    /// failure into `errors`, and `outcome.valid == false` is the
+    /// canonical strict-mode signal.
     pub fn has_witness_failures(&self) -> bool {
         self.evidence
             .iter()
@@ -481,7 +518,7 @@ pub fn verify_trace_with(
     // Lenient by default: traces without `anchor_chain` continue to
     // verify (V1.5/V1.6 compatibility). Strict mode (`require_anchor_chain`)
     // demands the chain be present.
-    match &trace.anchor_chain {
+    let witness_aggregate = match &trace.anchor_chain {
         None => {
             if opts.require_anchor_chain {
                 let msg = "strict mode: trace has no anchor_chain, but require_anchor_chain is set"
@@ -498,6 +535,15 @@ pub fn verify_trace_with(
                     ok: true,
                     detail: "no anchor_chain claimed (lenient mode passes)".to_string(),
                 });
+            }
+            // No chain ⇒ no witnesses possible. Empty aggregate so the
+            // strict-mode threshold check below can run uniformly
+            // regardless of chain presence (otherwise an off-by-one
+            // would let chain-less traces silently pass strict mode).
+            WitnessVerifyOutcome {
+                presented: 0,
+                verified: 0,
+                failures: Vec::new(),
             }
         }
         Some(chain) => {
@@ -518,8 +564,8 @@ pub fn verify_trace_with(
             } else {
                 let tip_short = outcome
                     .recomputed_head
-                    .as_deref()
-                    .map(|h| &h[..16])
+                    .as_ref()
+                    .map(|h| &h.as_str()[..16])
                     .unwrap_or("<empty>");
                 evidence.push(VerifyEvidence {
                     check: "anchor-chain".to_string(),
@@ -628,9 +674,40 @@ pub fn verify_trace_with(
             }
 
             // 8c. Witness cosignatures (V1.13 Scope C, lenient default).
-            evidence.push(witness_evidence_for_chain(chain));
+            //
+            // Compute the aggregate ONCE — the same value drives both
+            // the lenient evidence row here and the wave-C-2 strict
+            // threshold check after this match. Walking the chain twice
+            // would not only waste CPU but risk the two consumers
+            // disagreeing if a future refactor only updated one path.
+            let aggregate = aggregate_witnesses_across_chain(chain);
+            evidence.push(witness_evidence_from_aggregate(&aggregate));
+            aggregate
         }
-    }
+    };
+
+    // 8d. Witness threshold (V1.13 wave C-2 strict mode).
+    //
+    // Promotes wave-C-1's lenient witness-evidence row into a hard
+    // failure when `opts.require_witness_threshold > 0` and the
+    // chain-aggregated `verified` count is below the threshold.
+    //
+    // Independent of chain presence: a chain-less trace under strict
+    // mode (threshold >= 1) MUST fail because it cannot possibly carry
+    // witness coverage. The empty aggregate populated in the chain-None
+    // branch above guarantees this without a special-case.
+    //
+    // Wave-C-1's `WitnessOutcome.verified` already counts only
+    // kid-distinct, sig-valid cosignatures (the duplicate-`witness_kid`
+    // pre-pass rejects every occurrence of a repeated kid as a
+    // failure), so an issuer cannot satisfy threshold N by attaching
+    // one valid signature N times under one commissioned key.
+    apply_witness_threshold(
+        witness_aggregate.verified,
+        opts.require_witness_threshold,
+        &mut evidence,
+        &mut errors,
+    );
 
     let valid = errors.is_empty();
 
@@ -639,6 +716,56 @@ pub fn verify_trace_with(
         evidence,
         errors,
         verifier_version: crate::VERIFIER_VERSION.to_string(),
+    }
+}
+
+/// Apply the V1.13 wave-C-2 strict-mode witness threshold check.
+///
+/// Threshold == 0 is the lenient sentinel (wave-C-1 default) — emits
+/// no evidence row and no error so the call site stays uniform across
+/// lenient/strict modes. Threshold >= 1 emits a `witnesses-threshold`
+/// evidence row in either disposition (pass: `ok=true`; fail:
+/// `ok=false` + error pushed onto the top-level errors list, which
+/// makes the trace invalid).
+///
+/// Lifted out of `verify_trace_with` as a `pub(crate)` helper so the
+/// unit test in this module's test block can drive it directly with a
+/// chain-aggregator outcome built against a test roster — the
+/// production `ATLAS_WITNESS_V1_ROSTER` is genesis-empty, so the
+/// passing branch (`verified >= threshold`) cannot otherwise be
+/// exercised through `verify_trace_with` until commissioning lands.
+/// Keeps the threshold check single-source-of-truth: a future text or
+/// shape change at the helper propagates to both the production call
+/// site and the test, preventing silent drift.
+pub(crate) fn apply_witness_threshold(
+    verified: usize,
+    threshold: usize,
+    evidence: &mut Vec<VerifyEvidence>,
+    errors: &mut Vec<String>,
+) {
+    if threshold == 0 {
+        return;
+    }
+    if verified < threshold {
+        let msg = format!(
+            "strict mode: {} of {} required witness attestor(s) verified (--require-witness)",
+            verified, threshold,
+        );
+        errors.push(msg.clone());
+        evidence.push(VerifyEvidence {
+            check: "witnesses-threshold".to_string(),
+            ok: false,
+            detail: msg,
+        });
+    } else {
+        evidence.push(VerifyEvidence {
+            check: "witnesses-threshold".to_string(),
+            ok: true,
+            detail: format!(
+                "{} of {} required witness attestor(s) verified (strict mode)",
+                verified, threshold,
+            ),
+        });
     }
 }
 
@@ -676,21 +803,15 @@ fn decode_b64url(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
     URL_SAFE_NO_PAD.decode(s)
 }
 
-/// Walk an `AnchorChain` and produce a `witnesses` evidence row
-/// summarising how many witness sigs were presented across all batches,
-/// how many verified against `ATLAS_WITNESS_V1_ROSTER`, and what (if
-/// any) failed.
+/// Walk an `AnchorChain` and produce a `WitnessVerifyOutcome`
+/// aggregated across every batch in `chain.history` against
+/// `ATLAS_WITNESS_V1_ROSTER`.
 ///
-/// Lenient mode (current — V1.13 wave C-1): failed witnesses are
-/// surfaced as `ok: false` evidence carrying a per-failure breakdown,
-/// but the caller does NOT push the failures into the top-level
-/// `errors` collection — the trace stays valid. Rationale: V1.13 ships
-/// with an empty roster (commissioning ceremony lands in wave C-2), so
-/// a strict default would universally pass with "0 of 0 verified" —
-/// uninformative — while flipping to a true threshold without operator
-/// opt-in would surprise existing deployments. Wave C-2 will add an
-/// `opts.require_witness_threshold` flag that promotes the failures to
-/// `errors` when set.
+/// Two aggregations happen here:
+///   * `presented` and `verified` counts sum across batches.
+///   * `failures` accumulate with a `batch[N]` prefix per entry so the
+///     auditor diagnostic identifies which batch the witness was
+///     attached to — important when one batch fails and another passes.
 ///
 /// We do NOT gate this on the chain-internal walk's success: a witness
 /// sig commits to one SPECIFIC batch's recomputed head, which is
@@ -698,10 +819,61 @@ fn decode_b64url(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
 /// cleanly. The chain-link check and the witness check are independent
 /// trust properties — surfacing both is more useful than collapsing
 /// them.
-fn witness_evidence_for_chain(chain: &AnchorChain) -> VerifyEvidence {
+///
+/// Wave-C-2 (strict mode) reads the aggregate's `verified` count to
+/// evaluate `opts.require_witness_threshold`; wave-C-1 (lenient
+/// evidence) derives a `VerifyEvidence` row from the same aggregate via
+/// `witness_evidence_from_aggregate`. Computing once per trace keeps
+/// the two callers grounded in the same source of truth.
+///
+/// **Cross-batch kid distinctness (V1.13 wave-C-2 security fix).** The
+/// per-batch verifier (`verify_witnesses_against_roster`) rejects
+/// duplicate-`witness_kid` *within* a single batch via the BTreeMap
+/// pre-pass, but the chain-level rollup must also enforce
+/// distinctness *across* batches: otherwise an issuer holding a single
+/// commissioned key could place one valid `WitnessSig` from kid `k`
+/// in each of N batches and satisfy `require_witness_threshold = N`
+/// with only ONE independent attestor.
+///
+/// Each kid that verifies is recorded in `verified_kids: BTreeSet`
+/// (BTreeSet for deterministic ordering and to remove a hash-DoS
+/// vector); a subsequent batch presenting the same kid does NOT
+/// increment `verified` even if its signature is otherwise valid —
+/// instead it surfaces as a `WitnessFailure` carrying the
+/// "duplicate witness_kid across batches" reason. Without this
+/// guard, the M-of-N trust property would degrade to "one key signed
+/// N batches" — equivalent to no threshold at all from a
+/// trust-domain-separation perspective.
+pub(crate) fn aggregate_witnesses_across_chain(chain: &AnchorChain) -> WitnessVerifyOutcome {
+    aggregate_witnesses_across_chain_with_roster(chain, ATLAS_WITNESS_V1_ROSTER)
+}
+
+/// Roster-parameterised variant of [`aggregate_witnesses_across_chain`].
+///
+/// Production code calls the un-parameterised wrapper (which pins
+/// `ATLAS_WITNESS_V1_ROSTER` so the trust property — verification only
+/// against pinned, source-controlled keys — is enforced at the
+/// callsite). This `_with_roster` form exists so the cross-batch
+/// dedup logic can be exercised against a test roster — the genesis
+/// `ATLAS_WITNESS_V1_ROSTER` is empty, so no kid can ever reach the
+/// `verified_kids` insertion path through the production wrapper.
+/// Without this seam, the cross-batch dedup branch would be dead code
+/// from a test-coverage perspective even though it is the load-bearing
+/// defence against the M-of-N independence bypass.
+pub(crate) fn aggregate_witnesses_across_chain_with_roster(
+    chain: &AnchorChain,
+    roster: &[(&str, [u8; 32])],
+) -> WitnessVerifyOutcome {
+    use std::collections::BTreeSet;
+
     let mut presented = 0usize;
     let mut verified = 0usize;
-    let mut failures: Vec<String> = Vec::new();
+    let mut failures: Vec<WitnessFailure> = Vec::new();
+    // Tracks every kid that has been counted as `verified` in any
+    // prior batch. A kid that re-appears in a later batch is rejected
+    // as a cross-batch duplicate — preserving the M-of-N independence
+    // property under threshold strict mode.
+    let mut verified_kids: BTreeSet<String> = BTreeSet::new();
 
     for batch in &chain.history {
         if batch.witnesses.is_empty() {
@@ -713,50 +885,175 @@ fn witness_evidence_for_chain(chain: &AnchorChain) -> VerifyEvidence {
                 // chain_head_for failed for THIS batch; we can't
                 // verify its witnesses. Record as a witness-side
                 // diagnostic — counted as "presented but failed".
+                // Wrap as `BadWitness` so consumers filtering on
+                // error variant see one consistent witness-domain
+                // bucket (rather than mixed `BadWitness` +
+                // `Encoding`); the original encoding error text is
+                // preserved in `reason`.
                 presented += batch.witnesses.len();
                 for w in &batch.witnesses {
-                    failures.push(format!(
-                        "batch[{}] witness {}: chain_head recompute failed: {}",
-                        batch.batch_index, w.witness_kid, e,
-                    ));
+                    // Sanitize the kid before it flows into the
+                    // failure record — the wire-side string is
+                    // attacker-controlled and bypasses the per-batch
+                    // verifier's `MAX_WITNESS_KID_LEN` guard on this
+                    // error path (we never call
+                    // `verify_witness_against_roster` when
+                    // `chain_head_for` fails for the batch). Without
+                    // this clamp, an oversized kid would land in
+                    // `WitnessFailure.witness_kid` and again — via
+                    // `Display` — in the lenient evidence row's
+                    // `rendered.join("; ")`, amplifying log volume by
+                    // the kid byte-length on the failure path. The
+                    // shared `sanitize_kid_for_diagnostic` helper
+                    // keeps the placeholder shape byte-identical with
+                    // the per-batch verifier path so auditor
+                    // diagnostics stay uniform.
+                    let sanitized_kid = sanitize_kid_for_diagnostic(&w.witness_kid);
+                    failures.push(WitnessFailure {
+                        batch_index: Some(batch.batch_index),
+                        witness_kid: sanitized_kid.clone(),
+                        error: TrustError::BadWitness {
+                            witness_kid: sanitized_kid,
+                            reason: format!("chain_head recompute failed: {}", e),
+                        },
+                    });
                 }
                 continue;
             }
         };
         let batch_outcome = verify_witnesses_against_roster(
             &batch.witnesses,
-            &head,
-            ATLAS_WITNESS_V1_ROSTER,
+            head.as_str(),
+            roster,
         );
         presented += batch_outcome.presented;
-        verified += batch_outcome.verified;
+
+        // Build the per-batch failed-kid set. The per-batch verifier
+        // already records EVERY occurrence of a duplicate-within-batch
+        // kid as a failure (so a kid in this set may have appeared
+        // multiple times), making set membership a sufficient test for
+        // "this witness did NOT verify at the per-batch level".
+        let batch_failed_kids: BTreeSet<&str> = batch_outcome
+            .failures
+            .iter()
+            .map(|f| f.witness_kid.as_str())
+            .collect();
+
+        // Walk the batch's witnesses to apply cross-batch dedup. A
+        // witness whose kid verified at the per-batch level AND is not
+        // already in `verified_kids` increments the global counter and
+        // joins the seen-set; one that re-appears generates a
+        // cross-batch-duplicate failure WITHOUT incrementing.
+        for w in &batch.witnesses {
+            if batch_failed_kids.contains(w.witness_kid.as_str()) {
+                // Already accounted for in batch_outcome.failures
+                // (re-emitted with batch_index below). No cross-batch
+                // bookkeeping for failed-at-batch-level witnesses.
+                continue;
+            }
+            if verified_kids.contains(&w.witness_kid) {
+                // This kid already verified in an earlier batch.
+                // Reject as cross-batch duplicate — this signature is
+                // valid in isolation but does NOT add an independent
+                // attestor to the threshold count.
+                failures.push(WitnessFailure {
+                    batch_index: Some(batch.batch_index),
+                    witness_kid: w.witness_kid.clone(),
+                    error: TrustError::BadWitness {
+                        witness_kid: w.witness_kid.clone(),
+                        reason: "duplicate witness_kid across batches \
+                                 (already verified in an earlier batch — \
+                                 does not count toward M-of-N threshold)"
+                            .to_string(),
+                    },
+                });
+            } else {
+                verified += 1;
+                verified_kids.insert(w.witness_kid.clone());
+            }
+        }
+
+        // Per-batch failures arrive without batch context (the
+        // verifier-side helper has no batch_index in scope); attach
+        // it here so the chain-aggregate consumer (evidence row,
+        // strict-mode check) sees uniformly-batched failures.
+        //
+        // The `debug_assert` enforces the per-batch-verifier-side
+        // contract structurally rather than by comment: if a future
+        // refactor of `verify_witnesses_against_roster` ever attaches
+        // a `batch_index` itself, the silent overwrite below would
+        // produce misleading audit trails. Crash in dev/test rather
+        // than ship the regression to production. (Release builds
+        // accept the overwrite to keep the per-witness rollup hot
+        // path branch-light.)
         for f in batch_outcome.failures {
-            failures.push(format!("batch[{}] {}", batch.batch_index, f));
+            debug_assert!(
+                f.batch_index.is_none(),
+                "verify_witnesses_against_roster must not set batch_index — \
+                 the chain aggregator owns that field. Saw Some({:?}) on kid {}.",
+                f.batch_index,
+                f.witness_kid,
+            );
+            failures.push(WitnessFailure {
+                batch_index: Some(batch.batch_index),
+                witness_kid: f.witness_kid,
+                error: f.error,
+            });
         }
     }
 
-    if presented == 0 {
+    WitnessVerifyOutcome {
+        presented,
+        verified,
+        failures,
+    }
+}
+
+/// Derive the wave-C-1 `witnesses` evidence row from a chain-aggregated
+/// `WitnessVerifyOutcome`. Lenient disposition: a non-empty `failures`
+/// list surfaces as `ok: false` carrying the per-failure breakdown,
+/// but the caller does NOT push the failures into the top-level
+/// `errors` collection — the trace stays valid. Wave-C-2 strict-mode
+/// promotion happens at the threshold check site, separate from this
+/// evidence row.
+///
+/// Rationale for the no-op disposition when nothing was presented:
+/// V1.13 ships with an empty roster (commissioning ceremony lands in
+/// wave C-2), so a strict default would universally pass with "0 of 0
+/// verified" — uninformative — while flipping to a true threshold
+/// without operator opt-in would surprise existing deployments.
+fn witness_evidence_from_aggregate(aggregate: &WitnessVerifyOutcome) -> VerifyEvidence {
+    if aggregate.presented == 0 {
         VerifyEvidence {
             check: "witnesses".to_string(),
             ok: true,
             detail: "no witnesses presented (lenient mode passes)".to_string(),
         }
-    } else if failures.is_empty() {
+    } else if aggregate.failures.is_empty() {
         VerifyEvidence {
             check: "witnesses".to_string(),
             ok: true,
-            detail: format!("{} witness sig(s) verified across chain history", verified),
+            detail: format!(
+                "{} witness sig(s) verified across chain history",
+                aggregate.verified,
+            ),
         }
     } else {
+        // Render failures via WitnessFailure's Display impl — keeps
+        // the lenient detail human-readable while the structured
+        // `Vec<WitnessFailure>` remains available for programmatic
+        // consumers.
+        let rendered: Vec<String> =
+            aggregate.failures.iter().map(|f| f.to_string()).collect();
         VerifyEvidence {
             check: "witnesses".to_string(),
             ok: false,
             detail: format!(
-                "lenient: {} of {} witness sig(s) verified; {} failure(s) recorded but non-blocking (strict --require-witness deferred to V1.13 wave C-2): {}",
-                verified,
-                presented,
-                failures.len(),
-                failures.join("; "),
+                "lenient: {} of {} witness sig(s) verified; {} failure(s) recorded but non-blocking (set --require-witness <N> to promote to errors): {}",
+                aggregate.verified,
+                aggregate.presented,
+                aggregate.failures.len(),
+                rendered.join("; "),
             ),
         }
     }
@@ -805,7 +1102,7 @@ mod tests {
     #[test]
     fn witnesses_evidence_empty_history_passes_lenient() {
         let chain = empty_chain();
-        let ev = witness_evidence_for_chain(&chain);
+        let ev = witness_evidence_from_aggregate(&aggregate_witnesses_across_chain(&chain));
         assert_eq!(ev.check, "witnesses");
         assert!(ev.ok, "empty history must pass lenient: {ev:?}");
         assert!(
@@ -825,11 +1122,11 @@ mod tests {
             0,
             ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD,
         ));
-        let head_zero = chain_head_for(&chain.history[0]).unwrap();
+        let head_zero = chain_head_for(&chain.history[0]).unwrap().into_inner();
         chain.history.push(batch_no_witnesses(1, &head_zero));
-        chain.head = chain_head_for(&chain.history[1]).unwrap();
+        chain.head = chain_head_for(&chain.history[1]).unwrap().into_inner();
 
-        let ev = witness_evidence_for_chain(&chain);
+        let ev = witness_evidence_from_aggregate(&aggregate_witnesses_across_chain(&chain));
         assert!(ev.ok);
         assert!(
             ev.detail.contains("no witnesses presented"),
@@ -854,9 +1151,9 @@ mod tests {
             signature: "A".repeat(86),
         });
         chain.history.push(batch);
-        chain.head = chain_head_for(&chain.history[0]).unwrap();
+        chain.head = chain_head_for(&chain.history[0]).unwrap().into_inner();
 
-        let ev = witness_evidence_for_chain(&chain);
+        let ev = witness_evidence_from_aggregate(&aggregate_witnesses_across_chain(&chain));
         assert!(!ev.ok, "unknown-kid witness must surface as ok=false: {ev:?}");
         assert!(ev.detail.contains("0 of 1"), "detail must name presented/verified counts: {}", ev.detail);
         assert!(
@@ -965,7 +1262,7 @@ mod tests {
             0,
             ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD,
         ));
-        let head_zero = chain_head_for(&chain.history[0]).unwrap();
+        let head_zero = chain_head_for(&chain.history[0]).unwrap().into_inner();
 
         let mut batch_one = batch_no_witnesses(1, &head_zero);
         batch_one.witnesses.push(WitnessSig {
@@ -973,14 +1270,311 @@ mod tests {
             signature: "B".repeat(86),
         });
         chain.history.push(batch_one);
-        chain.head = chain_head_for(&chain.history[1]).unwrap();
+        chain.head = chain_head_for(&chain.history[1]).unwrap().into_inner();
 
-        let ev = witness_evidence_for_chain(&chain);
+        let ev = witness_evidence_from_aggregate(&aggregate_witnesses_across_chain(&chain));
         assert!(!ev.ok);
         assert!(
             ev.detail.contains("batch[1]"),
             "detail must label which batch the failure belongs to: {}",
             ev.detail,
+        );
+    }
+
+    /// Cross-batch kid distinctness (V1.13 wave-C-2 SEC HIGH-1
+    /// regression test). Two batches each carry a validly-signed
+    /// witness from the SAME commissioned kid. Without the cross-batch
+    /// dedup in `aggregate_witnesses_across_chain_with_roster`, this
+    /// would yield `verified == 2` and let an issuer holding a single
+    /// commissioned key satisfy a 2-of-N threshold trivially —
+    /// collapsing the M-of-N independence property to "one key signed
+    /// N batches".
+    ///
+    /// Expected aggregate after the fix: `presented == 2`,
+    /// `verified == 1` (only the first occurrence counts), and one
+    /// `WitnessFailure` carrying a "duplicate witness_kid across
+    /// batches" reason against `batch[1]`.
+    #[test]
+    fn cross_batch_duplicate_kid_does_not_double_count_verified() {
+        use crate::witness::{decode_chain_head, witness_signing_input};
+        use ed25519_dalek::{Signer, SigningKey};
+
+        // Test roster: ONE commissioned kid `k1` whose pubkey we
+        // control via `sk1`. We deliberately do NOT touch
+        // ATLAS_WITNESS_V1_ROSTER (the genesis-empty production roster
+        // invariant must hold); the parameterised aggregator
+        // `_with_roster` lets us inject this test roster instead.
+        let sk1 = SigningKey::from_bytes(&[7u8; 32]);
+        let pk1 = sk1.verifying_key().to_bytes();
+        let test_roster: &[(&str, [u8; 32])] = &[("k1-cross-batch-dup", pk1)];
+
+        // Batch 0 — no parent, signs over its own head.
+        let mut chain = empty_chain();
+        let mut batch0 = batch_no_witnesses(0, ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        chain.history.push(batch0.clone());
+        let head0 = chain_head_for(&chain.history[0]).unwrap();
+        // Sign batch 0's head under k1.
+        let head0_bytes = decode_chain_head(head0.as_str()).unwrap();
+        let sig0 = sk1.sign(&witness_signing_input(&head0_bytes));
+        batch0.witnesses.push(WitnessSig {
+            witness_kid: "k1-cross-batch-dup".to_string(),
+            signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sig0.to_bytes()),
+        });
+        // Replace batch 0 in history with the witnessed copy. The head
+        // changes because witnesses ARE part of the canonical
+        // chain-batch body (verified via `chain_head_for`'s
+        // canonical-bytes invariant). Recompute.
+        chain.history[0] = batch0;
+        let head0_witnessed = chain_head_for(&chain.history[0]).unwrap();
+
+        // Batch 1 — chains off batch 0's NEW head (post-witness).
+        let mut batch1 = batch_no_witnesses(1, head0_witnessed.as_str());
+        chain.history.push(batch1.clone());
+        let head1 = chain_head_for(&chain.history[1]).unwrap();
+        let head1_bytes = decode_chain_head(head1.as_str()).unwrap();
+        let sig1 = sk1.sign(&witness_signing_input(&head1_bytes));
+        batch1.witnesses.push(WitnessSig {
+            witness_kid: "k1-cross-batch-dup".to_string(),
+            signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sig1.to_bytes()),
+        });
+        chain.history[1] = batch1;
+        let head1_witnessed = chain_head_for(&chain.history[1]).unwrap();
+        chain.head = head1_witnessed.into_inner();
+
+        // Aggregate against the test roster.
+        let agg =
+            aggregate_witnesses_across_chain_with_roster(&chain, test_roster);
+
+        assert_eq!(agg.presented, 2, "two batches each present a sig: presented=2");
+        assert_eq!(
+            agg.verified, 1,
+            "cross-batch dedup must collapse to verified=1 (only first batch counts), got {}",
+            agg.verified,
+        );
+        assert_eq!(
+            agg.failures.len(),
+            1,
+            "the second-batch occurrence must surface as ONE failure, got {:?}",
+            agg.failures,
+        );
+        let f = &agg.failures[0];
+        assert_eq!(
+            f.batch_index,
+            Some(1),
+            "the failure must be tagged to batch[1] (the duplicate occurrence)",
+        );
+        assert_eq!(f.witness_kid, "k1-cross-batch-dup");
+        assert!(
+            matches!(
+                &f.error,
+                TrustError::BadWitness { reason, .. }
+                    if reason.contains("duplicate witness_kid across batches")
+            ),
+            "failure must be BadWitness with the cross-batch dup reason: {:?}",
+            f.error,
+        );
+    }
+
+    /// Cross-batch dedup must NOT poison sibling kids: batch[0] verifies
+    /// kid A, batch[1] verifies kid B. Both count toward the threshold
+    /// (verified == 2). Defends against an over-broad dedup that would
+    /// reject any second-batch witness regardless of kid.
+    #[test]
+    fn cross_batch_distinct_kids_both_count() {
+        use crate::witness::{decode_chain_head, witness_signing_input};
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let sk_a = SigningKey::from_bytes(&[3u8; 32]);
+        let pk_a = sk_a.verifying_key().to_bytes();
+        let sk_b = SigningKey::from_bytes(&[5u8; 32]);
+        let pk_b = sk_b.verifying_key().to_bytes();
+        let test_roster: &[(&str, [u8; 32])] =
+            &[("kid-a", pk_a), ("kid-b", pk_b)];
+
+        let mut chain = empty_chain();
+        let mut batch0 = batch_no_witnesses(0, ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        chain.history.push(batch0.clone());
+        let head0 = chain_head_for(&chain.history[0]).unwrap();
+        let sig_a = sk_a.sign(&witness_signing_input(
+            &decode_chain_head(head0.as_str()).unwrap(),
+        ));
+        batch0.witnesses.push(WitnessSig {
+            witness_kid: "kid-a".to_string(),
+            signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sig_a.to_bytes()),
+        });
+        chain.history[0] = batch0;
+        let head0_witnessed = chain_head_for(&chain.history[0]).unwrap();
+
+        let mut batch1 = batch_no_witnesses(1, head0_witnessed.as_str());
+        chain.history.push(batch1.clone());
+        let head1 = chain_head_for(&chain.history[1]).unwrap();
+        let sig_b = sk_b.sign(&witness_signing_input(
+            &decode_chain_head(head1.as_str()).unwrap(),
+        ));
+        batch1.witnesses.push(WitnessSig {
+            witness_kid: "kid-b".to_string(),
+            signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sig_b.to_bytes()),
+        });
+        chain.history[1] = batch1;
+        chain.head = chain_head_for(&chain.history[1]).unwrap().into_inner();
+
+        let agg =
+            aggregate_witnesses_across_chain_with_roster(&chain, test_roster);
+        assert_eq!(agg.presented, 2);
+        assert_eq!(
+            agg.verified, 2,
+            "distinct kids across batches must BOTH count, got {}",
+            agg.verified,
+        );
+        assert!(
+            agg.failures.is_empty(),
+            "no failures expected for distinct cross-batch kids: {:?}",
+            agg.failures,
+        );
+    }
+
+    /// `apply_witness_threshold` with `threshold == 0` is the lenient
+    /// sentinel — emits no evidence row, no error, regardless of the
+    /// `verified` count. Pins that strict-mode wiring stays opt-in
+    /// (wave-C-1 traces continue to verify on a wave-C-2 verifier with
+    /// default `VerifyOptions`).
+    #[test]
+    fn apply_witness_threshold_zero_is_no_op() {
+        let mut evidence: Vec<VerifyEvidence> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        // Even with verified=0, threshold=0 must NOT emit a row or error.
+        apply_witness_threshold(0, 0, &mut evidence, &mut errors);
+        assert!(evidence.is_empty(), "threshold=0 must not emit evidence rows: {evidence:?}");
+        assert!(errors.is_empty(), "threshold=0 must not emit errors: {errors:?}");
+    }
+
+    /// `apply_witness_threshold` with `verified < threshold` emits an
+    /// `ok=false` `witnesses-threshold` row AND pushes a matching error
+    /// onto the top-level errors list (which makes `verify_trace_with`
+    /// return `valid=false`). Pins the failure-side wiring at the
+    /// helper level so a refactor that drops the error push (and only
+    /// emits the evidence row) cannot silently let strict-mode failures
+    /// pass.
+    #[test]
+    fn apply_witness_threshold_fail_path_pushes_evidence_and_error() {
+        let mut evidence: Vec<VerifyEvidence> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        apply_witness_threshold(1, 3, &mut evidence, &mut errors);
+        assert_eq!(evidence.len(), 1, "exactly one threshold row expected");
+        assert_eq!(evidence[0].check, "witnesses-threshold");
+        assert!(!evidence[0].ok, "verified=1 < threshold=3 must be ok=false");
+        assert!(
+            evidence[0].detail.contains("1 of 3"),
+            "detail must name verified/required (1 of 3): {}",
+            evidence[0].detail,
+        );
+        assert_eq!(errors.len(), 1, "fail path MUST push exactly one error");
+        assert!(
+            errors[0].contains("1 of 3"),
+            "error must name verified/required (1 of 3): {}",
+            errors[0],
+        );
+    }
+
+    /// `apply_witness_threshold` with `verified >= threshold` emits an
+    /// `ok=true` `witnesses-threshold` row and does NOT push an error.
+    /// This is the wave-C-2 strict-mode passing branch — unreachable
+    /// through `verify_trace_with` under the genesis-empty production
+    /// roster, so this test is the only direct exerciser of the
+    /// success disposition until commissioning lands.
+    #[test]
+    fn apply_witness_threshold_pass_path_pushes_evidence_no_error() {
+        let mut evidence: Vec<VerifyEvidence> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        apply_witness_threshold(3, 3, &mut evidence, &mut errors);
+        assert_eq!(evidence.len(), 1);
+        assert!(evidence[0].ok, "verified=3 >= threshold=3 must be ok=true");
+        assert!(
+            evidence[0].detail.contains("3 of 3"),
+            "detail must name verified/required (3 of 3): {}",
+            evidence[0].detail,
+        );
+        assert!(
+            errors.is_empty(),
+            "pass path must NOT push an error: {errors:?}",
+        );
+
+        // Above-threshold (over-witnessed) also passes.
+        let mut evidence2: Vec<VerifyEvidence> = Vec::new();
+        let mut errors2: Vec<String> = Vec::new();
+        apply_witness_threshold(5, 3, &mut evidence2, &mut errors2);
+        assert!(evidence2[0].ok, "verified=5 >= threshold=3 must be ok=true");
+        assert!(errors2.is_empty());
+    }
+
+    /// End-to-end strict-mode passing path (V1.13 wave-C-2 MEDIUM-2
+    /// regression): drives a real chain with two validly-signed
+    /// witnesses through the parameterised aggregator (against a test
+    /// roster, since the production roster is genesis-empty), then
+    /// passes the resulting `verified` count into the same
+    /// `apply_witness_threshold` helper that `verify_trace_with` calls.
+    /// Asserts that `verified == 2 >= threshold == 2` produces an
+    /// `ok=true` row and zero errors — the strict-mode green path that
+    /// is otherwise inaccessible through the production-API integration
+    /// tests in `tests/witness_strict_mode.rs`.
+    #[test]
+    fn strict_mode_passing_path_end_to_end() {
+        use crate::witness::{decode_chain_head, witness_signing_input};
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let sk_a = SigningKey::from_bytes(&[3u8; 32]);
+        let pk_a = sk_a.verifying_key().to_bytes();
+        let sk_b = SigningKey::from_bytes(&[5u8; 32]);
+        let pk_b = sk_b.verifying_key().to_bytes();
+        let test_roster: &[(&str, [u8; 32])] =
+            &[("kid-a", pk_a), ("kid-b", pk_b)];
+
+        // Single batch carrying TWO commissioned witnesses, both
+        // signing the same head — distinct kids, so both count.
+        let mut chain = empty_chain();
+        let mut batch0 = batch_no_witnesses(0, ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        chain.history.push(batch0.clone());
+        let head0 = chain_head_for(&chain.history[0]).unwrap();
+        let head0_bytes = decode_chain_head(head0.as_str()).unwrap();
+        for (kid, sk) in [("kid-a", &sk_a), ("kid-b", &sk_b)] {
+            let sig = sk.sign(&witness_signing_input(&head0_bytes));
+            batch0.witnesses.push(WitnessSig {
+                witness_kid: kid.to_string(),
+                signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(sig.to_bytes()),
+            });
+        }
+        chain.history[0] = batch0;
+        chain.head = chain_head_for(&chain.history[0]).unwrap().into_inner();
+
+        let agg =
+            aggregate_witnesses_across_chain_with_roster(&chain, test_roster);
+        assert_eq!(agg.presented, 2, "two witnesses presented");
+        assert_eq!(agg.verified, 2, "both kids must verify against the test roster");
+        assert!(agg.failures.is_empty(), "no failures expected: {:?}", agg.failures);
+
+        // Now drive the SAME helper that production calls, with the
+        // strict threshold matching the verified count — pass branch.
+        let mut evidence: Vec<VerifyEvidence> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        apply_witness_threshold(agg.verified, 2, &mut evidence, &mut errors);
+        let row = evidence
+            .iter()
+            .find(|e| e.check == "witnesses-threshold")
+            .expect("witnesses-threshold row must be emitted under strict mode");
+        assert!(row.ok, "strict-mode pass must emit ok=true: {row:?}");
+        assert!(
+            row.detail.contains("2 of 2"),
+            "detail must name (2 of 2): {}",
+            row.detail,
+        );
+        assert!(
+            errors.is_empty(),
+            "strict-mode pass must NOT push an error: {errors:?}",
         );
     }
 }

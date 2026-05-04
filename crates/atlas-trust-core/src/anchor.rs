@@ -909,6 +909,154 @@ fn canonical_chain_batch_body(batch: &AnchorBatch) -> TrustResult<Vec<u8>> {
     crate::pubkey_bundle::canonical_json_bytes(&v)
 }
 
+/// 64-character lowercase hex of a 32-byte blake3 chain-head digest.
+///
+/// V1.13 wave-C-2 newtype around the canonical chain-head representation
+/// produced by [`chain_head_for`]. Two purposes:
+///
+///   1. **Type discipline at the call site.** Without the newtype,
+///      `verify_witness_against_roster(witness, batch.previous_head.as_str(), ..)`
+///      and `verify_witness_against_roster(witness, chain_head_for(batch)?.as_str(), ..)`
+///      have indistinguishable signatures, even though the semantic
+///      ("a previously-recorded head from the wire" vs "the head we
+///      just recomputed") is materially different. With the newtype,
+///      recomputed heads are typed as `ChainHeadHex` and wire fields
+///      stay `String`, surfacing the boundary in the type system.
+///
+///   2. **Refactor safety.** A future change that moves
+///      `chain_head_for` to return raw bytes would today silently
+///      compile against any caller that used the `String` return as
+///      arbitrary bytes (e.g. assigning to a `head: String` wire
+///      field that expected hex). With the newtype, the hex/bytes
+///      distinction is explicit at every boundary: ask for the hex
+///      view via [`ChainHeadHex::as_str`] / [`Display`], ask for the
+///      raw bytes via [`ChainHeadHex::to_bytes`].
+///
+/// Construction enforces shape (64 lowercase hex chars). Constructor
+/// failure surfaces as `TrustError::Encoding`, mirroring the
+/// `decode_chain_head` failure path. Direct production-side
+/// construction is internal to this module — `chain_head_for` is the
+/// canonical producer and bypasses validation because hex-encoding a
+/// 32-byte blake3 digest always yields exactly 64 lowercase hex chars
+/// by construction.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ChainHeadHex(String);
+
+impl ChainHeadHex {
+    /// Construct from a wire-side hex string after validating shape.
+    /// Used by callers that read a hex head from JSON or another
+    /// untrusted source. Returns `TrustError::Encoding` if the input
+    /// is not exactly 64 lowercase hex chars.
+    pub fn new(hex: String) -> TrustResult<Self> {
+        if hex.len() != 64 {
+            return Err(TrustError::Encoding(format!(
+                "ChainHeadHex must be 64 hex chars (32 bytes), got {} chars",
+                hex.len()
+            )));
+        }
+        // Lowercase-only: matches `chain_head_for`'s output and prevents
+        // wire-side ambiguity (mixed case would let two byte-different
+        // strings represent the same head).
+        if !hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+            return Err(TrustError::Encoding(
+                "ChainHeadHex must be all-lowercase hex (0-9, a-f)".to_string(),
+            ));
+        }
+        Ok(Self(hex))
+    }
+
+    /// Borrow the underlying lowercase-hex string.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Decode to the raw 32-byte blake3 digest. Infallible by
+    /// construction — the constructor enforces 64 lowercase hex chars,
+    /// so `hex::decode` cannot fail and `try_into` cannot under-fill.
+    pub fn to_bytes(&self) -> [u8; 32] {
+        let raw = hex::decode(&self.0).expect("ChainHeadHex constructor invariant");
+        raw.try_into().expect("ChainHeadHex constructor invariant")
+    }
+
+    /// Move out the underlying `String`. Used at the wire-emit boundary
+    /// when assigning to `AnchorChain.head` / `AnchorBatch.previous_head`,
+    /// which stay `String`-typed for serde compatibility.
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ChainHeadHex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<ChainHeadHex> for String {
+    fn from(h: ChainHeadHex) -> String {
+        h.0
+    }
+}
+
+// Symmetric `PartialEq<&str>` / `PartialEq<String>` impls (both
+// directions, see also the reverse-direction block below) exist
+// PURELY for test-assertion ergonomics — `assert_eq!(head, "abc..")`
+// reads naturally without forcing every test site onto `head.as_str()`.
+//
+// These impls are NOT a trust-domain primitive: they perform a plain
+// `==` byte compare and MUST NOT be used to compare two trust-relevant
+// hex heads on the verification path. For trust-boundary equality
+// (e.g. verifying that `chain.head` matches a recomputed tip), use
+// `crate::ct::ct_eq_str` against `head.as_str()` directly so a
+// timing-side-channel cannot leak prefix-match length about the
+// honest-issuer chain head. The verifier does this in `verify.rs`
+// (search for `ct_eq_str(&chain.head, tip.as_str())`).
+//
+// The newtype's load-bearing job is at the function-signature boundary
+// (preventing wire-side `String` from silently flowing into a
+// recomputed-head slot); these PartialEq sugar impls do not weaken
+// that property because callers wanting trust-domain equality already
+// route through `ct_eq_str`.
+impl PartialEq<str> for ChainHeadHex {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for ChainHeadHex {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<String> for ChainHeadHex {
+    fn eq(&self, other: &String) -> bool {
+        &self.0 == other
+    }
+}
+
+// Reverse-direction comparisons so callers can write `assert_eq!(s, h)`
+// where `s: &str | String` and `h: ChainHeadHex`. Without these, only
+// `assert_eq!(h, s)` would compile and existing tests would need
+// reordered arguments.
+impl PartialEq<ChainHeadHex> for str {
+    fn eq(&self, other: &ChainHeadHex) -> bool {
+        self == other.0.as_str()
+    }
+}
+
+impl PartialEq<ChainHeadHex> for &str {
+    fn eq(&self, other: &ChainHeadHex) -> bool {
+        *self == other.0.as_str()
+    }
+}
+
+impl PartialEq<ChainHeadHex> for String {
+    fn eq(&self, other: &ChainHeadHex) -> bool {
+        self == &other.0
+    }
+}
+
 /// Compute the chain head for an `AnchorBatch`.
 ///
 /// `head_n = blake3(ANCHOR_CHAIN_DOMAIN || canonical_chain_batch_body(batch_n))`
@@ -917,13 +1065,34 @@ fn canonical_chain_batch_body(batch: &AnchorBatch) -> TrustResult<Vec<u8>> {
 /// commits to the entire history transitively: tampering with any past
 /// batch changes `head_{i}` for that batch, which changes `previous_head`
 /// in `batch_{i+1}`, which changes `head_{i+1}`, and so on up to the tip.
-/// Returns the lowercase hex of the 32-byte blake3 digest.
-pub fn chain_head_for(batch: &AnchorBatch) -> TrustResult<String> {
+/// Returns the [`ChainHeadHex`] newtype carrying the lowercase hex of the
+/// 32-byte blake3 digest. See `ChainHeadHex` docs for the type-discipline
+/// rationale (V1.13 wave-C-2).
+pub fn chain_head_for(batch: &AnchorBatch) -> TrustResult<ChainHeadHex> {
     let body = canonical_chain_batch_body(batch)?;
     let mut hasher = Hasher::new();
     hasher.update(ANCHOR_CHAIN_DOMAIN);
     hasher.update(&body);
-    Ok(hex::encode(hasher.finalize().as_bytes()))
+    // Hex-encoding a 32-byte digest always yields exactly 64 lowercase
+    // hex chars — bypass `ChainHeadHex::new`'s validation on the hot path.
+    let head = hex::encode(hasher.finalize().as_bytes());
+    // Defensive guard: catches a future `hex` crate behavioural drift
+    // (e.g. switching default casing, returning a non-64-char encoding
+    // for a 32-byte input) immediately in dev/test rather than letting
+    // a malformed `ChainHeadHex` flow downstream and silently break
+    // the `decode_chain_head` round-trip. Cheap (length + lowercase
+    // byte scan) and stripped from release builds.
+    debug_assert_eq!(
+        head.len(),
+        64,
+        "hex::encode(32 bytes) must yield 64 chars, got {}",
+        head.len(),
+    );
+    debug_assert!(
+        head.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "hex::encode must yield lowercase-only hex; ChainHeadHex invariant broken",
+    );
+    Ok(ChainHeadHex(head))
 }
 
 /// Result of chain-internal verification (V1.7).
@@ -939,8 +1108,10 @@ pub struct ChainVerifyOutcome {
     pub batches_walked: usize,
     /// Recomputed tip (head of the final successfully-walked batch),
     /// for evidence display. `None` if walking aborted before the
-    /// first batch produced a head.
-    pub recomputed_head: Option<String>,
+    /// first batch produced a head. Typed as `ChainHeadHex` (V1.13
+    /// wave-C-2) to surface that this is a freshly-recomputed head,
+    /// not a wire-side value from `chain.head`.
+    pub recomputed_head: Option<ChainHeadHex>,
     /// Per-batch error strings; empty on full success.
     pub errors: Vec<String>,
 }
@@ -966,7 +1137,7 @@ pub struct ChainVerifyOutcome {
 /// here. This function answers only "is this chain self-consistent?".
 pub fn verify_anchor_chain(chain: &AnchorChain) -> ChainVerifyOutcome {
     let mut errors = Vec::new();
-    let mut recomputed_head: Option<String> = None;
+    let mut recomputed_head: Option<ChainHeadHex> = None;
 
     if chain.history.is_empty() {
         errors.push(
@@ -1011,7 +1182,11 @@ pub fn verify_anchor_chain(chain: &AnchorChain) -> ChainVerifyOutcome {
 
         match chain_head_for(batch) {
             Ok(head) => {
-                expected_prev = head.clone();
+                // `expected_prev` mirrors the wire-side `previous_head`
+                // shape (String) for the next iteration's ct compare;
+                // recomputed_head retains the typed newtype for the
+                // tip-equality check + evidence display.
+                expected_prev = head.as_str().to_string();
                 recomputed_head = Some(head);
                 batches_walked += 1;
             }
@@ -1033,7 +1208,7 @@ pub fn verify_anchor_chain(chain: &AnchorChain) -> ChainVerifyOutcome {
     // caused the early break.
     if batches_walked == chain.history.len() {
         if let Some(tip) = &recomputed_head {
-            if !crate::ct::ct_eq_str(&chain.head, tip) {
+            if !crate::ct::ct_eq_str(&chain.head, tip.as_str()) {
                 errors.push(format!(
                     "anchor_chain: convenience head mismatch (chain.head={}, recomputed from history={})",
                     chain.head, tip,
@@ -2265,5 +2440,144 @@ mod tests {
             h_empty, h_with_two,
             "chain head invariance must hold for any number of witnesses",
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // V1.13 wave-C-2: ChainHeadHex newtype contract.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// `chain_head_for` returns a `ChainHeadHex` whose `as_str()` view
+    /// is exactly 64 lowercase hex chars (same shape the pre-newtype
+    /// `String` return promised). Pins the type-level contract that
+    /// downstream consumers rely on.
+    #[test]
+    fn chain_head_hex_shape_contract() {
+        let batch = fixture_batch(0, crate::trace_format::ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        let head = chain_head_for(&batch).unwrap();
+        let s = head.as_str();
+        assert_eq!(s.len(), 64, "ChainHeadHex must be 64 hex chars: {s}");
+        assert!(
+            s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+            "ChainHeadHex must be all-lowercase hex: {s}",
+        );
+    }
+
+    /// `to_bytes` returns exactly 32 bytes — the raw blake3 digest
+    /// that producers (witnesses, downstream signers) sign over.
+    /// Defends a future caller that switches from hex to raw bytes
+    /// from accidentally reading the hex chars themselves as bytes.
+    #[test]
+    fn chain_head_hex_to_bytes_round_trip() {
+        let batch = fixture_batch(0, crate::trace_format::ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        let head = chain_head_for(&batch).unwrap();
+        let bytes = head.to_bytes();
+        assert_eq!(bytes.len(), 32);
+        // Round-trip: hex-encoding the bytes back yields the original
+        // hex view byte-for-byte.
+        assert_eq!(hex::encode(bytes), head.as_str());
+    }
+
+    /// `Display` and `as_str` produce identical text. Both must match
+    /// the hex view, not surface debug-style annotations.
+    #[test]
+    fn chain_head_hex_display_matches_as_str() {
+        let batch = fixture_batch(0, crate::trace_format::ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        let head = chain_head_for(&batch).unwrap();
+        assert_eq!(format!("{}", head), head.as_str());
+    }
+
+    /// `into_inner` and `From<ChainHeadHex> for String` produce the
+    /// same `String` — both are the wire-emit boundary helpers used
+    /// when assigning to `AnchorChain.head` / `AnchorBatch.previous_head`.
+    #[test]
+    fn chain_head_hex_into_inner_and_from_agree() {
+        let batch = fixture_batch(0, crate::trace_format::ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        let h_a = chain_head_for(&batch).unwrap();
+        let h_b = chain_head_for(&batch).unwrap();
+        let from_into: String = h_a.into();
+        let from_method: String = h_b.into_inner();
+        assert_eq!(from_into, from_method);
+    }
+
+    /// `ChainHeadHex::new` accepts a 64-char lowercase-hex String. This
+    /// is the wire-side construction path (e.g. parsing a stored head
+    /// from JSON before passing it through type-checked APIs).
+    #[test]
+    fn chain_head_hex_new_accepts_valid_shape() {
+        let valid = "a".repeat(64);
+        let h = ChainHeadHex::new(valid.clone()).expect("valid 64-char lowercase hex must accept");
+        assert_eq!(h.as_str(), valid);
+    }
+
+    /// Wrong-length hex is rejected with a length-specific encoding
+    /// error. Defends against a wire-side String containing the right
+    /// chars but wrong total — would otherwise silently mismatch
+    /// every downstream comparison.
+    #[test]
+    fn chain_head_hex_new_rejects_wrong_length() {
+        // 63 chars (one short).
+        let short = "a".repeat(63);
+        match ChainHeadHex::new(short) {
+            Err(TrustError::Encoding(msg)) => assert!(
+                msg.contains("64 hex chars") && msg.contains("63"),
+                "length error must name expected and actual: {msg}",
+            ),
+            other => panic!("expected Encoding error, got {other:?}"),
+        }
+
+        // 65 chars (one over).
+        let long = "a".repeat(65);
+        assert!(matches!(
+            ChainHeadHex::new(long),
+            Err(TrustError::Encoding(_)),
+        ));
+    }
+
+    /// Uppercase hex is rejected. Lowercase-only is enforced because
+    /// `chain_head_for` always emits lowercase, and accepting both
+    /// would let two byte-different wire strings represent the same
+    /// head — a `ct_eq_str` divergence waiting to happen.
+    #[test]
+    fn chain_head_hex_new_rejects_uppercase_hex() {
+        let upper = "A".repeat(64);
+        match ChainHeadHex::new(upper) {
+            Err(TrustError::Encoding(msg)) => assert!(
+                msg.contains("lowercase"),
+                "case-violation error must name lowercase: {msg}",
+            ),
+            other => panic!("expected Encoding error, got {other:?}"),
+        }
+    }
+
+    /// Non-hex char is rejected (e.g. 'g' or punctuation).
+    #[test]
+    fn chain_head_hex_new_rejects_non_hex_chars() {
+        let bad = "g".repeat(64); // 'g' is past hex range
+        assert!(matches!(
+            ChainHeadHex::new(bad),
+            Err(TrustError::Encoding(_)),
+        ));
+
+        let punct = ":".repeat(64);
+        assert!(matches!(
+            ChainHeadHex::new(punct),
+            Err(TrustError::Encoding(_)),
+        ));
+    }
+
+    /// `PartialEq` between `ChainHeadHex` and `&str` / `String` works
+    /// in both directions. Pins the assertion-ergonomics impls so
+    /// existing test patterns (e.g. `assert_eq!(s, head)` and
+    /// `assert_eq!(head, s)`) keep compiling.
+    #[test]
+    fn chain_head_hex_partial_eq_with_str_both_directions() {
+        let valid = "b".repeat(64);
+        let h = ChainHeadHex::new(valid.clone()).unwrap();
+        // ChainHeadHex == &str / String
+        assert_eq!(h, valid.as_str());
+        assert_eq!(h, valid);
+        // &str / String == ChainHeadHex (reverse direction)
+        assert_eq!(valid.as_str(), h);
+        assert_eq!(valid, h);
     }
 }

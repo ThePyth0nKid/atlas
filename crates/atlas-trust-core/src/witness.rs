@@ -74,6 +74,28 @@ pub struct WitnessSig {
 /// `--require-witness` only passes when `threshold == 0`.
 pub const ATLAS_WITNESS_V1_ROSTER: &[(&str, [u8; 32])] = &[];
 
+/// Maximum byte length a `witness_kid` may carry on the wire.
+///
+/// 256 is generous for any honest naming convention — SPIFFE IDs,
+/// domain-style identifiers, and human-readable labels comfortably fit
+/// well under 200 bytes. The cap defends against an issuer (or attacker
+/// controlling batch serialisation) supplying multi-kilobyte kid strings
+/// that would amplify per-batch cost: each kid participates in the
+/// `BTreeMap` pre-pass for duplicate detection, the `BTreeSet`
+/// cross-batch dedup, and the constant-time roster comparison — all O(N)
+/// in kid length per witness. Without a cap, a single batch with N
+/// witnesses each carrying a 1MB kid would do O(N² · 1MB) work in the
+/// pre-pass alone, plus heap pressure proportional to N · 1MB.
+///
+/// Enforcement happens at the entry of `verify_witness_against_roster`
+/// so every codepath that resolves a kid against the roster sees the
+/// same cap; oversize kids fail closed as `BadWitness`. The genesis
+/// roster is empty so this cap is the FIRST line of defence today —
+/// once entries are commissioned, those entries' kids must also fit
+/// the cap (enforced at compile time by the test
+/// `roster_kids_within_length_cap`).
+pub const MAX_WITNESS_KID_LEN: usize = 256;
+
 /// Construct the canonical bytes a witness signs over.
 ///
 /// `signing_input = ATLAS_WITNESS_DOMAIN || chain_head_bytes`
@@ -87,16 +109,60 @@ pub fn witness_signing_input(chain_head_bytes: &[u8; 32]) -> Vec<u8> {
     input
 }
 
-/// Decode a hex chain head (64 chars) to its raw 32 bytes.
+/// Clamp an untrusted wire-side `witness_kid` for use in diagnostic
+/// surfaces (`WitnessFailure`, log strings, `Display` output). Kids
+/// at or below `MAX_WITNESS_KID_LEN` pass through unchanged so
+/// auditors see the actual offending kid; kids exceeding the cap
+/// collapse to a fixed-shape placeholder that records only the byte
+/// length, so an attacker cannot amplify log volume by submitting a
+/// multi-megabyte `witness_kid` and having it echoed across every
+/// failure surface (per-witness diagnostic + lenient evidence row's
+/// `rendered.join("; ")` aggregation).
+///
+/// Used at every site that copies the wire-side kid into a
+/// `WitnessFailure` — keeping the sanitisation logic in one helper
+/// (1) prevents drift between the per-batch verifier and the
+/// chain-aggregator paths and (2) makes the cap byte-equivalent in
+/// length-cap test coverage.
+pub(crate) fn sanitize_kid_for_diagnostic(kid: &str) -> String {
+    if kid.len() > MAX_WITNESS_KID_LEN {
+        format!("<oversize: {} bytes>", kid.len())
+    } else {
+        kid.to_owned()
+    }
+}
+
+/// Decode a hex chain head (64 lowercase hex chars) to its raw 32 bytes.
+///
+/// Strictness mirrors `ChainHeadHex::new` exactly: length must be 64
+/// AND every character must be lowercase hex (`0-9`, `a-f`). The
+/// `hex` crate by default accepts uppercase too, which would let two
+/// byte-different wire strings (`"ABCD…"` vs `"abcd…"`) decode to the
+/// same head — defeating the "one canonical hex form per head"
+/// invariant the production producer (`chain_head_for`) relies on.
+/// Without lowercase enforcement here, a wire-side caller that bypasses
+/// `ChainHeadHex` could decode a mixed-case head, build a witness
+/// signing input over its bytes, and produce a sig the verifier
+/// accepts — even though the canonical recomputed head string differs
+/// (a future strict equality check by string would then mismatch
+/// silently).
+///
+/// Implementation routes through `ChainHeadHex::new` to keep the
+/// length+lowercase invariant single-source: a future tightening of
+/// the head shape lands in one place rather than two synchronised
+/// edits.
 pub fn decode_chain_head(chain_head_hex: &str) -> TrustResult<[u8; 32]> {
-    let raw = hex::decode(chain_head_hex)
-        .map_err(|e| TrustError::Encoding(format!("chain_head not hex: {e}")))?;
-    raw.try_into().map_err(|v: Vec<u8>| {
-        TrustError::Encoding(format!(
-            "chain_head must be 32 bytes (64 hex chars), got {} bytes",
-            v.len()
-        ))
-    })
+    // Single source of truth: route through `ChainHeadHex::new` so the
+    // length + lowercase invariants live in one place. A future
+    // tightening of the head shape automatically propagates here
+    // instead of requiring two synchronised edits, and the contract
+    // "if it parses as ChainHeadHex it decodes as 32 bytes" is
+    // structural rather than convention. The single `String`
+    // allocation per call is negligible — verification calls this
+    // once per witness, and the byte-level work below it
+    // (Ed25519 verify) dwarfs it by orders of magnitude.
+    crate::anchor::ChainHeadHex::new(chain_head_hex.to_owned())
+        .map(|h| h.to_bytes())
 }
 
 /// Verify a single witness signature against a roster.
@@ -128,6 +194,23 @@ pub fn verify_witness_against_roster(
     chain_head_hex: &str,
     roster: &[(&str, [u8; 32])],
 ) -> TrustResult<()> {
+    // Length cap on the wire-side `witness_kid` (V1.13 wave-C-2). A
+    // hostile or buggy issuer could otherwise emit multi-megabyte kid
+    // strings that amplify per-batch verification cost (BTreeMap
+    // pre-pass + BTreeSet cross-batch dedup + ct_eq_str scan all run
+    // O(N) in kid length per witness). Fail closed BEFORE any roster
+    // work runs so the cost of rejection is constant in the input.
+    if witness.witness_kid.len() > MAX_WITNESS_KID_LEN {
+        return Err(TrustError::BadWitness {
+            witness_kid: sanitize_kid_for_diagnostic(&witness.witness_kid),
+            reason: format!(
+                "witness_kid exceeds MAX_WITNESS_KID_LEN ({} > {} bytes)",
+                witness.witness_kid.len(),
+                MAX_WITNESS_KID_LEN,
+            ),
+        });
+    }
+
     let chain_head_bytes = decode_chain_head(chain_head_hex)?;
 
     // Constant-time kid compare: the wire-side `witness_kid` is
@@ -181,7 +264,94 @@ pub fn verify_witness_against_roster(
         })
 }
 
+/// Structured per-witness failure record. Carries the kid as it
+/// appeared on the wire plus the underlying `TrustError` (almost
+/// always `TrustError::BadWitness`) so consumers can filter
+/// programmatically without parsing free-form text.
+///
+/// `batch_index` is populated by the chain-aggregating wrapper
+/// (`aggregate_witnesses_across_chain` in the verifier) and is
+/// always `None` when produced directly by
+/// `verify_witnesses_against_roster` (no batch context in scope at
+/// that level). The field is `pub(crate)` precisely because of this
+/// context-dependent meaning — exposing it as `pub` would invite
+/// external callers of `verify_witnesses_against_roster` to read the
+/// always-`None` value as if it were a meaningful signal. Use the
+/// public [`WitnessFailure::batch_index`] getter, whose return-type
+/// `Option<u64>` makes the absence-vs-presence semantics explicit.
+///
+/// The `Display` impl renders the batch prefix when present so
+/// downstream evidence-row text stays human-readable:
+/// `"batch[N] invalid witness X: reason"` or
+/// `"invalid witness X: reason"`.
+#[derive(Debug, Clone)]
+pub struct WitnessFailure {
+    /// `Some(idx)` when the failure was produced during a chain-walk
+    /// rollup (verifier side); `None` for the per-batch verification
+    /// boundary (`verify_witnesses_against_roster`). `pub(crate)` so
+    /// only the in-crate aggregator can populate it; external
+    /// consumers read via the [`WitnessFailure::batch_index`] getter.
+    pub(crate) batch_index: Option<u64>,
+    /// Kid as it appeared on the wire (untrusted input — surface for
+    /// auditor diagnostics; do NOT trust as a routing key beyond the
+    /// roster lookup that already happened).
+    pub witness_kid: String,
+    /// Structured error. `TrustError::BadWitness` for verification
+    /// failures (the common case); other variants reserved for future
+    /// non-witness-domain errors that surface during the rollup
+    /// (e.g. `chain_head_for` decode errors, currently wrapped as
+    /// `BadWitness` for callsite consistency).
+    pub error: TrustError,
+}
+
+impl WitnessFailure {
+    /// Batch index this failure was produced under, when the failure
+    /// surfaced from the chain-aggregation rollup. Returns `None` when
+    /// the failure came directly from
+    /// [`verify_witnesses_against_roster`] (no batch context exists at
+    /// that level — there is no batch to index into).
+    ///
+    /// Treat `None` as "not applicable in this calling context", not
+    /// as "no batch information is available" — the per-batch
+    /// verifier never has a batch index, so the absence is structural,
+    /// not informational.
+    pub fn batch_index(&self) -> Option<u64> {
+        self.batch_index
+    }
+}
+
+impl std::fmt::Display for WitnessFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Render uniformly as `[batch[N] ]witness {kid}: {reason}`.
+        // The kid surfaces from `self.witness_kid` (the canonical
+        // wire-side value on the struct) rather than depending on
+        // each `TrustError` variant to embed it. For
+        // `TrustError::BadWitness` (the common case) we extract just
+        // the `reason` so the kid does not appear twice; for any
+        // other error variant we render the full inner Display after
+        // the kid prefix. Keeps auditor diagnostics one-line and
+        // grep-friendly while remaining correct if a future caller
+        // ever stores a non-`BadWitness` error here.
+        let prefix = match self.batch_index {
+            Some(idx) => format!("batch[{idx}] "),
+            None => String::new(),
+        };
+        match &self.error {
+            TrustError::BadWitness { reason, .. } => {
+                write!(f, "{prefix}witness {}: {}", self.witness_kid, reason)
+            }
+            other => write!(f, "{prefix}witness {}: {}", self.witness_kid, other),
+        }
+    }
+}
+
 /// Outcome of verifying a slice of witness signatures against a roster.
+///
+/// `failures` is a structured `Vec<WitnessFailure>` (kid + structured
+/// `TrustError`), not a `Vec<String>`. Consumers wanting the legacy
+/// `"kid: reason"` text just call `.to_string()` on each entry; the
+/// structured shape lets a strict-mode caller (or auditor UI) filter by
+/// failure kind without regex against free-form text.
 #[derive(Debug, Clone)]
 pub struct WitnessVerifyOutcome {
     /// Number of witnesses presented in the input slice.
@@ -189,9 +359,9 @@ pub struct WitnessVerifyOutcome {
     /// Number of witnesses that verified successfully against the
     /// roster.
     pub verified: usize,
-    /// Per-failed-witness diagnostics, formatted as
-    /// `"<witness_kid>: <reason>"` strings.
-    pub failures: Vec<String>,
+    /// Per-failed-witness diagnostics. See `WitnessFailure` for the
+    /// shape.
+    pub failures: Vec<WitnessFailure>,
 }
 
 /// Verify each witness in the slice against the roster, returning a
@@ -235,15 +405,26 @@ pub fn verify_witnesses_against_roster(
             .get(w.witness_kid.as_str())
             .expect("kid was inserted in pre-pass — invariant of the loop above");
         if count > 1 {
-            failures.push(format!(
-                "{}: duplicate witness_kid (appears {} times in batch — at most one signature per kid is allowed)",
-                w.witness_kid, count,
-            ));
+            failures.push(WitnessFailure {
+                batch_index: None,
+                witness_kid: w.witness_kid.clone(),
+                error: TrustError::BadWitness {
+                    witness_kid: w.witness_kid.clone(),
+                    reason: format!(
+                        "duplicate witness_kid (appears {} times in batch — at most one signature per kid is allowed)",
+                        count,
+                    ),
+                },
+            });
             continue;
         }
         match verify_witness_against_roster(w, chain_head_hex, roster) {
             Ok(()) => verified += 1,
-            Err(e) => failures.push(format!("{}: {}", w.witness_kid, e)),
+            Err(e) => failures.push(WitnessFailure {
+                batch_index: None,
+                witness_kid: w.witness_kid.clone(),
+                error: e,
+            }),
         }
     }
 
@@ -519,7 +700,21 @@ mod tests {
         assert_eq!(outcome.presented, 2);
         assert_eq!(outcome.verified, 1);
         assert_eq!(outcome.failures.len(), 1);
-        assert!(outcome.failures[0].starts_with("unknown-witness:"));
+        let f = &outcome.failures[0];
+        assert_eq!(f.witness_kid, "unknown-witness");
+        assert!(f.batch_index.is_none(), "per-batch verifier has no batch context");
+        assert!(
+            matches!(&f.error, TrustError::BadWitness { reason, .. } if reason.contains("not in pinned roster")),
+            "error must be BadWitness with the 'not in pinned roster' reason: {:?}",
+            f.error,
+        );
+        // Display still renders as a single line for the lenient
+        // evidence row.
+        assert!(
+            f.to_string().contains("unknown-witness"),
+            "Display must include the kid: {}",
+            f,
+        );
     }
 
     #[test]
@@ -586,9 +781,11 @@ mod tests {
             "every duplicate occurrence must surface as a failure"
         );
         for f in &outcome.failures {
+            assert_eq!(f.witness_kid, "dup-kid");
             assert!(
-                f.contains("duplicate witness_kid"),
-                "failure must name the dup-kid reason: {f}",
+                matches!(&f.error, TrustError::BadWitness { reason, .. } if reason.contains("duplicate witness_kid")),
+                "failure must be BadWitness with the dup-kid reason: {:?}",
+                f.error,
             );
         }
     }
@@ -617,9 +814,10 @@ mod tests {
         assert_eq!(outcome.verified, 1, "only the unique-kid witness verifies");
         assert_eq!(outcome.failures.len(), 2);
         for f in &outcome.failures {
-            assert!(
-                f.starts_with("dup-kid:"),
-                "only the dup-kid should fail, got {f}",
+            assert_eq!(
+                f.witness_kid, "dup-kid",
+                "only the dup-kid should fail, got {:?}",
+                f,
             );
         }
     }
@@ -660,5 +858,228 @@ mod tests {
             std::str::from_utf8(w).unwrap_or("<non-utf8>"),
             std::str::from_utf8(c).unwrap_or("<non-utf8>"),
         );
+    }
+
+    /// `decode_chain_head` rejects an UPPER-case hex head even though
+    /// the raw `hex` crate would accept it. Defends the canonical
+    /// "one hex form per head" invariant. See `decode_chain_head`'s
+    /// doc comment for the full rationale.
+    #[test]
+    fn decode_chain_head_rejects_uppercase_hex() {
+        let upper = "ABCD".repeat(16);
+        let result = decode_chain_head(&upper);
+        assert!(
+            matches!(&result, Err(TrustError::Encoding(msg)) if msg.contains("lowercase")),
+            "uppercase hex must reject with a lowercase-specific reason: {result:?}",
+        );
+    }
+
+    /// `decode_chain_head` also rejects mixed-case input — a single
+    /// uppercase nibble is enough to fail closed.
+    #[test]
+    fn decode_chain_head_rejects_mixed_case_hex() {
+        // 63 lowercase + 1 uppercase 'A' at the end.
+        let mut mixed = "a".repeat(63);
+        mixed.push('A');
+        assert_eq!(mixed.len(), 64);
+        let result = decode_chain_head(&mixed);
+        assert!(matches!(&result, Err(TrustError::Encoding(_))));
+    }
+
+    /// `verify_witness_against_roster` rejects a witness whose
+    /// `witness_kid` exceeds `MAX_WITNESS_KID_LEN` BEFORE any roster
+    /// work runs. Cost-amplification defence (see
+    /// `MAX_WITNESS_KID_LEN` doc).
+    #[test]
+    fn verify_witness_rejects_oversize_kid() {
+        let oversize = "x".repeat(MAX_WITNESS_KID_LEN + 1);
+        let head = fixed_chain_head();
+        let witness = WitnessSig {
+            witness_kid: oversize.clone(),
+            signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode([0u8; 64]),
+        };
+        // Empty roster — but the cap fires before roster lookup, so
+        // this still produces a length-specific BadWitness.
+        let roster: &[(&str, [u8; 32])] = &[];
+
+        let result = verify_witness_against_roster(&witness, &head, roster);
+        match result {
+            Err(TrustError::BadWitness { witness_kid, reason }) => {
+                assert!(
+                    witness_kid.contains("<oversize"),
+                    "oversize kid must be sanitised in the surfaced kid (no echo of the multi-MB blob): {witness_kid}",
+                );
+                assert!(
+                    reason.contains("MAX_WITNESS_KID_LEN"),
+                    "reason must name the cap constant: {reason}",
+                );
+            }
+            other => panic!("expected BadWitness with cap reason, got {other:?}"),
+        }
+    }
+
+    /// Boundary: a kid of EXACTLY `MAX_WITNESS_KID_LEN` bytes must
+    /// pass the cap (the check uses `>`, not `>=`). The test
+    /// terminates at the next failure stage (unknown kid in the empty
+    /// roster) — different error class, so the cap is provably not the
+    /// reason.
+    #[test]
+    fn verify_witness_at_cap_boundary_passes_length_check() {
+        let at_cap = "x".repeat(MAX_WITNESS_KID_LEN);
+        let head = fixed_chain_head();
+        let witness = WitnessSig {
+            witness_kid: at_cap.clone(),
+            signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode([0u8; 64]),
+        };
+        let roster: &[(&str, [u8; 32])] = &[];
+
+        let result = verify_witness_against_roster(&witness, &head, roster);
+        match result {
+            Err(TrustError::BadWitness { reason, .. }) => {
+                assert!(
+                    !reason.contains("MAX_WITNESS_KID_LEN"),
+                    "at-cap kid must NOT trip the length check: {reason}",
+                );
+                assert!(
+                    reason.contains("not in pinned roster"),
+                    "at-cap kid must reach the roster lookup: {reason}",
+                );
+            }
+            other => panic!("expected BadWitness with roster reason, got {other:?}"),
+        }
+    }
+
+    /// `WitnessFailure::Display` renders uniformly as
+    /// `[batch[N] ]witness {kid}: {reason}` regardless of which
+    /// `TrustError` variant the failure carries. Pins:
+    ///   * batch_index=None case (no prefix).
+    ///   * batch_index=Some case (prefix present).
+    ///   * BadWitness extracts only the `reason` (no kid duplication).
+    #[test]
+    fn witness_failure_display_uniform_format() {
+        let f_no_batch = WitnessFailure {
+            batch_index: None,
+            witness_kid: "kid-x".to_string(),
+            error: TrustError::BadWitness {
+                witness_kid: "kid-x".to_string(),
+                reason: "boom".to_string(),
+            },
+        };
+        assert_eq!(f_no_batch.to_string(), "witness kid-x: boom");
+
+        let f_batch = WitnessFailure {
+            batch_index: Some(7),
+            witness_kid: "kid-y".to_string(),
+            error: TrustError::BadWitness {
+                witness_kid: "kid-y".to_string(),
+                reason: "kaboom".to_string(),
+            },
+        };
+        assert_eq!(f_batch.to_string(), "batch[7] witness kid-y: kaboom");
+    }
+
+    /// `WitnessFailure::Display` for a non-BadWitness inner error
+    /// still surfaces the kid via `self.witness_kid`. Defends the
+    /// uniformity contract: even an error variant that does not carry
+    /// the kid in its own Display gets prefixed correctly.
+    #[test]
+    fn witness_failure_display_non_bad_witness_variant() {
+        let f = WitnessFailure {
+            batch_index: Some(2),
+            witness_kid: "kid-z".to_string(),
+            error: TrustError::Encoding("hex blew up".to_string()),
+        };
+        let s = f.to_string();
+        assert!(
+            s.contains("kid-z"),
+            "kid must surface even when inner error variant doesn't carry it: {s}",
+        );
+        assert!(s.contains("batch[2]"), "batch prefix must appear: {s}");
+        assert!(
+            s.contains("hex blew up"),
+            "inner error reason must surface: {s}",
+        );
+    }
+
+    /// Compile-time invariant: every kid in `ATLAS_WITNESS_V1_ROSTER`
+    /// must fit `MAX_WITNESS_KID_LEN`. With the genesis-empty roster
+    /// this is vacuously true; but commissioning a kid longer than the
+    /// cap would silently make the verifier reject its OWN roster's
+    /// witnesses (the cap fires before roster lookup), which would be
+    /// catastrophic — this test prevents that drift.
+    #[test]
+    fn roster_kids_within_length_cap() {
+        for (kid, _) in ATLAS_WITNESS_V1_ROSTER {
+            assert!(
+                kid.len() <= MAX_WITNESS_KID_LEN,
+                "roster kid {:?} ({} bytes) exceeds MAX_WITNESS_KID_LEN ({} bytes) — \
+                 commissioning ceremony must keep kids under the cap or the verifier \
+                 will reject its own attestor pre-roster-lookup",
+                kid,
+                kid.len(),
+                MAX_WITNESS_KID_LEN,
+            );
+        }
+    }
+
+    /// `sanitize_kid_for_diagnostic` is the single source of truth for
+    /// clamping wire-side kids before they land in any
+    /// `WitnessFailure`. Its placeholder shape (`"<oversize: N bytes>"`)
+    /// is byte-equivalent across both call sites
+    /// (`verify_witness_against_roster` MAX_WITNESS_KID_LEN guard and
+    /// the chain-aggregator's `chain_head_for` error branch) — pin the
+    /// shape here so a careless edit to one site cannot drift away
+    /// from the other.
+    #[test]
+    fn sanitize_kid_passthrough_at_or_below_cap() {
+        // At cap: pass through unchanged so auditors see the actual kid.
+        let at_cap = "k".repeat(MAX_WITNESS_KID_LEN);
+        assert_eq!(sanitize_kid_for_diagnostic(&at_cap), at_cap);
+        // Empty: pass through (no special-casing).
+        assert_eq!(sanitize_kid_for_diagnostic(""), "");
+        // Typical realistic kid: pass through.
+        assert_eq!(
+            sanitize_kid_for_diagnostic("witness-prod-eu-west-1"),
+            "witness-prod-eu-west-1",
+        );
+    }
+
+    /// Above the cap, the helper collapses to a fixed-shape
+    /// placeholder that records ONLY the byte length — the original
+    /// blob never appears in the output. This is the SEC-MED-1
+    /// invariant: an attacker submitting a multi-megabyte
+    /// `witness_kid` cannot get the verifier or aggregator to echo it
+    /// back across diagnostic surfaces.
+    #[test]
+    fn sanitize_kid_clamps_above_cap() {
+        let oversize = "x".repeat(MAX_WITNESS_KID_LEN + 1);
+        let sanitized = sanitize_kid_for_diagnostic(&oversize);
+        assert_eq!(
+            sanitized,
+            format!("<oversize: {} bytes>", MAX_WITNESS_KID_LEN + 1),
+        );
+        // Crucially: the original blob does NOT appear anywhere in
+        // the placeholder. Pin this property so a future "improvement"
+        // that includes a prefix of the blob breaks this test.
+        assert!(
+            !sanitized.contains('x'),
+            "placeholder must not echo any byte from the oversized blob: {sanitized}",
+        );
+    }
+
+    /// The helper's output for a kid one byte above the cap differs
+    /// from the helper's output for a kid AT the cap — a regression
+    /// where the off-by-one boundary slips would silently let an
+    /// `MAX_WITNESS_KID_LEN + 1` kid through unchanged. Pin both
+    /// sides of the boundary.
+    #[test]
+    fn sanitize_kid_boundary_off_by_one() {
+        let at_cap = "y".repeat(MAX_WITNESS_KID_LEN);
+        let just_over = "y".repeat(MAX_WITNESS_KID_LEN + 1);
+        assert_eq!(sanitize_kid_for_diagnostic(&at_cap), at_cap);
+        assert_ne!(sanitize_kid_for_diagnostic(&just_over), just_over);
+        assert!(sanitize_kid_for_diagnostic(&just_over).starts_with("<oversize:"));
     }
 }
