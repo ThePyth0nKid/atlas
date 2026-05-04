@@ -598,7 +598,69 @@ cannot tell them apart byte-for-byte. See
 `docs/OPERATOR-RUNBOOK.md` §11 for the commissioning ceremony and
 [SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-i for the threat model.
 
-### 7.7 Constant-time hash equality
+### 7.7 Auditor wire-surface (V1.14 — shipped: Scope J)
+
+V1.13 wave-C-2 surfaced witness diagnostics through a single human-
+readable `evidence` row's `detail` string, with per-failure entries
+joined by `; `. Auditor tooling that wanted to classify a failure had
+to string-match the wording — fragile by construction, since a
+verifier-side wording fix would break the auditor's classifier with
+no compile-time signal. V1.14 Scope J replaces that with a structured
+JSON wire surface.
+
+**`WitnessFailureReason` + `WitnessFailureWire`.** Two new public
+types in `atlas-trust-core`:
+
+- `WitnessFailureReason` — `#[non_exhaustive]` enum with kebab-case
+  serde encoding (`kid-not-in-roster`, `duplicate-kid`,
+  `cross-batch-duplicate-kid`, `invalid-signature-format`,
+  `invalid-signature-length`, `oversize-kid`,
+  `chain-head-decode-failed`, `ed25519-verify-failed`, `other`).
+  Auditor tooling switches on this for classification.
+- `WitnessFailureWire` — `{ witness_kid: String,
+  batch_index: Option<u64>, reason_code: WitnessFailureReason,
+  message: String }`. `#[serde(deny_unknown_fields)]` so a corrupted
+  payload fails closed at parse.
+
+**At-source classification.** A new private
+`verify_witness_against_roster_categorized` returns
+`Result<(), (TrustError, WitnessFailureReason)>`, naming the failure
+reason at the point of rejection. The public
+`verify_witness_against_roster` continues returning `TrustResult<()>`
+unchanged — Scope J is additive.
+
+**`VerifyOutcome.witness_failures`.** A new
+`Vec<WitnessFailureWire>` field on `VerifyOutcome`, populated in
+`verify_trace_with` by mapping the categorised
+`witness_aggregate.failures` through `WitnessFailureWire::from`.
+`#[serde(default)]` so pre-J payloads parse into a post-J struct
+with `witness_failures: vec![]`.
+
+**Wire-side input sanitisation (SEC).** The per-batch verifier runs
+`sanitize_kid_for_diagnostic` on the wire-supplied `witness_kid`
+*before* constructing any `WitnessFailure` record (including the
+duplicate-kid pre-pass branch). Defends the lenient evidence row's
+`rendered.join("; ")` aggregation from a multi-MB blob amplification
+attack: a malicious issuer presenting an oversize kid would
+otherwise have ballooned the diagnostic output through that join.
+
+**End-to-end pin.** `atlas-verify-cli verify-trace --output json`
+emits the `witness_failures` array as part of `VerifyOutcome`
+serialisation. Exercised by
+`crates/atlas-verify-cli/tests/witness_failures_json.rs` (Rust
+integration) and `apps/atlas-mcp-server/scripts/smoke.ts` step 8
+(TS-side `JSON.parse` round-trip). A regression that omits the
+field, renames it, or emits `null` instead of `[]` trips one or
+both lanes.
+
+**Trust property unchanged.** Scope J does not change the
+verification verdict for any input that V1.13 wave-C-2 already
+accepted or rejected. `valid` and `errors` remain the load-bearing
+trust signals; `witness_failures` is purely diagnostic. See
+[SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-j for the threat
+model and consumer-side residual risks.
+
+### 7.8 Constant-time hash equality
 
 Both `pubkey_bundle_hash` and per-event `event_hash` comparisons go
 through `crate::ct::ct_eq_str`, which is `subtle::ConstantTimeEq` on
@@ -1208,7 +1270,7 @@ Headline:
   model and [OPERATOR-RUNBOOK.md §10](OPERATOR-RUNBOOK.md) for the
   commissioning ceremony.
 
-### V1.14 — HSM-backed witness (shipped: Scope I)
+### V1.14 — HSM-backed witness + auditor wire-surface (shipped: Scope I + Scope J)
 
 - **HSM-backed witness backend.** A new `Pkcs11Witness`
   implementation of the dyn-safe `Witness` trait
@@ -1264,6 +1326,22 @@ Headline:
   cutover. See [SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-i for
   the threat model and [OPERATOR-RUNBOOK.md §11](OPERATOR-RUNBOOK.md)
   for the commissioning ceremony.
+- **Auditor wire-surface (Scope J).** Replaces V1.13 wave-C-2's
+  string-match-against-evidence-detail diagnostic surface with
+  structured `WitnessFailureWire` JSON. New
+  `VerifyOutcome.witness_failures: Vec<WitnessFailureWire>` field
+  (additive, `#[serde(default)]`) + `WitnessFailureReason`
+  `#[non_exhaustive]` enum (kebab-case, nine variants) lets auditor
+  tooling switch on `reason_code` instead of fragile wording match.
+  At-source classification via a private categorised verifier; the
+  public `verify_witness_against_roster` API is unchanged. SEC fix
+  bundled: per-batch verifier sanitises `witness_kid` before
+  constructing any failure record, defending the lenient evidence
+  row from multi-MB blob amplification through `; `-join. CLI
+  `--output json` carries the field; TS smoke lane parses it. See
+  [§7.7](#77-auditor-wire-surface-v114--shipped-scope-j) for the
+  technical design and [SECURITY-NOTES.md](SECURITY-NOTES.md)
+  §scope-j for the threat model.
 
 ### V2 — full COSE + policy + SPIFFE
 

@@ -298,6 +298,58 @@ async function main(): Promise<void> {
   }
   log("v1.9-done", `✓ per-tenant trace verifies for ${WORKSPACE_PT} (strict mode)`);
 
+  // 8. V1.14 Scope J — JSON output schema pin for the auditor wire.
+  //    The Rust verifier emits a structured `witness_failures` array
+  //    (`Vec<WitnessFailureWire>`) under `-o json`. Auditor tooling
+  //    (regulators, partner verifiers) consumes this field instead of
+  //    string-matching the lenient evidence row's `detail`. A TS-side
+  //    parse here pins the contract from the consumer's perspective:
+  //    the field must be present, be an array, and round-trip through
+  //    JSON.parse without surprises. The smoke runs on a happy-path
+  //    trace (no anchor_chain in the per-tenant fixture), so the
+  //    expected shape is `[]` — empty array, but PRESENT. A regression
+  //    that omitted the field, renamed it, or emitted `null` would
+  //    trip this leg. The populated path (with bad witnesses) is
+  //    exercised by the Rust integration tests in
+  //    crates/atlas-verify-cli/tests/witness_failures_json.rs.
+  log("v1.14-json", "auditor wire schema pin (witness_failures array)");
+  const jsonVerify = spawnSync(
+    verifierBin,
+    ["verify-trace", ptTracePath, "-k", ptBundlePath, "-o", "json"],
+    { encoding: "utf8" },
+  );
+  if (jsonVerify.error) fail(`v1.14-json verifier spawn failed: ${jsonVerify.error.message}`);
+  if (jsonVerify.status !== 0) {
+    fail(`v1.14-json verifier exited with status ${jsonVerify.status}; stdout=${jsonVerify.stdout}`);
+  }
+  let outcome: unknown;
+  try {
+    outcome = JSON.parse(jsonVerify.stdout);
+  } catch (e: unknown) {
+    fail(`v1.14-json output did not parse as JSON: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (typeof outcome !== "object" || outcome === null) {
+    fail(`v1.14-json: expected object outcome, got ${typeof outcome}`);
+  }
+  const outcomeRecord = outcome as Record<string, unknown>;
+  if (outcomeRecord.valid !== true) {
+    fail(`v1.14-json: expected valid=true on happy path, got ${String(outcomeRecord.valid)}`);
+  }
+  const witnessFailures = outcomeRecord.witness_failures;
+  if (!Array.isArray(witnessFailures)) {
+    fail(
+      `v1.14-json: outcome.witness_failures must be an array (V1.14 Scope J wire contract); ` +
+        `got ${typeof witnessFailures}: ${JSON.stringify(witnessFailures)}`,
+    );
+  }
+  if (witnessFailures.length !== 0) {
+    fail(
+      `v1.14-json: per-tenant happy-path trace has no anchor_chain, expected ` +
+        `witness_failures=[], got ${witnessFailures.length} entries: ${JSON.stringify(witnessFailures)}`,
+    );
+  }
+  log("v1.14-json", "✓ outcome.witness_failures present and []");
+
   log("done", "✓ end-to-end smoke OK — MCP write+anchor path verifies as VALID");
 }
 

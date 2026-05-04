@@ -17,3 +17,15 @@ atlas-trust-core = { path = "../atlas-trust-core" }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# V1.14 Scope J-c — CLI integration tests need to materialise a trace
+# bundle with bad witnesses on disk before invoking the CLI binary.
+# `tempfile` provides a tmpdir that is automatically cleaned up.
+tempfile = "3"
+# Used by the trace-builder fixture in tests/witness_failures_json.rs
+# to mint event signatures and witness payloads inline (rather than
+# committing a hand-crafted JSON fixture which would need to be
+# regenerated whenever the wire schema evolves).
+ed25519-dalek = { workspace = true }
+base64 = { workspace = true }

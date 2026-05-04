@@ -33,8 +33,9 @@ pub use anchor::{chain_head_for, ChainHeadHex, ANCHOR_CHAIN_DOMAIN};
 pub use per_tenant::{parse_per_tenant_kid, per_tenant_kid_for, PER_TENANT_KID_PREFIX};
 pub use witness::{
     decode_chain_head, verify_witness_against_roster, verify_witnesses_against_roster,
-    witness_signing_input, WitnessFailure, WitnessSig, WitnessVerifyOutcome,
-    ATLAS_WITNESS_DOMAIN, ATLAS_WITNESS_V1_ROSTER, MAX_WITNESS_KID_LEN,
+    witness_signing_input, WitnessFailure, WitnessFailureReason, WitnessFailureWire,
+    WitnessSig, WitnessVerifyOutcome, ATLAS_WITNESS_DOMAIN, ATLAS_WITNESS_V1_ROSTER,
+    MAX_WITNESS_KID_LEN,
 };
 
 /// Schema version this build of the crate produces and accepts.

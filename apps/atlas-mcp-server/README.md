@@ -84,7 +84,17 @@ Expected smoke output ends with:
   ✓ dag-tips
   ✓ anchors
   ✓ anchor-chain (V1.7: validates chain monotonicity)
+[smoke] v1.14-json     ✓ outcome.witness_failures present and []
 ```
+
+The trailing `v1.14-json` line is the V1.14 Scope J auditor wire pin:
+the smoke re-runs `atlas-verify-cli` with `-o json` and asserts that
+`VerifyOutcome.witness_failures` deserialises as a (here-empty) array.
+A regression that omitted, renamed, or `null`-valued the field would
+fail this leg before the smoke completes. The populated path (with
+bad witnesses) is exercised by Rust integration tests in
+`crates/atlas-verify-cli/tests/witness_failures_json.rs` and
+`crates/atlas-trust-core/tests/verify_outcome_witness_failures.rs`.
 
 ---
 
@@ -217,6 +227,23 @@ production audit signal.) See
   ECDSA P-256 public key. Same single-key trust property; no cross-shard
   replay (C2SP origin embeds tree_id). Issuer still posts only to active
   shard.
+- **Auditor wire-surface (V1.14 Scope J).** `VerifyOutcome` now carries
+  a structured `witness_failures: WitnessFailureWire[]` field
+  alongside `valid` / `evidence` / `errors`. Each entry pins
+  `{ witness_kid, batch_index, reason_code, message }` where
+  `reason_code` is a kebab-case enum (`kid-not-in-roster`,
+  `duplicate-kid`, `cross-batch-duplicate-kid`,
+  `invalid-signature-format`, `invalid-signature-length`,
+  `oversize-kid`, `chain-head-decode-failed`,
+  `ed25519-verify-failed`, `other`). Auditor tooling switches on
+  `reason_code` for classification instead of string-matching the
+  human-readable `evidence` row's `detail`. The field is additive
+  (`#[serde(default)]` on the Rust side) — pre-J consumers parsing
+  pre-J payloads see `witness_failures: []`; post-J consumers
+  parsing pre-J payloads also see `[]`. The smoke test
+  `pnpm smoke` step 8 (`v1.14-json`) parses the field via
+  `JSON.parse` and asserts the array shape on every run, pinning
+  the wire contract from the TS consumer side.
 
 See [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md) for the
 full system context.

@@ -16,7 +16,7 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**V1.14 Scope I shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token).**
+**V1.14 Scope I + Scope J shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON).**
 
 Trust-core crate + Rekor anchoring + per-tenant key derivation + HSM-backed signing + independent
 witness attestor (V1.5 mock-issuer, V1.6 live Sigstore Rekor v1, V1.7 anchor-chain + shard
@@ -29,11 +29,14 @@ sealed `Sensitive=true, Extractable=false, Derive=false` keypair).
 
 Current state:
 
-- 319 Rust tests green across the workspace (109 trust-core unit + 18 anchor-chain adversary
-  + 13 golden trace + 11 per-tenant-keys adversary + 6 Sigstore golden + 6 witness-strict-mode
-  integration in `atlas-trust-core`; 121 issuer/anchor/HSM in `atlas-signer`; 5 strict-mode
-  CLI in `atlas-verify-cli`; 29 unit + 1 byte-equivalence integration in `atlas-witness`
-  including V1.14 Scope I HSM-backed witness)
+- 342 Rust tests green across the workspace (`--features hsm`): 121 trust-core unit
+  (incl. V1.14 Scope J `WitnessFailureReason` per-variant pinning + cross-batch dup
+  sanitisation pin) + 18 anchor-chain adversary + 13 golden trace + 11 per-tenant-keys
+  adversary + 6 Sigstore golden + 6 witness-strict-mode + 8 V1.14 Scope J
+  `witness_failures` integration in `atlas-trust-core`; 115 issuer/anchor/HSM in
+  `atlas-signer`; 5 strict-mode + 3 V1.14 Scope J `--output json` in `atlas-verify-cli`;
+  29 unit + 1 byte-equivalence integration in `atlas-witness` including V1.14
+  Scope I HSM-backed witness
 - Signing-input is deterministic CBOR per RFC 8949 §4.2.1
   (length-first map sort, no floats, byte-pinned golden)
 - Pubkey-bundle hash is canonical-JSON, byte-pinned golden — silent
@@ -63,6 +66,17 @@ Current state:
   (`atlas-witness-key-v1:` distinct from `atlas-workspace-key-v1:`).
   `atlas-witness extract-pubkey-hex --kid X` retrieves the rostering
   hex per OPERATOR-RUNBOOK §11
+- Auditor wire-surface (V1.14 Scope J): `VerifyOutcome.witness_failures`
+  is a structured `Vec<WitnessFailureWire>` (additive,
+  `#[serde(default)]`) carrying `{ witness_kid, batch_index,
+  reason_code, message }`. `WitnessFailureReason` is a
+  `#[non_exhaustive]` kebab-case enum (`kid-not-in-roster`,
+  `duplicate-kid`, `cross-batch-duplicate-kid`,
+  `invalid-signature-format`, …). Auditor tooling switches on
+  `reason_code` instead of fragile wording match against the lenient
+  evidence row's `detail`. `atlas-verify-cli verify-trace --output json`
+  carries the field; the field is end-to-end exercised by the TS
+  smoke lane in `apps/atlas-mcp-server/scripts/smoke.ts` step 8
 - `workspace_id` bound into the signing-input + per-workspace key
   derivation (HKDF-SHA256) — cross-workspace replay structurally
   impossible AND no shared signing key across tenants
@@ -84,8 +98,11 @@ promotes the HSM and Sigstore CI lanes to `pull_request:` and adds a nightly liv
 sentry. V1.13 ships the independent witness cosignature attestor (wave C-1 lenient,
 wave C-2 strict-mode + commissioning ceremony). V1.14 Scope I closes the witness-side
 residual by sealing the witness Ed25519 scalar inside a PKCS#11 token (signing routes
-through `CKM_EDDSA`, scalar never enters atlas-witness address space). Graph-database
-integration and policy-engine follow in V2.
+through `CKM_EDDSA`, scalar never enters atlas-witness address space). V1.14 Scope J
+replaces V1.13 wave-C-2's string-match diagnostic surface with a structured
+`witness_failures` JSON wire so auditor tooling can classify per-witness failures
+without keying on human-readable wording. Graph-database integration and policy-engine
+follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
   trust property, write/export flows, V1 → V1.14 → V2 boundaries.

@@ -20,7 +20,7 @@ use crate::trace_format::{AnchorChain, AnchorEntry, AnchorKind, AtlasTrace};
 use crate::error::TrustError;
 use crate::witness::{
     sanitize_kid_for_diagnostic, verify_witnesses_against_roster, WitnessFailure,
-    WitnessVerifyOutcome, ATLAS_WITNESS_V1_ROSTER,
+    WitnessFailureReason, WitnessFailureWire, WitnessVerifyOutcome, ATLAS_WITNESS_V1_ROSTER,
 };
 
 /// Caller-tunable verification options.
@@ -105,6 +105,23 @@ pub struct VerifyOutcome {
     pub errors: Vec<String>,
     /// Verifier build identity (e.g. "atlas-trust-core/0.1.0").
     pub verifier_version: String,
+    /// V1.14 Scope J: structured per-witness failure records suitable
+    /// for programmatic auditor consumption (kid + batch_index +
+    /// stable `reason_code` + human-readable message). Mirrors the
+    /// `Vec<WitnessFailure>` carried internally by
+    /// `aggregate_witnesses_across_chain`'s rollup; the `witnesses`
+    /// evidence row's `detail` string remains the human-readable
+    /// rendering. Auditor tooling MUST switch on `reason_code` rather
+    /// than parsing the evidence-row text — the wire-stable
+    /// categorisation lives here.
+    ///
+    /// `#[serde(default)]` so JSON written by V1.13 builds (which had
+    /// no such field) deserialises into an empty Vec rather than
+    /// failing — additive-only wire change. New JSON consumers that
+    /// require coverage must check the field's content, not its
+    /// presence.
+    #[serde(default)]
+    pub witness_failures: Vec<WitnessFailureWire>,
 }
 
 impl VerifyOutcome {
@@ -711,11 +728,24 @@ pub fn verify_trace_with(
 
     let valid = errors.is_empty();
 
+    // V1.14 Scope J: project the chain-aggregator's structured
+    // `Vec<WitnessFailure>` (in-process type, carries `TrustError`)
+    // to wire-stable `Vec<WitnessFailureWire>` (no `TrustError`,
+    // stable `reason_code` enum, kebab-case JSON). Same source of
+    // truth as the lenient `witnesses` evidence row — both render
+    // from `witness_aggregate.failures` so they cannot disagree.
+    let witness_failures = witness_aggregate
+        .failures
+        .iter()
+        .map(WitnessFailureWire::from)
+        .collect();
+
     VerifyOutcome {
         valid,
         evidence,
         errors,
         verifier_version: crate::VERIFIER_VERSION.to_string(),
+        witness_failures,
     }
 }
 
@@ -916,6 +946,7 @@ pub(crate) fn aggregate_witnesses_across_chain_with_roster(
                             witness_kid: sanitized_kid,
                             reason: format!("chain_head recompute failed: {}", e),
                         },
+                        reason_code: WitnessFailureReason::ChainHeadDecodeFailed,
                     });
                 }
                 continue;
@@ -956,19 +987,38 @@ pub(crate) fn aggregate_witnesses_across_chain_with_roster(
                 // Reject as cross-batch duplicate — this signature is
                 // valid in isolation but does NOT add an independent
                 // attestor to the threshold count.
+                //
+                // Sanitise the kid before placing it on the auditor
+                // wire-surface — same defence-in-depth contract as the
+                // per-batch path: a hostile signer-side could embed a
+                // multi-MB blob in `witness_kid`, and the auditor JSON
+                // must not amplify it.
+                let sanitized_cross = sanitize_kid_for_diagnostic(&w.witness_kid);
                 failures.push(WitnessFailure {
                     batch_index: Some(batch.batch_index),
-                    witness_kid: w.witness_kid.clone(),
+                    witness_kid: sanitized_cross.clone(),
                     error: TrustError::BadWitness {
-                        witness_kid: w.witness_kid.clone(),
+                        witness_kid: sanitized_cross,
                         reason: "duplicate witness_kid across batches \
                                  (already verified in an earlier batch — \
                                  does not count toward M-of-N threshold)"
                             .to_string(),
                     },
+                    reason_code: WitnessFailureReason::CrossBatchDuplicateKid,
                 });
             } else {
                 verified += 1;
+                // Invariant: only kids that passed
+                // `verify_witness_against_roster_categorized` reach this
+                // arm, and that helper's first guard is the
+                // `MAX_WITNESS_KID_LEN` length cap (witness.rs §oversize
+                // guard). `verified_kids` therefore only ever contains
+                // bounded-length strings — the dedup key cannot itself
+                // be a multi-MB blob. If the per-batch length guard is
+                // ever lifted or reordered, this insert silently breaks
+                // the wire-side amplification defence further down (the
+                // cross-batch dup branch reads from `verified_kids` and
+                // routes the matched kid onto the auditor wire).
                 verified_kids.insert(w.witness_kid.clone());
             }
         }
@@ -998,6 +1048,11 @@ pub(crate) fn aggregate_witnesses_across_chain_with_roster(
                 batch_index: Some(batch.batch_index),
                 witness_kid: f.witness_kid,
                 error: f.error,
+                // Propagate the per-batch verifier's at-source
+                // categorisation — re-deriving it here would
+                // re-introduce the string-match coupling that
+                // V1.14 Scope J explicitly avoids.
+                reason_code: f.reason_code,
             });
         }
     }
@@ -1200,6 +1255,7 @@ mod tests {
             evidence: vec![],
             errors: vec![],
             verifier_version: "test".to_string(),
+            witness_failures: vec![],
         };
         assert!(!outcome.has_witness_failures());
     }
@@ -1217,6 +1273,7 @@ mod tests {
             }],
             errors: vec![],
             verifier_version: "test".to_string(),
+            witness_failures: vec![],
         };
         assert!(!outcome.has_witness_failures());
     }
@@ -1235,6 +1292,7 @@ mod tests {
             }],
             errors: vec![],
             verifier_version: "test".to_string(),
+            witness_failures: vec![],
         };
         assert!(outcome.has_witness_failures());
     }
@@ -1261,6 +1319,7 @@ mod tests {
             ],
             errors: vec!["sig fail".to_string(), "chain fail".to_string()],
             verifier_version: "test".to_string(),
+            witness_failures: vec![],
         };
         assert!(
             !outcome.has_witness_failures(),
@@ -1452,6 +1511,84 @@ mod tests {
             "no failures expected for distinct cross-batch kids: {:?}",
             agg.failures,
         );
+    }
+
+    /// V1.14 Scope J defence-in-depth pin: the cross-batch dup
+    /// constructor at the top of this file must route `witness_kid`
+    /// through `sanitize_kid_for_diagnostic` before placing it on the
+    /// auditor wire surface. Both the outer `WitnessFailure.witness_kid`
+    /// AND the inner `TrustError::BadWitness.witness_kid` must be
+    /// sanitised — auditor JSON consumes both.
+    ///
+    /// Today's per-batch length guard at `MAX_WITNESS_KID_LEN`
+    /// structurally prevents an oversize kid from ever reaching the
+    /// cross-batch path (the per-batch verifier rejects it first), so
+    /// `sanitize_kid_for_diagnostic` is identity on every kid that
+    /// reaches here. That invariant could regress: a future patch that
+    /// lifts the per-batch guard, or adds a parallel dedup path that
+    /// skips the per-batch verifier, would re-open multi-MB blob
+    /// amplification on the wire surface. This test pins the contract
+    /// by asserting equality with the sanitised form rather than the
+    /// raw input — so any future regression that plumbs the raw kid
+    /// through trips the test before reaching production.
+    #[test]
+    fn cross_batch_duplicate_kid_failure_uses_sanitized_kid() {
+        use crate::witness::{
+            decode_chain_head, sanitize_kid_for_diagnostic, witness_signing_input,
+        };
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let raw_kid = "k1-cross-batch-dup";
+        let sk1 = SigningKey::from_bytes(&[7u8; 32]);
+        let pk1 = sk1.verifying_key().to_bytes();
+        let test_roster: &[(&str, [u8; 32])] = &[(raw_kid, pk1)];
+
+        let mut chain = empty_chain();
+        let mut batch0 = batch_no_witnesses(0, ANCHOR_CHAIN_GENESIS_PREVIOUS_HEAD);
+        chain.history.push(batch0.clone());
+        let head0 = chain_head_for(&chain.history[0]).unwrap();
+        let sig0 = sk1.sign(&witness_signing_input(
+            &decode_chain_head(head0.as_str()).unwrap(),
+        ));
+        batch0.witnesses.push(WitnessSig {
+            witness_kid: raw_kid.to_string(),
+            signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sig0.to_bytes()),
+        });
+        chain.history[0] = batch0;
+        let head0_witnessed = chain_head_for(&chain.history[0]).unwrap();
+
+        let mut batch1 = batch_no_witnesses(1, head0_witnessed.as_str());
+        chain.history.push(batch1.clone());
+        let head1 = chain_head_for(&chain.history[1]).unwrap();
+        let sig1 = sk1.sign(&witness_signing_input(
+            &decode_chain_head(head1.as_str()).unwrap(),
+        ));
+        batch1.witnesses.push(WitnessSig {
+            witness_kid: raw_kid.to_string(),
+            signature: base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sig1.to_bytes()),
+        });
+        chain.history[1] = batch1;
+        chain.head = chain_head_for(&chain.history[1]).unwrap().into_inner();
+
+        let agg =
+            aggregate_witnesses_across_chain_with_roster(&chain, test_roster);
+        assert_eq!(agg.failures.len(), 1, "expected one cross-batch dup failure");
+        let f = &agg.failures[0];
+        let sanitised = sanitize_kid_for_diagnostic(raw_kid);
+
+        assert_eq!(
+            f.witness_kid, sanitised,
+            "outer WitnessFailure.witness_kid must equal sanitize_kid_for_diagnostic(raw)",
+        );
+        match &f.error {
+            TrustError::BadWitness { witness_kid: inner, .. } => assert_eq!(
+                inner, &sanitised,
+                "inner TrustError::BadWitness.witness_kid must also be sanitised",
+            ),
+            other => panic!("expected BadWitness, got {:?}", other),
+        }
     }
 
     /// `apply_witness_threshold` with `threshold == 0` is the lenient

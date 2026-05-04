@@ -1105,6 +1105,141 @@ the witness on clean infrastructure with a rotated PIN.
 
 ---
 
+## scope-j — auditor wire-surface (V1.14 — shipped)
+
+V1.13 wave-C-2's witness diagnostics surfaced through a single JSON
+field — the `evidence` row's `detail` string, with per-failure entries
+joined by `; `. Auditor tooling that wanted to classify a failure
+(distinguish a kid-not-in-roster failure from a duplicate-kid failure
+from an invalid-signature failure) had to string-match against the
+human-readable detail. That is fragile by design: a verifier-side
+wording fix would silently break the auditor's classifier without
+any compile-time signal. V1.14 Scope J replaces that with a structured
+wire surface — `VerifyOutcome.witness_failures: Vec<WitnessFailureWire>`
+in `serde_json` form — that auditors can consume programmatically.
+
+### What landed in V1.14 Scope J
+
+- **`WitnessFailureReason` enum.** A new
+  [`WitnessFailureReason`](../crates/atlas-trust-core/src/witness.rs)
+  in `atlas-trust-core` with nine kebab-case variants
+  (`kid-not-in-roster`, `duplicate-kid`, `cross-batch-duplicate-kid`,
+  `invalid-signature-format`, `invalid-signature-length`,
+  `oversize-kid`, `chain-head-decode-failed`, `ed25519-verify-failed`,
+  `other`). Marked `#[non_exhaustive]` so adding new failure modes in
+  future verifier waves does not require auditor tooling to handle a
+  new variant immediately — they can default to `other` until they
+  update.
+- **`WitnessFailureWire` struct.** A serde-stable projection of an
+  internal `WitnessFailure` carrying `witness_kid: String`,
+  `batch_index: Option<u64>`, `reason_code: WitnessFailureReason`, and
+  the human-readable `message: String`. `#[serde(deny_unknown_fields)]`
+  is set so a corrupted or extended JSON payload fails closed at parse
+  rather than being silently ignored.
+- **At-source classification.** `verify_witness_against_roster_categorized`
+  (a new private helper) returns `Result<(), (TrustError, WitnessFailureReason)>`,
+  letting the per-witness verifier name the failure reason at the
+  point where the rejection happens — no fragile string-match needed
+  upstream. The public `verify_witness_against_roster` continues to
+  return `TrustResult<()>` so the existing API contract is preserved.
+- **`VerifyOutcome.witness_failures` field.** Additive (with
+  `#[serde(default)]` for backwards-compat with pre-J consumers
+  that parse pre-J `VerifyOutcome` JSON). Populated in
+  `verify_trace_with` by mapping `witness_aggregate.failures` through
+  `WitnessFailureWire::from`. Empty when there are no witness
+  failures (no chain, or chain without witnesses, or all witnesses
+  verified).
+- **Wire-side input sanitisation.** The per-batch verifier sanitises
+  `witness_kid` via `sanitize_kid_for_diagnostic` *before*
+  constructing any `WitnessFailure` record, including the
+  duplicate-kid pre-pass branch that would previously have echoed
+  the raw input. Defends the lenient evidence row's
+  `rendered.join("; ")` aggregation from a multi-MB blob amplification
+  attack where an attacker presents an oversize kid hoping to balloon
+  the diagnostic output. The sanitisation is fixed-prefix
+  truncation + length-tag suffix, so the wire payload is always
+  bounded.
+- **CLI wire pin.** `atlas-verify-cli verify-trace --output json`
+  emits the `witness_failures` array as part of `VerifyOutcome`
+  serialisation. Exercised end-to-end by
+  `crates/atlas-verify-cli/tests/witness_failures_json.rs`
+  (Rust integration test) and `apps/atlas-mcp-server/scripts/smoke.ts`
+  step 8 (TS-side parse, JSON.parse round-trip). A regression that
+  omits the field, renames it, or emits `null` instead of `[]` trips
+  one or both tests.
+
+### Trust property (Scope J)
+
+V1.14 Scope J does NOT change the verification verdict for any input
+that V1.13 wave-C-2 already accepted or rejected. `valid` and `errors`
+remain the load-bearing trust signals; `witness_failures` is purely
+diagnostic. A trace with `witness_failures: [{...}]` and `valid: true`
+is the lenient-mode disposition (V1.13 wave-C-1: present but
+unverified witnesses do not invalidate the trace); the same trace
+under `--require-witness >= 1` would have `valid: false` with the
+witnesses-threshold error in `errors`, and the `witness_failures`
+array would be the same.
+
+The strict-mode promotion path (V1.13 wave-C-2) is unchanged. Auditor
+tooling that wants to reproduce a strict-mode verdict from JSON
+output can ignore `witness_failures` entirely and key on `valid` +
+`errors`. Tooling that wants to attribute *why* a strict-mode
+threshold missed (e.g. "all five witnesses are uncommissioned" vs
+"three witnesses verified, two failed signature") consumes
+`witness_failures.iter().filter(|f| f.reason_code == ...)`.
+
+### Residual risks after V1.14 Scope J
+
+- **Auditor tooling switches on `reason_code` without `_default`
+  branch.** `WitnessFailureReason` is `#[non_exhaustive]`. A v1.14
+  auditor that exhaustively matches all known variants will fail
+  closed against a future variant added in a v1.15 (or later)
+  verifier — but the `valid` verdict still correctly tells them
+  whether to reject the trace. Tooling MUST handle the catch-all
+  `_` arm or coerce unknown variants to `other`. Documented in
+  the rustdoc on `WitnessFailureReason`.
+- **`message` field is human-readable, not a stable contract.**
+  Auditor tooling that depends on the wording of `WitnessFailureWire.message`
+  has the same fragility as pre-J string-matching against the
+  evidence detail. The stable contract is `reason_code` +
+  `witness_kid` + `batch_index`. `message` is for human eyeballs
+  in CLI output and dashboard display; it is NOT pinned by tests
+  and may be reworded between minor versions.
+- **Schema additions are minor-version compatible only.**
+  Pre-J auditor tooling that uses `serde_json::Value`-style
+  parsing (instead of typed struct deserialisation) will see the
+  new field and ignore it — backwards-compat works. But auditor
+  tooling that uses a typed `VerifyOutcome` struct from a pre-J
+  version of `atlas-trust-core` will fail to compile against a
+  post-J trust-core (the field is added, not optional in the
+  struct). Vendoring a specific trust-core version is the
+  documented pattern.
+
+### What V1.14 Scope J does NOT cover
+
+- **Other evidence rows.** Scope J structures only the witness path.
+  `event-signatures`, `anchor-chain`, `per-tenant-keys`, `anchors`,
+  and `dag-tips` evidence rows still surface only as
+  `(check, ok, detail)` tuples. Future scopes may extend the same
+  pattern (`{check}_failures: Vec<{Check}FailureWire>`) but each is
+  an independent wire commitment.
+- **Strict-mode error wording.** The `errors` array's strings (e.g.
+  "witnesses-threshold: 0 of 1 verified") remain wording-stable but
+  not type-stable. Strict-mode-aware auditor tooling that wants to
+  classify the strict-mode failure programmatically has no
+  structured equivalent yet — Scope J intentionally scopes the
+  structured surface to per-witness failures, where the
+  classification grain is meaningful.
+- **Backwards-decode of pre-J `VerifyOutcome` JSON.** The
+  `#[serde(default)]` attribute lets pre-J payloads (without
+  `witness_failures`) deserialise into a post-J struct (with
+  `witness_failures: vec![]`). The reverse — a post-J consumer
+  that drops `witness_failures` from a serialised post-J
+  outcome — is not supported; the consumer must round-trip
+  through a typed struct or explicitly strip the field.
+
+---
+
 ## Crate boundary
 
 The verifier crates (`atlas-trust-core`, `atlas-verify-cli`,

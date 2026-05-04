@@ -207,6 +207,37 @@ pub fn verify_witness_against_roster(
     chain_head_hex: &str,
     roster: &[(&str, [u8; 32])],
 ) -> TrustResult<()> {
+    // Public surface preserves the original `TrustResult<()>` shape
+    // (so external callers and existing in-crate Tests keep working);
+    // the V1.14 Scope J categorisation is provided by the
+    // `_categorized` inner helper, which `verify_witnesses_against_roster`
+    // calls so it can record the `reason_code` AT-SOURCE without
+    // re-deriving it via string-match later.
+    verify_witness_against_roster_categorized(witness, chain_head_hex, roster)
+        .map_err(|(err, _reason)| err)
+}
+
+/// Inner verifier that returns BOTH the `TrustError` AND the stable
+/// [`WitnessFailureReason`] categorisation produced AT-SOURCE
+/// (V1.14 Scope J).
+///
+/// The categorisation is set at the exact failure site rather than
+/// being string-matched against `TrustError::Display` later: doing it
+/// here keeps the wire-stable bucketing decoupled from the
+/// human-readable `reason` text (which can change between crate
+/// versions without breaking the wire contract). A future tightening
+/// of an error message no longer risks re-bucketing an audit-relevant
+/// failure into a different `WitnessFailureReason`.
+///
+/// Kept `pub(crate)` so the per-batch verifier and the chain
+/// aggregator can both invoke it; not part of the public API surface
+/// (the public `verify_witness_against_roster` peels off the
+/// categorisation for backward compatibility).
+pub(crate) fn verify_witness_against_roster_categorized(
+    witness: &WitnessSig,
+    chain_head_hex: &str,
+    roster: &[(&str, [u8; 32])],
+) -> Result<(), (TrustError, WitnessFailureReason)> {
     // Length cap on the wire-side `witness_kid` (V1.13 wave-C-2). A
     // hostile or buggy issuer could otherwise emit multi-megabyte kid
     // strings that amplify per-batch verification cost (BTreeMap
@@ -214,17 +245,40 @@ pub fn verify_witness_against_roster(
     // O(N) in kid length per witness). Fail closed BEFORE any roster
     // work runs so the cost of rejection is constant in the input.
     if witness.witness_kid.len() > MAX_WITNESS_KID_LEN {
-        return Err(TrustError::BadWitness {
-            witness_kid: sanitize_kid_for_diagnostic(&witness.witness_kid),
-            reason: format!(
-                "witness_kid exceeds MAX_WITNESS_KID_LEN ({} > {} bytes)",
-                witness.witness_kid.len(),
-                MAX_WITNESS_KID_LEN,
-            ),
-        });
+        return Err((
+            TrustError::BadWitness {
+                witness_kid: sanitize_kid_for_diagnostic(&witness.witness_kid),
+                reason: format!(
+                    "witness_kid exceeds MAX_WITNESS_KID_LEN ({} > {} bytes)",
+                    witness.witness_kid.len(),
+                    MAX_WITNESS_KID_LEN,
+                ),
+            },
+            WitnessFailureReason::OversizeKid,
+        ));
     }
 
-    let chain_head_bytes = decode_chain_head(chain_head_hex)?;
+    // V1.14 Scope J defence-in-depth: every subsequent `TrustError::BadWitness`
+    // constructor in this function MUST use this `sanitized` binding rather
+    // than `witness.witness_kid` directly. The oversize guard above ensures
+    // `kid.len() <= MAX_WITNESS_KID_LEN`, so `sanitize_kid_for_diagnostic`
+    // is identity on every kid that reaches here. The reason we still go
+    // through the helper: a future change that lifts or reorders the
+    // length guard, or a future log-formatting site that prints
+    // `TrustError::BadWitness` via Debug, must not silently re-open
+    // multi-MB blob amplification through the in-memory error struct.
+    let sanitized = sanitize_kid_for_diagnostic(&witness.witness_kid);
+
+    // `decode_chain_head` returns `TrustError::Encoding` on failure.
+    // In the production path this only happens when a programmer
+    // bypasses `ChainHeadHex` and feeds raw caller-supplied hex —
+    // surface as `Other` because it's a programmer-side wire-shape
+    // bug, not a witness-domain failure. The chain aggregator never
+    // routes through this branch (it uses `chain_head_for(batch)`
+    // which returns `ChainHeadHex` directly), so production wire
+    // output should never carry `Other` from this site.
+    let chain_head_bytes = decode_chain_head(chain_head_hex)
+        .map_err(|e| (e, WitnessFailureReason::Other))?;
 
     // Constant-time kid compare: the wire-side `witness_kid` is
     // attacker-controlled (a malicious issuer can choose any string).
@@ -238,43 +292,207 @@ pub fn verify_witness_against_roster(
         .iter()
         .find(|(kid, _)| crate::ct::ct_eq_str(kid, &witness.witness_kid))
         .map(|(_, pk)| pk)
-        .ok_or_else(|| TrustError::BadWitness {
-            witness_kid: witness.witness_kid.clone(),
-            reason: "witness_kid not in pinned roster".to_string(),
+        .ok_or_else(|| {
+            (
+                TrustError::BadWitness {
+                    witness_kid: sanitized.clone(),
+                    reason: "witness_kid not in pinned roster".to_string(),
+                },
+                WitnessFailureReason::KidNotInRoster,
+            )
         })?;
 
     let signing_input = witness_signing_input(&chain_head_bytes);
 
     let sig_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(&witness.signature)
-        .map_err(|e| TrustError::BadWitness {
-            witness_kid: witness.witness_kid.clone(),
-            reason: format!("signature is not valid base64url-no-pad: {e}"),
+        .map_err(|e| {
+            (
+                TrustError::BadWitness {
+                    witness_kid: sanitized.clone(),
+                    reason: format!("signature is not valid base64url-no-pad: {e}"),
+                },
+                WitnessFailureReason::InvalidSignatureFormat,
+            )
         })?;
 
     let sig_array: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
-        TrustError::BadWitness {
-            witness_kid: witness.witness_kid.clone(),
-            reason: format!(
-                "signature must be 64 bytes (512-bit Ed25519), got {}",
-                sig_bytes.len(),
-            ),
-        }
+        (
+            TrustError::BadWitness {
+                witness_kid: sanitized.clone(),
+                reason: format!(
+                    "signature must be 64 bytes (512-bit Ed25519), got {}",
+                    sig_bytes.len(),
+                ),
+            },
+            WitnessFailureReason::InvalidSignatureLength,
+        )
     })?;
 
-    let verifying_key = VerifyingKey::from_bytes(pubkey).map_err(|e| TrustError::BadWitness {
-        witness_kid: witness.witness_kid.clone(),
-        reason: format!("invalid pubkey in roster: {e}"),
+    // Pubkey-byte parsing failure here means the roster source itself
+    // carries a malformed pubkey — not a wire-side attack. Categorise
+    // as `Ed25519VerifyFailed` (closest available bucket: a verify
+    // path could not establish trust against the roster entry); a
+    // dedicated `InvalidPubkeyInRoster` variant could land in a
+    // future minor release without breaking the `non_exhaustive` SemVer
+    // contract if operator surfacing benefits from the distinction.
+    let verifying_key = VerifyingKey::from_bytes(pubkey).map_err(|e| {
+        (
+            TrustError::BadWitness {
+                witness_kid: sanitized.clone(),
+                reason: format!("invalid pubkey in roster: {e}"),
+            },
+            WitnessFailureReason::Ed25519VerifyFailed,
+        )
     })?;
 
     let signature = Signature::from_bytes(&sig_array);
 
     verifying_key
         .verify_strict(&signing_input, &signature)
-        .map_err(|e| TrustError::BadWitness {
-            witness_kid: witness.witness_kid.clone(),
-            reason: format!("ed25519 verification failed: {e}"),
+        .map_err(|e| {
+            (
+                TrustError::BadWitness {
+                    witness_kid: sanitized.clone(),
+                    reason: format!("ed25519 verification failed: {e}"),
+                },
+                WitnessFailureReason::Ed25519VerifyFailed,
+            )
         })
+}
+
+/// Stable, structured categorisation of why a witness verification
+/// failed. Wire-side projection of the closed set of failure paths
+/// surfaced by [`verify_witness_against_roster`] and the
+/// chain-walking aggregator inside the verifier.
+///
+/// **Why a separate enum from `TrustError`** — `TrustError` is the
+/// internal error type (carries human-readable strings, may grow new
+/// variants for unrelated trust domains across crate versions). The
+/// witness wire-surface needs a STABLE classification an auditor UI
+/// can switch on without parsing `TrustError::Display` (which is
+/// human-readable, not version-stable). The `From<&WitnessFailure>`
+/// impl on [`WitnessFailureWire`] performs the mapping at-source —
+/// every `WitnessFailure` constructor in this crate sets a
+/// `reason_code` directly so the wire surface never depends on
+/// string-matching against the underlying `reason` text.
+///
+/// **`#[non_exhaustive]`** — adding a new variant in a future minor
+/// release is NOT a SemVer break for downstream consumers (their
+/// `match` arms must already include a wildcard or a `_ =>` catch-all
+/// because of `non_exhaustive`). Auditors reading the wire MUST treat
+/// an unknown reason_code as "investigate manually" rather than
+/// silently bucketing it into one of the known variants.
+///
+/// **`Other` is the safety-valve** — used when the underlying
+/// `TrustError` variant is not one of the witness-domain failure
+/// modes the categorisation knows about (e.g. a future `TrustError`
+/// variant that surfaces in the witness rollup before its dedicated
+/// `WitnessFailureReason` lands). Production `From<&WitnessFailure>`
+/// callers should never see `Other` — every in-crate construction
+/// site picks a specific variant. If `Other` appears in the wire
+/// output, treat it as a verifier-side bug to file: an audit-relevant
+/// failure is being surfaced without proper categorisation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum WitnessFailureReason {
+    /// `witness_kid` did not match any entry in the pinned roster.
+    /// Most common attack signal: an issuer attached a sig under a
+    /// kid that was never commissioned.
+    KidNotInRoster,
+    /// Two or more witnesses in the same batch carry the same
+    /// `witness_kid`. Defends the M-of-N threshold from an issuer
+    /// repeating one validly-signed sig N times under one
+    /// commissioned key. Per the per-batch verifier, EVERY
+    /// occurrence (including the first) is rejected.
+    DuplicateKid,
+    /// Same `witness_kid` verified successfully in an earlier batch
+    /// of the chain. Defends M-of-N independence at the cross-batch
+    /// level (one key signing N batches must NOT count as N
+    /// attestors).
+    CrossBatchDuplicateKid,
+    /// Signature was not valid URL-safe base64 (no padding) — wire
+    /// format violation, likely a producer using the wrong dialect.
+    InvalidSignatureFormat,
+    /// Signature decoded but was not exactly 64 bytes (an Ed25519
+    /// signature is always 512 bits / 64 bytes per RFC 8032).
+    InvalidSignatureLength,
+    /// `witness_kid` exceeded `MAX_WITNESS_KID_LEN`. Cost-amplification
+    /// defence — fires before any roster work runs, so the wire-side
+    /// kid is sanitised to `<oversize: N bytes>` before it lands here.
+    OversizeKid,
+    /// Chain-head recompute failed for the batch this witness was
+    /// attached to. Surfaces from the verifier's rollup when
+    /// `chain_head_for(batch)` errored — the witness signature could
+    /// not be checked because there is no canonical head to check it
+    /// against. Distinguished from `Ed25519VerifyFailed` because the
+    /// witness sig itself may be perfectly valid; the failure is on
+    /// the chain-batch side.
+    ChainHeadDecodeFailed,
+    /// Ed25519 strict verification (RFC 8032) rejected the signature
+    /// against the roster pubkey. Possible causes: signed-over a
+    /// different chain head (replay/tamper), wrong pubkey for the
+    /// kid (commissioned-but-rotated key whose entry was not
+    /// updated), or a corrupted pubkey in the roster source itself.
+    Ed25519VerifyFailed,
+    /// Catch-all for `TrustError` variants that landed in
+    /// [`WitnessFailure::error`] without a dedicated reason_code.
+    /// **Should never appear in production wire output** — see the
+    /// enum-level docs.
+    Other,
+}
+
+/// Wire-stable structured projection of a `WitnessFailure` for
+/// programmatic auditor consumption.
+///
+/// **The audit surface contract** — this struct is the structured
+/// channel an auditor UI or downstream tool reads to filter, bucket,
+/// and react to witness verification failures. It deliberately
+/// EXCLUDES the underlying `TrustError`'s `Debug` output because
+/// `TrustError::Display`'s text is not version-stable (it is
+/// human-readable diagnostic, not a contract). The `reason_code`
+/// enum is the version-stable categorisation; the `message` field
+/// carries the same `Display` text the lenient evidence row already
+/// surfaces, but auditors MUST switch on `reason_code` rather than
+/// parsing `message`.
+///
+/// **Wire-format invariants** —
+///   * `reason_code` round-trips as kebab-case JSON
+///     (`"kid-not-in-roster"` etc.) — pinned by
+///     `witness_failure_reason_serde_kebab_case`.
+///   * Unknown JSON fields reject (`deny_unknown_fields`) so an
+///     attacker controlling a downstream JSON consumer cannot
+///     smuggle additional fields past a verifier that round-trips
+///     the structure.
+///
+/// **Why a separate type, not a public field on `WitnessFailure`** —
+/// `WitnessFailure` carries the in-crate `TrustError` (which
+/// intentionally does NOT implement `Serialize`: serialising a
+/// `TrustError` would imply a wire-stable shape we are not committing
+/// to). `WitnessFailureWire` is the explicit wire-stable subset; the
+/// rest of `WitnessFailure` stays an in-process structured value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WitnessFailureWire {
+    /// Kid as it appeared on the wire (or sanitised placeholder for
+    /// oversize kids). Untrusted input — auditor MUST NOT use as a
+    /// routing key beyond identifying the failed witness.
+    pub witness_kid: String,
+    /// Batch index this failure was produced under. `None` when the
+    /// failure surfaced from the per-batch verifier directly (no
+    /// batch context); `Some(idx)` when from the chain-aggregator
+    /// rollup. Same semantics as
+    /// [`WitnessFailure::batch_index`].
+    pub batch_index: Option<u64>,
+    /// Stable categorisation of the failure. Auditors MUST switch on
+    /// this rather than parsing `message`. See
+    /// [`WitnessFailureReason`].
+    pub reason_code: WitnessFailureReason,
+    /// Human-readable diagnostic — the `WitnessFailure::Display`
+    /// rendering. Stable enough for log-grepping but NOT a contract;
+    /// the `reason_code` enum is the version-stable bucketing.
+    pub message: String,
 }
 
 /// Structured per-witness failure record. Carries the kid as it
@@ -292,6 +510,13 @@ pub fn verify_witness_against_roster(
 /// always-`None` value as if it were a meaningful signal. Use the
 /// public [`WitnessFailure::batch_index`] getter, whose return-type
 /// `Option<u64>` makes the absence-vs-presence semantics explicit.
+///
+/// `reason_code` follows the same encapsulation pattern (V1.14 Scope
+/// J): it is the stable, wire-projectable categorisation set
+/// AT-SOURCE by every in-crate constructor, never derived later by
+/// string-matching against `TrustError::Display`. Public read access
+/// goes through [`WitnessFailure::reason_code`], whose stable enum
+/// return type is the audit surface.
 ///
 /// The `Display` impl renders the batch prefix when present so
 /// downstream evidence-row text stays human-readable:
@@ -315,6 +540,16 @@ pub struct WitnessFailure {
     /// (e.g. `chain_head_for` decode errors, currently wrapped as
     /// `BadWitness` for callsite consistency).
     pub error: TrustError,
+    /// V1.14 Scope J: stable, wire-projectable categorisation of the
+    /// failure. `pub(crate)` so only the in-crate construction sites
+    /// (this module's `verify_witness(es)_against_roster` and the
+    /// chain aggregator) can populate it — external consumers read via
+    /// the [`WitnessFailure::reason_code`] getter, whose stable
+    /// `WitnessFailureReason` return type is the audit surface
+    /// contract. Set AT-SOURCE rather than derived from
+    /// `TrustError::Display` to keep the categorisation independent of
+    /// any future change to the human-readable reason text.
+    pub(crate) reason_code: WitnessFailureReason,
 }
 
 impl WitnessFailure {
@@ -330,6 +565,44 @@ impl WitnessFailure {
     /// not informational.
     pub fn batch_index(&self) -> Option<u64> {
         self.batch_index
+    }
+
+    /// Stable, wire-projectable categorisation of the failure. See
+    /// [`WitnessFailureReason`] for the closed set of variants. The
+    /// returned value is the same one that
+    /// [`WitnessFailureWire::reason_code`] surfaces — auditors holding
+    /// a `WitnessFailure` directly can read it without going through
+    /// the wire projection.
+    pub fn reason_code(&self) -> WitnessFailureReason {
+        self.reason_code
+    }
+}
+
+impl From<&WitnessFailure> for WitnessFailureWire {
+    /// Project an in-crate `WitnessFailure` to its wire-stable form.
+    ///
+    /// **No information loss for audit-relevant fields**: the
+    /// `witness_kid` (sanitized at source for oversize kids), the
+    /// `batch_index` (populated by the chain aggregator, `None` from
+    /// the per-batch verifier), and the `reason_code` (set
+    /// AT-SOURCE by every in-crate constructor) all flow through
+    /// unchanged. The `message` field captures the
+    /// `WitnessFailure::Display` rendering — same text the lenient
+    /// evidence row already surfaces, included for log-grep
+    /// continuity but explicitly NOT a wire contract.
+    ///
+    /// **The underlying `TrustError` is intentionally dropped from
+    /// the wire form** — its `Display` text is human-readable
+    /// diagnostic, not version-stable. Auditors MUST switch on
+    /// `reason_code`. Library-level callers that need the structured
+    /// `TrustError` keep using `WitnessFailure` directly.
+    fn from(f: &WitnessFailure) -> Self {
+        WitnessFailureWire {
+            witness_kid: f.witness_kid.clone(),
+            batch_index: f.batch_index,
+            reason_code: f.reason_code,
+            message: f.to_string(),
+        }
     }
 }
 
@@ -429,26 +702,45 @@ pub fn verify_witnesses_against_roster(
         let count = *kid_counts
             .get(w.witness_kid.as_str())
             .expect("kid was inserted in pre-pass — invariant of the loop above");
+        // Sanitize the wire-side kid before it lands in any
+        // `WitnessFailure.witness_kid` field (V1.14 Scope J latent-bug
+        // fix uncovered by `reason_code_oversize_kid`): the
+        // per-batch failure surface must be byte-equivalent with the
+        // chain-aggregator's `ChainHeadDecodeFailed` branch and the
+        // `verify_witness_against_roster_categorized` `OversizeKid`
+        // branch, both of which already clamp via
+        // `sanitize_kid_for_diagnostic`. Without this, an oversized
+        // kid that hits the duplicate-pre-pass or the categorised
+        // inner's TrustError::BadWitness path would echo unsanitised
+        // into `WitnessFailure.witness_kid` and — via Display and
+        // wire projection — amplify across the lenient evidence row
+        // and the auditor wire surface.
+        let sanitized_kid = sanitize_kid_for_diagnostic(&w.witness_kid);
         if count > 1 {
             failures.push(WitnessFailure {
                 batch_index: None,
-                witness_kid: w.witness_kid.clone(),
+                witness_kid: sanitized_kid.clone(),
                 error: TrustError::BadWitness {
-                    witness_kid: w.witness_kid.clone(),
+                    witness_kid: sanitized_kid,
                     reason: format!(
                         "duplicate witness_kid (appears {} times in batch — at most one signature per kid is allowed)",
                         count,
                     ),
                 },
+                reason_code: WitnessFailureReason::DuplicateKid,
             });
             continue;
         }
-        match verify_witness_against_roster(w, chain_head_hex, roster) {
+        // Use the categorised inner so the V1.14 Scope J `reason_code`
+        // is set AT-SOURCE — never derived later by string-matching
+        // against the underlying `reason` text.
+        match verify_witness_against_roster_categorized(w, chain_head_hex, roster) {
             Ok(()) => verified += 1,
-            Err(e) => failures.push(WitnessFailure {
+            Err((err, reason_code)) => failures.push(WitnessFailure {
                 batch_index: None,
-                witness_kid: w.witness_kid.clone(),
-                error: e,
+                witness_kid: sanitized_kid.clone(),
+                error: err,
+                reason_code,
             }),
         }
     }
@@ -991,6 +1283,7 @@ mod tests {
                 witness_kid: "kid-x".to_string(),
                 reason: "boom".to_string(),
             },
+            reason_code: WitnessFailureReason::Other,
         };
         assert_eq!(f_no_batch.to_string(), "witness kid-x: boom");
 
@@ -1001,6 +1294,7 @@ mod tests {
                 witness_kid: "kid-y".to_string(),
                 reason: "kaboom".to_string(),
             },
+            reason_code: WitnessFailureReason::Other,
         };
         assert_eq!(f_batch.to_string(), "batch[7] witness kid-y: kaboom");
     }
@@ -1015,6 +1309,7 @@ mod tests {
             batch_index: Some(2),
             witness_kid: "kid-z".to_string(),
             error: TrustError::Encoding("hex blew up".to_string()),
+            reason_code: WitnessFailureReason::Other,
         };
         let s = f.to_string();
         assert!(
@@ -1106,5 +1401,268 @@ mod tests {
         assert_eq!(sanitize_kid_for_diagnostic(&at_cap), at_cap);
         assert_ne!(sanitize_kid_for_diagnostic(&just_over), just_over);
         assert!(sanitize_kid_for_diagnostic(&just_over).starts_with("<oversize:"));
+    }
+
+    // ---------------------------------------------------------------
+    // V1.14 Scope J — auditor wire-surface pin tests
+    //
+    // The `WitnessFailureReason` enum is the audit-stable contract
+    // downstream tooling switches on. A test per variant pins that
+    // the in-crate construction sites set the right reason_code AT
+    // SOURCE — these tests are the regression guard against any
+    // future refactor that string-matches `reason` text instead of
+    // setting the categorisation explicitly.
+    // ---------------------------------------------------------------
+
+    /// Helper: build a roster of one entry plus a chain head + a
+    /// signing key for tests that need a verifiable witness.
+    fn one_entry_roster_setup() -> (SigningKey, [u8; 32], String) {
+        let (sk, pk) = fixed_keypair(42);
+        (sk, pk, fixed_chain_head())
+    }
+
+    /// `KidNotInRoster` — wire-side kid does not match any pinned
+    /// roster entry. The most common attacker signal (sig under a
+    /// kid that was never commissioned).
+    #[test]
+    fn reason_code_kid_not_in_roster() {
+        let (sk, pk, head) = one_entry_roster_setup();
+        let witness = sign_witness(&sk, "unknown-kid", &head);
+        let roster: &[(&str, [u8; 32])] = &[("test-witness-1", pk)];
+
+        let outcome = verify_witnesses_against_roster(&[witness], &head, roster);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(
+            outcome.failures[0].reason_code(),
+            WitnessFailureReason::KidNotInRoster,
+        );
+    }
+
+    /// `DuplicateKid` — same `witness_kid` appears 2+ times in a
+    /// single batch. Per-batch verifier rejects every occurrence
+    /// (including the first) so the M-of-N threshold cannot be
+    /// satisfied by repeating one valid sig under one commissioned
+    /// key.
+    #[test]
+    fn reason_code_duplicate_kid() {
+        let (sk, pk, head) = one_entry_roster_setup();
+        let roster: &[(&str, [u8; 32])] = &[("dup-kid", pk)];
+
+        let sig = sign_witness(&sk, "dup-kid", &head);
+        let witnesses = vec![sig.clone(), sig];
+
+        let outcome = verify_witnesses_against_roster(&witnesses, &head, roster);
+        assert_eq!(outcome.failures.len(), 2);
+        for f in &outcome.failures {
+            assert_eq!(f.reason_code(), WitnessFailureReason::DuplicateKid);
+        }
+    }
+
+    /// `InvalidSignatureFormat` — signature is not URL-safe base64
+    /// (no padding). Defends against producers using the wrong
+    /// dialect.
+    #[test]
+    fn reason_code_invalid_signature_format() {
+        let (_, pk) = fixed_keypair(42);
+        let head = fixed_chain_head();
+        let witness = WitnessSig {
+            witness_kid: "test-witness-1".to_string(),
+            signature: "not!valid!base64@@".to_string(),
+        };
+        let roster: &[(&str, [u8; 32])] = &[("test-witness-1", pk)];
+
+        let outcome = verify_witnesses_against_roster(&[witness], &head, roster);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(
+            outcome.failures[0].reason_code(),
+            WitnessFailureReason::InvalidSignatureFormat,
+        );
+    }
+
+    /// `InvalidSignatureLength` — base64 decoded but did not yield
+    /// exactly 64 bytes (Ed25519 sig is always 512 bits).
+    #[test]
+    fn reason_code_invalid_signature_length() {
+        let (_, pk) = fixed_keypair(42);
+        let head = fixed_chain_head();
+        // 63 bytes = 84 b64url-no-pad chars — decodes successfully but
+        // is one byte short of an Ed25519 signature.
+        let short_sig = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 63]);
+        let witness = WitnessSig {
+            witness_kid: "test-witness-1".to_string(),
+            signature: short_sig,
+        };
+        let roster: &[(&str, [u8; 32])] = &[("test-witness-1", pk)];
+
+        let outcome = verify_witnesses_against_roster(&[witness], &head, roster);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(
+            outcome.failures[0].reason_code(),
+            WitnessFailureReason::InvalidSignatureLength,
+        );
+    }
+
+    /// `OversizeKid` — wire-side `witness_kid` exceeds
+    /// `MAX_WITNESS_KID_LEN`. Cost-amplification defence; fires
+    /// BEFORE roster lookup.
+    #[test]
+    fn reason_code_oversize_kid() {
+        let oversize = "x".repeat(MAX_WITNESS_KID_LEN + 1);
+        let head = fixed_chain_head();
+        let witness = WitnessSig {
+            witness_kid: oversize,
+            signature: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0u8; 64]),
+        };
+        let roster: &[(&str, [u8; 32])] = &[];
+
+        let outcome = verify_witnesses_against_roster(&[witness], &head, roster);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(
+            outcome.failures[0].reason_code(),
+            WitnessFailureReason::OversizeKid,
+        );
+        // Sanity: the kid surface in the failure record is the
+        // sanitised placeholder, not the multi-MB blob.
+        assert!(
+            outcome.failures[0].witness_kid.starts_with("<oversize:"),
+            "oversize kid must surface as sanitised placeholder: {}",
+            outcome.failures[0].witness_kid,
+        );
+    }
+
+    /// `Ed25519VerifyFailed` — signature did not verify against the
+    /// roster pubkey. Triggered here by a tampered chain head: sig
+    /// was made over the original head, verifier sees a different
+    /// one.
+    #[test]
+    fn reason_code_ed25519_verify_failed() {
+        let (sk, pk) = fixed_keypair(42);
+        let original_head = fixed_chain_head();
+        let witness = sign_witness(&sk, "test-witness-1", &original_head);
+        let roster: &[(&str, [u8; 32])] = &[("test-witness-1", pk)];
+        let tampered_head = "0123".repeat(16);
+
+        let outcome = verify_witnesses_against_roster(&[witness], &tampered_head, roster);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(
+            outcome.failures[0].reason_code(),
+            WitnessFailureReason::Ed25519VerifyFailed,
+        );
+    }
+
+    /// `From<&WitnessFailure> for WitnessFailureWire` projects all
+    /// audit-relevant fields without information loss for the wire
+    /// contract: kid passes through unchanged, batch_index propagates,
+    /// reason_code is the at-source categorisation, message captures
+    /// the Display rendering.
+    #[test]
+    fn witness_failure_wire_projection_preserves_fields() {
+        let f = WitnessFailure {
+            batch_index: Some(3),
+            witness_kid: "kid-a".to_string(),
+            error: TrustError::BadWitness {
+                witness_kid: "kid-a".to_string(),
+                reason: "ed25519 verification failed: signature error".to_string(),
+            },
+            reason_code: WitnessFailureReason::Ed25519VerifyFailed,
+        };
+        let wire = WitnessFailureWire::from(&f);
+        assert_eq!(wire.witness_kid, "kid-a");
+        assert_eq!(wire.batch_index, Some(3));
+        assert_eq!(wire.reason_code, WitnessFailureReason::Ed25519VerifyFailed);
+        assert_eq!(
+            wire.message,
+            "batch[3] witness kid-a: ed25519 verification failed: signature error",
+        );
+    }
+
+    /// `WitnessFailureReason` round-trips as kebab-case JSON. Pinned
+    /// because downstream auditor tools depend on the wire spelling
+    /// — a future renaming of the enum identifier in Rust must NOT
+    /// silently change the JSON key.
+    #[test]
+    fn witness_failure_reason_serde_kebab_case() {
+        for (variant, expected) in [
+            (WitnessFailureReason::KidNotInRoster, "\"kid-not-in-roster\""),
+            (WitnessFailureReason::DuplicateKid, "\"duplicate-kid\""),
+            (
+                WitnessFailureReason::CrossBatchDuplicateKid,
+                "\"cross-batch-duplicate-kid\"",
+            ),
+            (
+                WitnessFailureReason::InvalidSignatureFormat,
+                "\"invalid-signature-format\"",
+            ),
+            (
+                WitnessFailureReason::InvalidSignatureLength,
+                "\"invalid-signature-length\"",
+            ),
+            (WitnessFailureReason::OversizeKid, "\"oversize-kid\""),
+            (
+                WitnessFailureReason::ChainHeadDecodeFailed,
+                "\"chain-head-decode-failed\"",
+            ),
+            (
+                WitnessFailureReason::Ed25519VerifyFailed,
+                "\"ed25519-verify-failed\"",
+            ),
+            (WitnessFailureReason::Other, "\"other\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected, "variant {variant:?} serialised wrong");
+            let back: WitnessFailureReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant, "variant {variant:?} did not round-trip");
+        }
+    }
+
+    /// `WitnessFailureWire` rejects unknown JSON fields — defends
+    /// against a producer (or man-in-the-middle on a JSON pipeline)
+    /// smuggling extra fields past a verifier that round-trips the
+    /// wire form.
+    #[test]
+    fn witness_failure_wire_rejects_unknown_fields() {
+        let json = r#"{
+            "witness_kid":"k",
+            "batch_index":null,
+            "reason_code":"other",
+            "message":"m",
+            "extra":"x"
+        }"#;
+        let result: Result<WitnessFailureWire, _> = serde_json::from_str(json);
+        assert!(result.is_err(), "unknown fields must reject");
+    }
+
+    /// `WitnessFailureWire` round-trips JSON without information
+    /// loss for all four fields — the wire contract is reversible.
+    #[test]
+    fn witness_failure_wire_serde_roundtrip() {
+        let original = WitnessFailureWire {
+            witness_kid: "round-trip-kid".to_string(),
+            batch_index: Some(42),
+            reason_code: WitnessFailureReason::CrossBatchDuplicateKid,
+            message: "batch[42] witness round-trip-kid: cross-batch dup".to_string(),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: WitnessFailureWire = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    /// `From<&WitnessFailure>` preserves `batch_index = None` for
+    /// per-batch-verifier-side failures (no chain context). Pins the
+    /// absence-vs-presence semantic across the projection.
+    #[test]
+    fn witness_failure_wire_projection_handles_none_batch_index() {
+        let f = WitnessFailure {
+            batch_index: None,
+            witness_kid: "no-batch-kid".to_string(),
+            error: TrustError::BadWitness {
+                witness_kid: "no-batch-kid".to_string(),
+                reason: "boom".to_string(),
+            },
+            reason_code: WitnessFailureReason::KidNotInRoster,
+        };
+        let wire = WitnessFailureWire::from(&f);
+        assert_eq!(wire.batch_index, None);
+        assert_eq!(wire.reason_code, WitnessFailureReason::KidNotInRoster);
     }
 }
