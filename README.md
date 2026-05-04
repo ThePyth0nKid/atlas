@@ -16,7 +16,7 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**V1.15 Welle A shipped — const-time KID-equality invariant: every wire-side KID compare in production code now routes through `crate::ct::ct_eq_str`, source-level anti-drift pin in `tests/const_time_kid_invariant.rs`. V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm (`@atlas-trust/verify-wasm`) + browser playground.**
+**V1.15 Welle A + Welle B shipped — Welle A: const-time KID-equality invariant (every wire-side KID compare in production code routes through `crate::ct::ct_eq_str`, source-level anti-drift pin in `tests/const_time_kid_invariant.rs`); Welle B: dual-channel WASM distribution (`@atlas-trust/verify-wasm` tarballs uploaded to GitHub Releases on every `v*` tag alongside the existing npm publish, with SHA256 manifest for offline verification — see [OPERATOR-RUNBOOK §12](docs/OPERATOR-RUNBOOK.md)). V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm + browser playground.**
 
 Trust-core crate + Rekor anchoring + per-tenant key derivation + HSM-backed signing + independent
 witness attestor (V1.5 mock-issuer, V1.6 live Sigstore Rekor v1, V1.7 anchor-chain + shard
@@ -114,8 +114,14 @@ strict-mode check now routes through `crate::ct::ct_eq_str`, joining the V1.13
 wave-C-2 witness-roster compare. A new source-level anti-drift test
 (`tests/const_time_kid_invariant.rs`) audits both `verify.rs` and `witness.rs`
 for forbidden raw-`==` patterns on KID fields and fails the build at the next
-CI run if a future caller re-introduces one. Graph-database integration and
-policy-engine follow in V2.
+CI run if a future caller re-introduces one. V1.15 Welle B adds a backup
+distribution channel for the WASM verifier: every `v*` tag push uploads the
+byte-identical `npm pack` tarballs (web + node) plus a `tarball-sha256.txt`
+manifest as GitHub Release assets alongside the existing npm publish, so an
+auditor whose primary channel is unreachable can `gh release download`,
+`sha256sum --check`, and `npm install ./local.tgz` against the same SLSA L3
+provenance attestation. Graph-database integration and policy-engine follow
+in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
   trust property, write/export flows, V1 → V1.15 → V2 boundaries.
@@ -124,6 +130,7 @@ policy-engine follow in V2.
 - [docs/OPERATOR-RUNBOOK.md](docs/OPERATOR-RUNBOOK.md) — production
   operator procedures: master-seed import, HSM wave-3 setup, witness
   commissioning (verifier-side §10 + HSM-backed witness §11),
+  WASM verifier backup-channel install (V1.15 Welle B §12),
   CI lane reference.
 - [docs/COMPLIANCE-MAPPING.md](docs/COMPLIANCE-MAPPING.md) —
   clause-by-clause regulatory mapping (EU AI Act, GAMP 5, ICH E6(R3),

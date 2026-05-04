@@ -50,7 +50,31 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  # `contents: write` is needed by the `Upload tarballs to GitHub Release`
+  # step (V1.15 Welle B backup distribution channel) to attach release
+  # assets via the gh CLI on tag pushes. Without this, the GH-Release
+  # path falls back silently and the only distribution channel remains
+  # npmjs.org — defeating the resilience goal.
+  #
+  # `id-token: write` is needed by `npm publish --provenance` to mint an
+  # OIDC token for SLSA L3 attestations. GitHub Actions evaluates
+  # `permissions:` only at workflow or job scope; a `permissions:` key
+  # nested under a step is not a recognised YAML field and is silently
+  # dropped (the V1.14 Scope E original step-level placement was a
+  # latent bug, not a working narrow-scoping mechanism — narrowing IS
+  # supported at job level by overriding workflow defaults). The OIDC
+  # grant must therefore be at workflow or job level. Granting at
+  # workflow level here is the smallest change that makes provenance
+  # attestations actually fire on tag pushes; a future Welle could
+  # split into a build-and-publish job (id-token: write, contents: read)
+  # plus a release-upload job (contents: write, id-token: none) to
+  # eliminate the OIDC + write-content co-location.
+  #
+  # The expanded scope only takes effect within this single-job workflow,
+  # which fires only on `workflow_dispatch` or `push: tags: ['v*']` —
+  # both gated by branch / tag protection rules in repo settings.
+  contents: write
+  id-token: write
 
 jobs:
   build-and-publish:
@@ -300,12 +324,6 @@ jobs:
           ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
               (github.event_name == 'workflow_dispatch' && inputs.dry_run == false &&
                github.ref == 'refs/heads/master') }}
-        permissions:
-          contents: read
-          # OIDC token for `npm publish --provenance`. Scoped to the
-          # publish step only — the rest of the job runs under the
-          # workflow-level `contents: read` default.
-          id-token: write
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -320,8 +338,130 @@ jobs:
           # via `npm audit signatures` or by inspecting the package
           # provenance on the npm registry. This is the single most
           # important supply-chain signal for `@atlas-trust/verify-wasm`.
+          # The `id-token: write` permission required for the OIDC
+          # token mint is granted at workflow level — see the
+          # `permissions:` block at the top of this file.
           cd crates/atlas-verify-wasm/pkg-web
           npm publish --access public --provenance
           cd "${GITHUB_WORKSPACE}"
           cd crates/atlas-verify-wasm/pkg-node
           npm publish --access public --provenance --tag node
+
+      # V1.15 Welle B — Backup distribution channel via GitHub Releases.
+      #
+      # In addition to publishing to npmjs.org, on tag push we attach
+      # the byte-identical `npm pack` output to the GitHub Release for
+      # the same tag. Auditor recovery path: if npmjs.org is unreachable
+      # (outage, account compromise, registry-side tamper), download
+      # the tarball from GitHub Releases and `npm install ./local.tgz`.
+      # Same SLSA L3 provenance applies — the npm-side attestation is
+      # signed against the tarball SHA256 + commit SHA, both of which
+      # the auditor can re-derive from the GH-Release tarball plus the
+      # `tarball-sha256.txt` manifest also uploaded here.
+      #
+      # Why GitHub Releases (not GitHub Packages):
+      #
+      #   * GitHub Packages requires the npm scope to match the GitHub
+      #     repo owner. The `@atlas-trust` scope and current owner
+      #     (`ThePyth0nKid`) don't match, so a Packages-side mirror
+      #     would force a `@thepyth0nkid/verify-wasm` rename and a
+      #     consumer-side `.npmrc` change — friction in a recovery
+      #     moment. GH Releases serves identical bytes with no
+      #     rename or auth requirement.
+      #   * GH Releases assets are publicly readable for public repos;
+      #     no token, no scope rename, no `.npmrc` mutation. The
+      #     consumer flow is `curl + npm install ./tarball.tgz`,
+      #     which an auditor can perform offline / behind a corporate
+      #     proxy / from any machine.
+      #
+      # Rename rationale: `npm pack` writes
+      # `<scope>-<name>-<version>.tgz` based on `package.json`. Both
+      # pkg-web and pkg-node share the same name
+      # (`@atlas-trust/verify-wasm`), so the default filenames collide.
+      # Disambiguate with `-web` / `-node` suffix before uploading to
+      # the single GH Release. The npm-published tarballs themselves
+      # are unaffected — npm publishes by package.json metadata, not
+      # filename.
+      - name: Upload tarballs to GitHub Release (V1.15 Welle B backup channel)
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+
+          # Resolve the single tarball expected in each pkg-* dir.
+          # Pipe-then-head silently masks `ls` failure (head exits 0)
+          # and silently picks the first match if multiple tarballs
+          # exist (e.g. workspace pollution from a prior workflow run).
+          # Both modes would silently upload the wrong file, so use
+          # an array + count assertion instead.
+          shopt -s nullglob
+          WEB_MATCHES=(crates/atlas-verify-wasm/pkg-web/*.tgz)
+          NODE_MATCHES=(crates/atlas-verify-wasm/pkg-node/*.tgz)
+          if [ "${#WEB_MATCHES[@]}" -ne 1 ]; then
+            echo "ERROR: expected exactly 1 *.tgz in crates/atlas-verify-wasm/pkg-web/, found ${#WEB_MATCHES[@]}: ${WEB_MATCHES[*]:-<none>}" >&2
+            exit 1
+          fi
+          if [ "${#NODE_MATCHES[@]}" -ne 1 ]; then
+            echo "ERROR: expected exactly 1 *.tgz in crates/atlas-verify-wasm/pkg-node/, found ${#NODE_MATCHES[@]}: ${NODE_MATCHES[*]:-<none>}" >&2
+            exit 1
+          fi
+          WEB_TGZ_SRC="${WEB_MATCHES[0]}"
+          NODE_TGZ_SRC="${NODE_MATCHES[0]}"
+          shopt -u nullglob
+
+          WEB_BASENAME=$(basename "${WEB_TGZ_SRC}" .tgz)
+          NODE_BASENAME=$(basename "${NODE_TGZ_SRC}" .tgz)
+          WEB_TGZ="${WEB_BASENAME}-web.tgz"
+          NODE_TGZ="${NODE_BASENAME}-node.tgz"
+          cp "${WEB_TGZ_SRC}" "${WEB_TGZ}"
+          cp "${NODE_TGZ_SRC}" "${NODE_TGZ}"
+
+          # SHA256 manifest — auditor cross-references for in-flight
+          # tamper detection on the GH-Release download path. Format
+          # is `<sha256>  <filename>` per line, parseable by
+          # `sha256sum --check`. Note: this manifest is *not* the
+          # origin-integrity root — that is the npm-side OIDC-signed
+          # SLSA L3 provenance, which the operator cross-verifies via
+          # `npm view … dist.integrity` (SHA512 base64) per
+          # OPERATOR-RUNBOOK §12 step 3.
+          sha256sum "${WEB_TGZ}" "${NODE_TGZ}" > tarball-sha256.txt
+          cat tarball-sha256.txt
+
+          # Two paths: the release for this tag may already exist
+          # (e.g. created via the GitHub UI as part of release notes
+          # drafting) or may not (e.g. `git push origin v1.15.0`
+          # without UI follow-up). `gh release upload --clobber`
+          # requires the release to exist; `gh release create` creates
+          # it. Try-then-fallback keeps both flows green.
+          #
+          # `--clobber` on the upload path lets the workflow re-run on
+          # the same tag if a prior attempt failed before reaching this
+          # step (e.g. an npm-side flake during the publish).
+          #
+          # Release notes use an absolute URL for the OPERATOR-RUNBOOK
+          # link — relative paths in release-notes Markdown do NOT
+          # resolve against the repo tree (unlike README/wiki Markdown),
+          # so a relative `(docs/…)` link would render as a dead link
+          # in the rendered release page.
+          NOTES_URL="https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/docs/OPERATOR-RUNBOOK.md"
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+            echo "Release ${TAG} exists — uploading assets to it."
+            gh release upload "${TAG}" \
+              "${WEB_TGZ}" "${NODE_TGZ}" tarball-sha256.txt \
+              --clobber \
+              --repo "${GITHUB_REPOSITORY}"
+          else
+            echo "Release ${TAG} does not exist — creating with assets."
+            gh release create "${TAG}" \
+              "${WEB_TGZ}" "${NODE_TGZ}" tarball-sha256.txt \
+              --title "${TAG}" \
+              --notes "Auto-generated release for ${TAG}. WASM verifier tarballs (web + node) plus a SHA256 manifest. See [OPERATOR-RUNBOOK §12](${NOTES_URL}) for the backup-channel installation flow." \
+              --repo "${GITHUB_REPOSITORY}"
+          fi
+
+          echo "Attached to GitHub Release ${TAG}:"
+          echo "  - ${WEB_TGZ}"
+          echo "  - ${NODE_TGZ}"
+          echo "  - tarball-sha256.txt"

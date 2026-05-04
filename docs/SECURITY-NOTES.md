@@ -1284,10 +1284,15 @@ consume the byte-identical Rust verifier core in a single step.
   == 'refs/heads/master'` (manual approval from the default branch
   only — feature-branch dispatches cannot publish); (b) the
   `NPM_TOKEN` secret is present (fork PRs and unauthorised manual
-  runs SKIP cleanly with `exit 0`); (c) the publish step has
-  `id-token: write` permission scoped to itself (the rest of the
-  job runs under the workflow-level `permissions: contents: read`
-  default), enabling OIDC-signed `--provenance`.
+  runs SKIP cleanly with `exit 0`); (c) the OIDC token mint required
+  for `npm publish --provenance` is permitted via
+  `permissions: id-token: write` *(latent placement bug — see
+  scope-b)*. The scope-e workflow originally placed `id-token: write`
+  at *step* level, which GitHub Actions silently drops; provenance
+  attestation would have failed at runtime on the first `v*` tag
+  push. V1.15 Welle B (see scope-b below) moves the grant to
+  workflow level, removes the dead step-level block, and documents
+  the rationale in the workflow YAML.
 - **OIDC-signed `--provenance` on `npm publish`.** Both the web and
   the node tarballs are published with `npm publish --provenance`
   (npm ≥ 9.5), which attaches a Sigstore-rekor attestation linking
@@ -1533,6 +1538,177 @@ V1.x.
   internally performs constant-time scalar arithmetic per the
   `ed25519-dalek` crate's contract; this is not the V1.15 audit's
   scope.
+
+---
+
+## scope-b — Backup distribution channel via GitHub Releases (V1.15 Welle B — shipped)
+
+V1.14 Scope E shipped `@atlas-trust/verify-wasm` to npmjs.org as the
+sole distribution channel, with SLSA L3 OIDC `--provenance` signed at
+publish time. Single-channel distribution leaves `npm install
+@atlas-trust/verify-wasm` on the auditor's critical path: an npm-side
+outage, account compromise, or registry-side tampering claim blocks
+fresh installs until the registry recovers, even though the bytes
+themselves are reproducible from the tagged commit. V1.15 Welle B
+adds a second, independent distribution channel — GitHub Releases —
+that serves the **byte-identical** `npm pack` tarballs alongside a
+SHA256 manifest, so an auditor can verify and install offline of
+npmjs.org when the primary channel is unreachable.
+
+### What landed in V1.15 Welle B
+
+- **Tag-triggered upload to GitHub Releases.** `.github/workflows/wasm-publish.yml`
+  runs the existing `npm pack` step, then on every `refs/tags/v*`
+  push uploads the resulting tarballs (`pkg-web` + `pkg-node`) plus
+  a `tarball-sha256.txt` manifest as release assets. The publish to
+  npmjs.org is unchanged — Welle B is purely additive. If the npm
+  publish flakes, the GH-Release upload still fires (and vice
+  versa); both channels can fail independently.
+- **Filename-collision disambiguation.** `npm pack` derives the
+  tarball filename from `package.json` (`<scope>-<name>-<version>.tgz`),
+  and pkg-web + pkg-node share the same package name. The workflow
+  copies each tarball to a `-web.tgz` / `-node.tgz` suffixed name
+  before `gh release upload`. The npm-published tarballs are
+  unaffected — npm publishes by package metadata, not by filename.
+- **`tarball-sha256.txt` manifest.** A `sha256sum`-format manifest
+  is uploaded alongside the tarballs so an auditor can run
+  `sha256sum --check tarball-sha256.txt` to detect in-flight
+  tampering on the download path. The manifest is generated inside
+  the same workflow run that produced the tarballs, so a compromise
+  of the GitHub-side asset upload would have to forge both the
+  tarball and the manifest entries consistently.
+- **`gh release upload` with `--clobber` + create-fallback.** The
+  workflow tries `gh release view "${TAG}"` first; if a release
+  already exists for the tag (e.g. created via the GitHub UI for
+  release-notes drafting) it uploads with `--clobber` so a re-run
+  on the same tag overwrites a partial upload. If no release
+  exists, `gh release create` creates one with the assets attached.
+  Both paths converge on the same end state.
+- **Workflow-level OIDC + contents permissions.** The original V1.14
+  Scope E workflow had `id-token: write` placed at *step* level.
+  GitHub Actions silently ignores step-level `permissions:`; the
+  OIDC grant must be at workflow or job level for `npm publish
+  --provenance` to mint a token. This was a latent bug that would
+  have failed at runtime on the first `v*` tag push (Scope E shipped
+  before any tag was cut). V1.15 Welle B fixes it as part of the
+  same workflow edit: `contents: write` (for `gh release upload`) and
+  `id-token: write` (for `--provenance`) are now declared at workflow
+  level, and the dead step-level block is removed.
+- **Operator runbook — `OPERATOR-RUNBOOK.md` §12.** Documents the
+  fall-back conditions, the `gh release download` flow, the
+  `sha256sum --check` step, the optional cross-verification against
+  `npm view … dist.integrity` (SHA512 base64) for an apples-to-apples
+  byte check, and the `npm install ./local.tgz` install flow.
+  Imports are unchanged — the in-tarball `package.json` name is
+  `@atlas-trust/verify-wasm` regardless of source.
+
+### Trust property after V1.15 Welle B
+
+**No new trust property.** Welle B is a *distribution-resilience*
+change, not a verifier-logic change. The byte-identical determinism
+property locked in by the V1.5 signing-input + bundle-hash pins
+(`signing_input_byte_determinism_pin`,
+`bundle_hash_byte_determinism_pin`) and the SLSA L3 provenance
+attestation from V1.14 Scope E both extend to the GH-Release tarball
+unchanged: it is the same `npm pack` byte sequence emitted by the
+same workflow run. An auditor who downloads the GH-Release tarball,
+recomputes its SHA256, and checks the `tarball-sha256.txt` manifest
+gets the same byte-level integrity guarantee as `npm audit signatures`
+against the npmjs.org registry; the npm-side OIDC attestation is
+verifiable against either channel's bytes (same SHA, same commit SHA).
+
+### Residual risks after V1.15 Welle B
+
+- **Both channels run on GitHub-hosted infrastructure.** npmjs.org
+  is independent of GitHub, but the GH-Release backup is on the same
+  provider as the source repo and the publish workflow itself. So
+  Welle B hedges against npmjs-side failure (registry outage,
+  account compromise, namespace tamper) but NOT against a GitHub-
+  side failure (Actions outage, repo-takeover, `gh release` API
+  outage). A both-failed scenario falls through to verifier-side
+  reproducibility from source: `git clone` at the tagged commit,
+  `wasm-pack build crates/atlas-verify-wasm --target web --release`,
+  byte-identical to the published artefact (pinned by
+  `WASM_PACK_VERSION` env in `wasm-publish.yml`).
+- **No registry-API equivalence on the backup channel.** The GH-
+  Release path serves raw tarballs only; it does not answer
+  `npm view`, `npm search`, or registry metadata queries. Consumers
+  using metadata-driven install logic (Renovate, Dependabot, lock-
+  file resolvers that walk dist-tags) need the npmjs.org primary
+  channel up. Welle B is a recovery channel for `npm install`, not
+  a complete registry mirror.
+- **Operator-driven, not transparent failover.** There is no DNS-
+  level rewrite or proxy at `npm.atlas-trust.io` that auto-redirects
+  `npm install` to the GH-Release on npmjs.org failure. Such a proxy
+  would itself be a single point of failure with its own compromise
+  surface, and ownership would belong to the same team that runs
+  the primary publish. Welle B is the operator-driven path: detect
+  the outage, run the recovery flow in §12, install from the local
+  tarball. V2 territory if the auditor base ever justifies the
+  ongoing operational burden of a transparent mirror.
+- **Tag-protection rules apply equally to Welle B.** The
+  `gh release create` / `gh release upload` step fires on
+  `refs/tags/v*` push, same gating as the npm publish. A bad-actor
+  push of a `v*` tag onto a smuggled-content commit would create a
+  malicious GH-Release as well as a malicious npm publish. The
+  scope-e operator-runbook tag-protection rules (Settings → Tags →
+  restrict `v*` creation to release-managers, no force-push, no
+  delete) defend both channels. The GH-Release upload uses
+  `${{ github.token }}` (auto-minted, scoped to the repo,
+  short-lived) rather than a long-lived PAT, so credential
+  rotation for the backup channel is structurally different from
+  `NPM_TOKEN` rotation: the token is per-run.
+- **Both channels could be tampered simultaneously.** A successful
+  attack on the GitHub Actions runner during a release publish
+  could in principle inject identical malicious bytes to both
+  channels — same workflow run, same tarball bytes uploaded to
+  both. The SLSA provenance attestation links the published bytes
+  to the commit SHA + workflow run, so the ultimate guarantee an
+  auditor has against this class of attack is verifier-side
+  reproducibility from source: a third party rebuilds from the
+  tagged commit on independent infrastructure and byte-compares.
+- **GH-Release-only tamper without `NPM_TOKEN` access.** An attacker
+  with `contents: write` on the repo (e.g. compromised maintainer
+  PAT, repo-takeover, but NOT runner compromise) but without the
+  `NPM_TOKEN` secret can push a `v*` tag, which fires the workflow
+  and uploads tarballs to GitHub Releases. The npm publish step
+  exits early when `NPM_TOKEN` is absent (workflow line 325–328:
+  `if [ -z "${NODE_AUTH_TOKEN:-}" ]; then echo "…skipping" ; exit 0`),
+  so npm never receives a corresponding publish. An auditor who
+  downloads from GH Releases and only runs the SHA256 manifest
+  check (transport integrity) would see internally consistent
+  bytes — the manifest matches the tarball — and proceed to
+  install attacker-controlled code. The defence is the
+  `OPERATOR-RUNBOOK.md` §12 step-3 cross-verify against
+  `npm view @atlas-trust/verify-wasm@<version> dist.integrity`,
+  which detects the mismatch (npm has no record of that version,
+  or a different SHA512). Step 3 is therefore documented as
+  **mandatory**, not optional, with `--ignore-scripts` on the
+  install path as defence-in-depth against a tarball that bypasses
+  the cross-check (e.g. an auditor who skips step 3 because npm is
+  also down — fall through to verifier-side rebuild from source).
+
+### What V1.15 Welle B does NOT cover
+
+- **A complete registry mirror.** Welle B uploads tarballs but does
+  not implement an npm-protocol-compatible registry endpoint. Tools
+  that require a `npm view` / `npm search` / dist-tag resolution
+  surface need npmjs.org reachable. A future Welle could host a
+  read-only Verdaccio-style mirror behind `npm.atlas-trust.io`, but
+  that introduces an operator surface (DNS, TLS cert, mirror process
+  monitoring) that V1.15 explicitly defers.
+- **Lock-file pinning recommendations for downstream consumers.**
+  The auditor-side reproducibility story — what `package-lock.json`
+  / `pnpm-lock.yaml` / `yarn.lock` line should consumers commit, how
+  to re-pin after a backup-channel install, when to verify SLSA
+  provenance — is V1.15 Welle C territory (planned, not yet
+  shipped). Welle B is the upload side; Welle C will be the
+  consumer side.
+- **Browser-runtime hardening.** The playground at
+  `apps/wasm-playground/` is unaffected by Welle B: it still loads
+  the local `wasm-pack` output via relative paths, with no CSP and
+  no SRI on the WASM module. See scope-e's "Browser SRI on the WASM
+  module" residual-risk entry for the deferred work.
 
 ---
 

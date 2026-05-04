@@ -1854,3 +1854,175 @@ produces byte-equivalent output to the V1.13 file-backed witness
 (invariant: the witness sig is a function of the scalar and the
 chain head, independent of whether the scalar lives in a file or on
 the HSM).
+
+## 12. WASM verifier — backup-channel install via GitHub Releases (V1.15 Welle B)
+
+`@atlas-trust/verify-wasm` ships through two channels by design:
+
+1. **Primary — npmjs.org.** `npm install @atlas-trust/verify-wasm`.
+   This is the default for every consumer; SLSA L3 provenance is
+   attached at publish time and verifiable with `npm audit
+   signatures`.
+2. **Backup — GitHub Releases.** Each tagged release uploads the
+   identical `npm pack` output (plus a SHA256 manifest) as release
+   assets at
+   `https://github.com/ThePyth0nKid/atlas/releases/<TAG>`. Use this
+   when npmjs.org is unreachable (registry outage, account
+   compromise, or — rarely — a registry-side tampering claim that
+   the auditor wants to byte-check independently).
+
+The two channels serve **byte-identical tarballs**. The npm-side
+provenance attestation (signed against the tarball SHA256 + commit
+SHA) covers both — the GH-Release tarball is verifiable against the
+same attestation by recomputing its hash and comparing to the
+npm registry's `dist.integrity` field.
+
+> **Trust roots are NOT equivalent across the two channels.** The
+> `tarball-sha256.txt` manifest uploaded alongside the GH-Release
+> tarballs is a *transport-integrity* check — it detects in-flight
+> tampering between GitHub's blob store and your machine, but it
+> does NOT establish origin integrity. The manifest and the tarballs
+> are produced in the same workflow run, so a compromised runner
+> would yield a manifest and tarball that match each other while
+> both being attacker-controlled. The *origin-integrity* trust root
+> is the npm-side OIDC-signed SLSA L3 provenance attestation. If you
+> install from the backup channel, step 3 below (cross-verify the
+> tarball SHA512 against `npm view … dist.integrity`) is **NOT
+> optional** — it is the step that establishes the GH-Release bytes
+> match what the npm registry believes was published. Skip step 3
+> only if npm itself is unreachable AND you are willing to fall
+> through to verifier-side reproducibility from source (clone the
+> repo at the tagged commit, rebuild with the pinned wasm-pack
+> version, byte-compare against the GH-Release tarball).
+
+### When to fall back to the backup channel
+
+- npmjs.org returns 5xx / DNS-NXDOMAIN / TLS errors for >5 min on a
+  CI run that you don't want to block.
+- An incident advisory is in effect for the npm registry or the
+  `@atlas-trust` namespace specifically.
+- An auditor wants to cross-check the bytes their organisation
+  consumes against a second, independent download path before
+  pinning a version into their lockfile.
+
+If npmjs.org is reachable, use it — the backup channel is
+operator-driven, not a transparent failover. There is **no** DNS-
+or proxy-level rewrite that auto-redirects `npm install` to the
+GitHub Release; the operator deliberately downloads the tarball,
+verifies its SHA256, and `npm install`s the local file.
+
+### Backup install flow
+
+```bash
+TAG="v1.15.0"     # the release tag you want
+VERSION="${TAG#v}"  # strip the leading `v`
+
+# 1. Download both targets and the SHA256 manifest from the GitHub
+#    Release.
+gh release download "${TAG}" \
+  --pattern "atlas-trust-verify-wasm-${VERSION}-web.tgz" \
+  --pattern "atlas-trust-verify-wasm-${VERSION}-node.tgz" \
+  --pattern "tarball-sha256.txt" \
+  --repo ThePyth0nKid/atlas
+
+# (or, without gh CLI:)
+curl -fsSLO "https://github.com/ThePyth0nKid/atlas/releases/download/${TAG}/atlas-trust-verify-wasm-${VERSION}-web.tgz"
+curl -fsSLO "https://github.com/ThePyth0nKid/atlas/releases/download/${TAG}/atlas-trust-verify-wasm-${VERSION}-node.tgz"
+curl -fsSLO "https://github.com/ThePyth0nKid/atlas/releases/download/${TAG}/tarball-sha256.txt"
+
+# 2. Verify SHA256s match the manifest. Any mismatch means the
+#    tarball was tampered with in transit OR the GH-Release asset
+#    was replaced post-upload — STOP and escalate. Note this only
+#    proves the tarball matches the manifest produced by the same
+#    workflow run; step 3 is the origin-integrity check.
+sha256sum --check tarball-sha256.txt
+
+# 3. **MANDATORY origin-integrity check.** Cross-verify against the
+#    npm-side `dist.integrity` (the SLSA L3 provenance trust root).
+#    The npm registry uses SHA512 base64; the GH-Release manifest
+#    uses SHA256 hex — different algorithms, both covering the same
+#    tarball bytes, so they are not directly comparable. Use openssl
+#    to compute SHA512 of the GH-Release tarball, then string-match
+#    against npm's published `dist.integrity` field.
+npm view @atlas-trust/verify-wasm@"${VERSION}" dist
+# Expected output includes a `dist.integrity: "sha512-…"` field.
+# Compute the matching SHA512 base64 on the GH-Release tarball:
+GH_SHA512=$(openssl dgst -sha512 -binary "atlas-trust-verify-wasm-${VERSION}-web.tgz" \
+  | base64 -w0)
+echo "sha512-${GH_SHA512}"
+# Bytes equal ⇒ both channels served the same artefact ⇒ the
+# npm-side SLSA provenance attestation also covers the GH-Release
+# tarball you just downloaded ⇒ proceed to step 4.
+#
+# Bytes NOT equal ⇒ the GH-Release tarball does not match what
+# npm has on file. STOP. Do NOT proceed to step 4. Possible causes:
+#   * npmjs.org and GitHub Releases were targeted in different
+#     attacks (rare but the threat model includes it).
+#   * The release-publishing workflow run itself was compromised
+#     and pushed mismatched bytes to the two channels.
+#   * Genuinely benign: a re-publish with the same version was
+#     attempted but only one channel updated. Treat as a security
+#     event until proven otherwise via the publishing team's audit
+#     log.
+#
+# If npm is unreachable AND you cannot complete step 3, the
+# fallback is verifier-side reproducibility from source: clone the
+# repo at the tagged commit, run `wasm-pack build crates/atlas-verify-wasm
+# --target web --release` with the pinned WASM_PACK_VERSION (see
+# `.github/workflows/wasm-publish.yml`), and byte-compare the
+# resulting .tgz against the GH-Release tarball. This is the
+# ultimate trust root; it does not require either registry up.
+
+# 4. Install from the local tarball. **`--ignore-scripts` is
+#    REQUIRED on the install path** — npm's default behaviour is to
+#    run any `install` / `postinstall` scripts inside the tarball
+#    during install, before you have any opportunity to inspect the
+#    contents. `@atlas-trust/verify-wasm` does not ship lifecycle
+#    scripts (verify by inspecting the tarball's `package.json`
+#    after step 3), but a tampered tarball that passed step 1 and
+#    failed step 3 (or skipped step 3) could carry a malicious
+#    postinstall. The flag is cheap defence-in-depth.
+npm install --ignore-scripts ./atlas-trust-verify-wasm-${VERSION}-web.tgz
+# (or the -node tarball, depending on your runtime target)
+```
+
+After step 4, your `package-lock.json` records the local-file
+install. To restore the npm-registry source once the outage clears,
+re-run `npm install @atlas-trust/verify-wasm@${VERSION}` and the
+lockfile updates back to the registry path with the same
+SHA512 integrity.
+
+### Trade-offs documented for the audit trail
+
+- **Operator-driven, not transparent.** The backup channel requires
+  manual download + SHA256 verification + local install. By design:
+  an automatic-failover proxy at `npm.atlas-trust.io` would itself
+  be a single point of failure with its own compromise surface, and
+  ownership would belong to the same operator team that runs the
+  primary publish. V2-territory.
+- **Both channels run on GitHub-hosted infrastructure.** The
+  npmjs.org primary channel is independent of GitHub; the
+  GH-Release backup is on the same provider as the source repo. So
+  the backup hedges against npmjs-side failure but NOT against a
+  GitHub-side outage. For both-failed scenarios, the ultimate
+  fallback is verifier-side reproducibility from source — clone
+  the repo at the tagged commit and run `wasm-pack build
+  crates/atlas-verify-wasm --target web --release` locally; the
+  output is byte-identical to the published artefact (pinned by
+  the `WASM_PACK_VERSION` env var in `wasm-publish.yml`).
+- **No registry-API equivalence.** The backup channel cannot answer
+  `npm view`, `npm search`, or registry metadata queries. It is a
+  raw-tarball download path only. Consumers using metadata-driven
+  install logic (Renovate, Dependabot) need the primary channel up.
+
+### Compose with §11
+
+| Step | Side | Section | What happens |
+|---|---|---|---|
+| 1 | Auditor | §12 | Detect npmjs.org unreachable / advisory / cross-check intent |
+| 2 | Auditor | §12 | `gh release download` (or `curl`) — fetch tarballs + manifest |
+| 3 | Auditor | §12 | `sha256sum --check tarball-sha256.txt` — verify in-flight integrity |
+| 4 | Auditor | §12 | Optional: cross-verify against `npm view … dist.integrity` if npm is reachable |
+| 5 | Auditor | §12 | `npm install ./atlas-trust-verify-wasm-${VERSION}-web.tgz` |
+| 6 | Auditor | — | Run verifier as normal — same exports, same bytes, same trust property |
+| 7 | Auditor | §12 | When primary channel returns: `npm install @atlas-trust/verify-wasm@${VERSION}` to re-pin to the registry source |

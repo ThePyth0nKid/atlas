@@ -1370,7 +1370,7 @@ Headline:
   and the same `VerifyOutcome` as the native CLI. Scope E is a new
   *distribution channel*, not a new trust surface.
 
-### V1.15 — Const-time KID-equality invariant (shipped: Welle A)
+### V1.15 — Const-time KID-equality invariant + dual-channel WASM distribution (shipped: Welle A + Welle B)
 
 - **Const-time KID compares everywhere.** V1.5 routed every *hash*
   comparison (bundle hash, event hash, anchored hash, chain head /
@@ -1397,21 +1397,54 @@ Headline:
   anchored hash, chain head/previous-head, per-tenant KID, witness
   KID) so reviewers reading any of those sites see the comment
   pointing back at the helper module.
-- **Trust property unchanged.** Welle A is consistency hardening, not
-  a new trust property. The leak window for `event.signature.kid` was
-  theoretical — both `event.signature.kid` and
+- **Welle A trust property unchanged.** Welle A is consistency hardening,
+  not a new trust property. The leak window for `event.signature.kid`
+  was theoretical — both `event.signature.kid` and
   `per_tenant_kid_for(workspace_id)` are wire-side strings already
   present in the trace — but the consistency win means a future
   reviewer reading any KID-equality site sees the same `ct_eq_str`
   discipline. See [SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-a for
   the per-boundary trust statement.
-- **What V1.15 is NOT.** Welle A is the only Welle of V1.15 currently
-  shipped. The remaining V1.15-planned Wellen (B: backup-registry
-  mirror for `@atlas-trust/verify-wasm`; C: lock-file pinning runbook
-  for npm consumers) are documented in `.handoff/v1.15-handoff.md` but
-  are independent of the trust-core crate boundary — they affect
-  distribution and consumer-side reproducibility, not verifier
-  semantics.
+- **Dual-channel WASM distribution (Welle B).** V1.14 Scope E shipped
+  `@atlas-trust/verify-wasm` to npmjs.org as the sole distribution
+  channel. V1.15 Welle B adds a second, independent channel: on every
+  `refs/tags/v*` push, `.github/workflows/wasm-publish.yml` uploads
+  the byte-identical `npm pack` tarballs (web + node, with
+  `-web.tgz` / `-node.tgz` suffix disambiguation) plus a
+  `tarball-sha256.txt` manifest as GitHub Release assets, alongside
+  the existing npm publish. An auditor whose primary channel is
+  unreachable can `gh release download`, `sha256sum --check`, and
+  `npm install ./local.tgz` — same `package.json` name, same SLSA
+  L3 provenance attestation (the npm-side OIDC signature is verifiable
+  against either channel's bytes by recomputing SHA256 / SHA512).
+  Same-run, same-bytes — Welle B is purely additive distribution
+  resilience, no verifier-logic change.
+- **Latent OIDC-permissions fix.** Welle B's workflow edit also fixes
+  a latent V1.14 Scope E bug: the original `id-token: write`
+  permission was placed at *step* level, which GitHub Actions
+  silently ignores. `npm publish --provenance` would have failed at
+  runtime on the first `v*` tag push. Welle B moves both
+  `id-token: write` (for OIDC provenance) and `contents: write` (for
+  `gh release upload`) to workflow level, removes the dead step-level
+  block, and documents the rationale in the workflow YAML.
+- **Welle B trust property unchanged.** Welle B is distribution
+  resilience, not a new trust property. The byte-identical
+  determinism property and SLSA L3 provenance attestation extend to
+  the GH-Release tarball unchanged — same workflow run, same
+  `npm pack` bytes, verifiable against the same OIDC attestation.
+  See [SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-b for residual
+  risks (both-channels-on-GitHub correlation, no registry-API
+  equivalence, operator-driven failover) and
+  [OPERATOR-RUNBOOK.md](OPERATOR-RUNBOOK.md) §12 for the backup-
+  channel install ceremony.
+- **What V1.15 is NOT yet.** The remaining V1.15-planned Welle (C:
+  lock-file pinning runbook for downstream npm consumers,
+  documenting how to commit `package-lock.json` SHA512 integrity
+  values, when to verify SLSA provenance, and how to re-pin after
+  a backup-channel install) is documented in
+  `.handoff/v1.15-handoff.md` and remains independent of the trust-
+  core crate boundary. Welle B is the upload side; Welle C will be
+  the consumer side.
 
 ### V2 — full COSE + policy + SPIFFE
 
