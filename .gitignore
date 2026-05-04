@@ -12,12 +12,18 @@ out/
 
 # WASM build artifacts
 crates/atlas-verify-wasm/pkg/
+crates/atlas-verify-wasm/pkg-web/
+crates/atlas-verify-wasm/pkg-node/
+crates/atlas-verify-wasm/pkg-*/
 apps/atlas-web/public/wasm/
 
 # Env
 .env
 .env.local
 .env.*.local
+
+# Local agent harness session state (Claude Code, etc.)
+.claude/
 
 # IDE
 .idea/

@@ -1270,7 +1270,7 @@ Headline:
   model and [OPERATOR-RUNBOOK.md §10](OPERATOR-RUNBOOK.md) for the
   commissioning ceremony.
 
-### V1.14 — HSM-backed witness + auditor wire-surface (shipped: Scope I + Scope J)
+### V1.14 — HSM-backed witness + auditor wire-surface + WASM publishing (shipped: Scope I + Scope J + Scope E)
 
 - **HSM-backed witness backend.** A new `Pkcs11Witness`
   implementation of the dyn-safe `Witness` trait
@@ -1342,6 +1342,33 @@ Headline:
   [§7.7](#77-auditor-wire-surface-v114--shipped-scope-j) for the
   technical design and [SECURITY-NOTES.md](SECURITY-NOTES.md)
   §scope-j for the threat model.
+- **WASM verifier publishing (Scope E).** `crates/atlas-verify-wasm`
+  ships as `@atlas-trust/verify-wasm` on npm — same Rust verifier
+  core (`atlas-trust-core`) compiled to `wasm32-unknown-unknown`,
+  packaged for both `--target web` (browser ESM, default `latest`
+  dist-tag) and `--target nodejs` (CommonJS, `node` dist-tag). The
+  `wasm-publish.yml` CI lane triggers on tag push (`v*` from the
+  default branch) + manual `workflow_dispatch`, installs wasm-pack
+  via `cargo install --locked` (rather than the upstream shell
+  installer — auditable from crates.io source), runs Node.js smokes
+  against `verify_trace_json` for **both** the pkg-web and pkg-node
+  outputs end-to-end against the bank-demo fixture, and gates
+  `npm publish` on a three-layer check: (a) trigger encodes a
+  publish intent (tag push OR `workflow_dispatch` with
+  `dry_run=false` from master), (b) `NPM_TOKEN` is present, (c) the
+  publish step has `id-token: write` for OIDC-signed
+  `--provenance`. Both tarballs ship with provenance attestations
+  linking them to the GitHub Actions run + commit SHA, so
+  downstream consumers can verify via `npm audit signatures`. A
+  zero-build-step browser playground at `apps/wasm-playground/`
+  (vanilla HTML + ESM, no bundler) lets an auditor drop a
+  `*.trace.json` + `*.pubkey-bundle.json` and verify in-browser
+  without touching a server. **Trust property unchanged:** the
+  byte-identical-determinism property already locked in by
+  `atlas-trust-core/src/cose.rs::signing_input_byte_determinism_pin`
+  (V1.5) means the WASM build produces the same signing-input bytes
+  and the same `VerifyOutcome` as the native CLI. Scope E is a new
+  *distribution channel*, not a new trust surface.
 
 ### V2 — full COSE + policy + SPIFFE
 

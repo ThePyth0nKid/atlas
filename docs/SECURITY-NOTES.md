@@ -1240,6 +1240,211 @@ threshold missed (e.g. "all five witnesses are uncommissioned" vs
 
 ---
 
+## scope-e — WASM verifier publishing (V1.14 — shipped)
+
+V1.13 wave-C through V1.14 Scope J shipped the verifier as a Rust
+workspace artefact: `atlas-verify-cli` for native CLI use,
+`atlas-verify-wasm` as an in-tree library compiled to
+`wasm32-unknown-unknown` and embedded by `atlas-web`. Auditor tooling
+that wanted to consume the verifier from JavaScript (browser, Node.js,
+edge runtimes) had to clone the repo and run `wasm-pack build` itself.
+V1.14 Scope E publishes the WASM build to npm under
+`@atlas-trust/verify-wasm` so any auditor with `npm install` can
+consume the byte-identical Rust verifier core in a single step.
+
+### What landed in V1.14 Scope E
+
+- **`wasm-publish.yml` CI lane.** `.github/workflows/wasm-publish.yml`
+  builds `crates/atlas-verify-wasm` for both `--target web` (browser
+  ESM) and `--target nodejs` (CommonJS) on every tag push (`v*`) and
+  on manual `workflow_dispatch`. wasm-pack version pinned via
+  `WASM_PACK_VERSION` env-var; **wasm-pack itself is installed via
+  `cargo install wasm-pack --version $WASM_PACK_VERSION --locked`
+  rather than the upstream `curl … init.sh | sh` shell installer**,
+  so the artefact is reproducible from auditable crates.io source
+  with its committed `Cargo.lock`. All `uses:` pinned to immutable
+  SHAs.
+- **Node.js end-to-end smoke (BOTH targets).** Before publish, the
+  workflow runs `verify_trace_json` against the canonical bank-demo
+  trace + bundle in `examples/golden-traces/` for **both** the
+  `pkg-node` (CommonJS via `require`) and the `pkg-web` (ESM via
+  `import()` with raw-WASM-bytes init) build outputs. Both must
+  return `outcome.valid === true` and
+  `Array.isArray(outcome.witness_failures)` before the publish step
+  is allowed to run. A regression that broke the wasm-bindgen
+  serialisation of `VerifyOutcome` in *either* JS-side glue layer
+  (e.g. the V1.14 Scope J field disappearing from the ESM view but
+  not the CommonJS view) trips the smoke before any artefact reaches
+  npm.
+- **Publish gate — defence-in-depth across three checks.** `npm
+  publish` runs only when ALL of the following are true:
+  (a) the trigger encodes a publish intent — either a `push` event
+  with `github.ref` starting with `refs/tags/v` (release publish),
+  OR a `workflow_dispatch` with `dry_run: false` *AND* `github.ref
+  == 'refs/heads/master'` (manual approval from the default branch
+  only — feature-branch dispatches cannot publish); (b) the
+  `NPM_TOKEN` secret is present (fork PRs and unauthorised manual
+  runs SKIP cleanly with `exit 0`); (c) the publish step has
+  `id-token: write` permission scoped to itself (the rest of the
+  job runs under the workflow-level `permissions: contents: read`
+  default), enabling OIDC-signed `--provenance`.
+- **OIDC-signed `--provenance` on `npm publish`.** Both the web and
+  the node tarballs are published with `npm publish --provenance`
+  (npm ≥ 9.5), which attaches a Sigstore-rekor attestation linking
+  the published bytes to the GitHub Actions run, repository, and
+  commit SHA. Downstream consumers can verify via `npm audit
+  signatures` or by inspecting the package's provenance card on the
+  npm registry — they get cryptographic assurance that
+  `@atlas-trust/verify-wasm@<version>` was built from
+  `github.com/atlas-trust/<repo>@<commit-sha>` on a known GitHub
+  Actions runner. This closes the "is this tarball really from the
+  Atlas repo" supply-chain question without requiring downstream
+  consumers to check out and rebuild from source.
+- **Tarball artefacts (14-day retention).** Both build outputs are
+  also packed via `npm pack` and uploaded as workflow artifacts.
+  Auditors can fetch the exact bytes that would have shipped to npm
+  for a given run without needing access to the registry — useful
+  for diffing against a locally-built reproduction or for auditing
+  a build that was later unpublished.
+- **Browser playground.** `apps/wasm-playground/` is a zero-build-step
+  static page (vanilla HTML + vanilla ESM, no bundler, no
+  `package.json`) that loads the local `wasm-pack` output and lets a
+  reviewer drop a `*.trace.json` + `*.pubkey-bundle.json` to verify
+  in-browser. The page surfaces `outcome.witness_failures` (V1.14
+  Scope J) so the auditor can see the structured wire surface
+  end-to-end without writing any JS code.
+
+### Trust property (Scope E)
+
+**No new trust property.** Scope E is a *distribution-channel* change,
+not a verifier-logic change. The byte-identical determinism property
+already locked in by:
+
+- `atlas-trust-core/src/cose.rs::signing_input_byte_determinism_pin`
+  (V1.5),
+- `atlas-trust-core/src/pubkey_bundle.rs::bundle_hash_byte_determinism_pin`
+  (V1.5), and
+- `atlas-signer/src/anchor.rs::mock_log_pubkey_matches_signer_seed`
+  (V1.5)
+
+means the WASM build produces the same signing-input bytes and the
+same `VerifyOutcome` JSON as the native CLI, on the same input. A
+verifier discrepancy between the WASM and native paths would trip the
+native-side anti-drift tests at compile time. The npm package is the
+same byte-deterministic verifier, just packaged for a different
+runtime.
+
+### Residual risks after V1.14 Scope E
+
+- **Supply-chain compromise of the npm package.** A registry-side
+  attack (compromised maintainer credentials, malicious squatter,
+  npm typosquat) is the canonical risk for any npm-distributed
+  artefact. Mitigations in scope: (a) the workflow tarball artifact
+  lets an auditor diff the published bytes against a locally-built
+  reproduction; (b) the package is published from a known-pinned CI
+  lane (wasm-pack version + GitHub Action SHAs are immutable in the
+  workflow file); (c) every published tarball ships with an
+  OIDC-signed `--provenance` attestation that downstream consumers
+  can verify via `npm audit signatures`, so a typosquatted or
+  malicious replacement cannot forge the
+  `github.com/atlas-trust/<repo>@<commit-sha>` build-source claim.
+  Out of scope: lock-file pinning by downstream consumers,
+  application-level integrity hashes for the WASM bytes — V1.15+
+  candidates.
+- **`NPM_TOKEN` secret rotation — operator runbook.** A leaked
+  `NPM_TOKEN` lets an attacker publish a new version of
+  `@atlas-trust/verify-wasm` under the project's name. Mitigations,
+  in order of priority:
+  - The configured token MUST be a **granular access token** scoped
+    to publish-only on `@atlas-trust/verify-wasm` (npm v8.15+
+    feature) — NOT a legacy "automation token" that grants
+    organisation-wide write access. Operator action: when rotating,
+    create the new token via npm's "Granular Access Tokens" UI,
+    select "Packages and scopes" → `@atlas-trust/verify-wasm`,
+    permission "Read and write", lifetime ≤ 1 year, IP allowlist if
+    available. Document the resulting token's metadata (creation
+    date, expiry, scope) in the team's secret-rotation log.
+  - Rotate on a calendar cadence at minimum quarterly; rotate
+    immediately on any maintainer offboarding. Treat the same
+    blast-radius class as a Sigstore-rekor-prod credential.
+  - The workflow uses `NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}`
+    so the token is masked in run logs and not echoed via `set -x`.
+  - The provenance attestation is *not* a substitute for token
+    rotation: provenance proves the tarball's build source, but a
+    leaked token can publish a tarball whose provenance points to a
+    legitimate-looking commit on a fork or feature branch with
+    smuggled content. Defence-in-depth: require the publish to fire
+    only from a tag on the canonical repo (enforced via the publish
+    gate's `startsWith(github.ref, 'refs/tags/v')` check) and
+    ensure the repo's tag-protection rules forbid non-maintainers
+    from creating `v*` tags on non-master branches. See "Tag
+    protection" below.
+- **Tag-protection — operator runbook.** The publish gate trusts
+  that any `v*` tag pushed to the repo represents an authorised
+  release. Enforce this in the GitHub repo settings (Settings →
+  Tags → New rule):
+  - Tag name pattern: `v*`
+  - Restrict tag creation to repository administrators and the
+    release-manager team. Non-maintainers who push a `v*` tag MUST
+    be rejected at the GitHub layer before the workflow ever fires.
+  - Reject force-pushes / deletes on tags matching `v*` so a
+    rotated tag cannot be pointed at a different commit after a
+    publish has fired.
+  - Audit: every `wasm-publish.yml` run that fires under the `push`
+    trigger logs `github.ref` and `github.actor`. Reconcile against
+    the team's release log on a quarterly cadence.
+- **Browser playground supply chain.** The playground is vanilla
+  HTML + vanilla ESM with zero npm dependencies. The only external
+  loaded asset is the local-built `pkg/atlas_verify_wasm.js` + WASM
+  binary. An attacker who could inject content into the playground's
+  served HTML could, in principle, swap the WASM module under the
+  user's nose. Mitigation: the playground is meant for local-dev or
+  audit-time use against a known-trusted checkout — the README
+  documents the `wasm-pack build` invocation explicitly so the
+  reviewer's flow is "build the artefact yourself, then open the
+  playground". Production consumers should pull `@atlas-trust/verify-wasm`
+  from npm (same Apache-2.0 source) rather than embedding the
+  playground itself.
+- **Cross-runtime serialisation drift.** `serde-wasm-bindgen` produces
+  JS objects (not JSON strings) for the WASM bindings. An auditor
+  that compares the WASM `outcome.witness_failures` against the
+  native CLI's JSON `witness_failures` should explicitly
+  `JSON.stringify` the WASM output and `JSON.parse` it for an
+  apples-to-apples comparison — direct object comparison is sensitive
+  to key insertion order, which `serde-wasm-bindgen` does not
+  guarantee. Mitigation: the workflow's Node.js smoke proves the
+  WASM-side `outcome.valid` matches the expected verdict; native-CLI
+  parity is structurally guaranteed by the byte-identical-determinism
+  pins above.
+
+### What V1.14 Scope E does NOT cover
+
+- **Mirror to a backup registry.** Single-registry deployment means
+  npm registry availability is on the auditor's critical path for
+  fresh installs. Vendoring or mirroring (e.g. to GitHub Packages)
+  is out of scope for V1.14.
+- **Browser-runtime hardening of the playground.** The playground has
+  no CSP, no SRI on the WASM module, no service-worker pinning, no
+  client-side input-size cap on the trace/bundle file pickers. It is
+  meant as a local-dev "drop trace, click verify" reviewer
+  affordance against a known-trusted checkout, not a production
+  hosted tool. A future hosted playground (e.g.
+  `verify.atlas-trust.io`) would need full CSP + SRI + service-worker
+  caching + a JS-layer file-size cap (the Rust verifier already
+  enforces `MAX_ITEMS_PER_LEVEL = 10_000` as an allocation cap, but
+  the JS layer should gate before deserialising a multi-GB blob)
+  to defend against in-flight asset substitution and accidental tab
+  OOM from oversized fixtures.
+- **Browser SRI on the WASM module.** Subresource Integrity hashes
+  are not attached to the WASM binary in the playground because the
+  current deployment loads from `./pkg/` (relative, same origin,
+  local dev server) where SRI is structurally not applicable. If the
+  playground is ever served from a CDN, the served HTML must add an
+  `integrity` attribute on the WASM `fetch()` call (per the
+  `WebAssembly.compileStreaming` integrity-check spec).
+
+---
+
 ## Crate boundary
 
 The verifier crates (`atlas-trust-core`, `atlas-verify-cli`,

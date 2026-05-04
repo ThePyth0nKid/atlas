@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Atlas — In-Browser Verifier (V1.14)</title>
+  <style>
+    :root {
+      --fg: #1a1a1a;
+      --fg-muted: #555;
+      --bg: #fafaf7;
+      --panel: #ffffff;
+      --border: #d8d8d4;
+      --accent: #0b5c2e;
+      --accent-fg: #ffffff;
+      --error: #8a1f1f;
+      --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Consolas", monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg);
+      color: var(--fg);
+      font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    }
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 32px 24px 64px;
+    }
+    h1 {
+      font-size: 28px;
+      margin: 0 0 4px;
+    }
+    .lede {
+      color: var(--fg-muted);
+      margin: 0 0 32px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 20px 24px;
+      margin-bottom: 24px;
+    }
+    .row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .row > .field {
+      flex: 1 1 320px;
+      min-width: 280px;
+    }
+    label {
+      display: block;
+      font-weight: 600;
+      font-size: 14px;
+      margin-bottom: 6px;
+    }
+    .hint {
+      color: var(--fg-muted);
+      font-size: 13px;
+      margin: 4px 0 8px;
+    }
+    input[type="file"] {
+      width: 100%;
+      font-family: var(--mono);
+      font-size: 13px;
+      padding: 6px 0;
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin-top: 16px;
+    }
+    button {
+      background: var(--accent);
+      color: var(--accent-fg);
+      border: 0;
+      padding: 10px 20px;
+      font-size: 15px;
+      font-weight: 600;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:disabled {
+      background: #b8b8b4;
+      cursor: not-allowed;
+    }
+    .verdict {
+      font-family: var(--mono);
+      font-size: 15px;
+      font-weight: 600;
+    }
+    .verdict.valid { color: var(--accent); }
+    .verdict.invalid { color: var(--error); }
+    pre {
+      background: #f1f1ee;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 14px 16px;
+      font-family: var(--mono);
+      font-size: 12.5px;
+      line-height: 1.5;
+      overflow-x: auto;
+      max-height: 480px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .footer {
+      color: var(--fg-muted);
+      font-size: 13px;
+      margin-top: 24px;
+      line-height: 1.6;
+    }
+    .footer code {
+      background: #ececea;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 12.5px;
+    }
+    .error-banner {
+      background: #fbeaea;
+      border: 1px solid #d99e9e;
+      color: var(--error);
+      padding: 10px 14px;
+      border-radius: 4px;
+      margin-bottom: 16px;
+      font-family: var(--mono);
+      font-size: 13.5px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Atlas — In-Browser Verifier</h1>
+    <p class="lede">
+      Verify an Atlas trace bundle entirely in your browser. No network call.
+      The same Rust verifier core that runs in the native CLI, compiled to
+      WebAssembly. V1.14 — includes <code>witness_failures</code> wire-surface
+      (Scope J).
+    </p>
+
+    <div id="error-banner" class="error-banner"></div>
+
+    <section class="panel">
+      <div class="row">
+        <div class="field">
+          <label for="trace-input">Trace bundle</label>
+          <p class="hint">A <code>*.trace.json</code> emitted by atlas-signer.</p>
+          <input id="trace-input" type="file" accept=".json,application/json" />
+        </div>
+        <div class="field">
+          <label for="bundle-input">Pubkey bundle</label>
+          <p class="hint">The <code>*.pubkey-bundle.json</code> the trace was signed against.</p>
+          <input id="bundle-input" type="file" accept=".json,application/json" />
+        </div>
+      </div>
+      <div class="actions">
+        <button id="verify-btn" disabled>Verify</button>
+        <span id="verdict" class="verdict"></span>
+      </div>
+    </section>
+
+    <section class="panel" id="output-panel" style="display:none">
+      <label>VerifyOutcome (JSON)</label>
+      <p class="hint">Auditor tooling switches on <code>witness_failures[].reason_code</code> for classification.</p>
+      <pre id="outcome-output"></pre>
+    </section>
+
+    <p class="footer">
+      <strong>Local dev:</strong> run
+      <code>wasm-pack build crates/atlas-verify-wasm --target web --release --out-dir ../../apps/wasm-playground/pkg</code>
+      from the repo root, then serve this directory with any static file server
+      (<code>npx serve apps/wasm-playground</code> or
+      <code>python3 -m http.server</code>). <br />
+      <strong>Production:</strong> after V1.14 release, the published artefact
+      is available at <code>@atlas-trust/verify-wasm</code> on npm.
+    </p>
+  </main>
+
+  <script type="module">
+    // The WASM module is loaded from ./pkg/, populated by `wasm-pack
+    // build --out-dir ../../apps/wasm-playground/pkg`. Loading via
+    // dynamic import lets us surface a friendly error if pkg/ is missing
+    // (the most common dev-time foot-gun for first-time setup).
+
+    const banner = document.getElementById('error-banner');
+    const traceInput = document.getElementById('trace-input');
+    const bundleInput = document.getElementById('bundle-input');
+    const verifyBtn = document.getElementById('verify-btn');
+    const verdictEl = document.getElementById('verdict');
+    const outputPanel = document.getElementById('output-panel');
+    const outputEl = document.getElementById('outcome-output');
+
+    function showError(msg) {
+      banner.textContent = msg;
+      banner.style.display = 'block';
+    }
+
+    function clearError() {
+      banner.textContent = '';
+      banner.style.display = 'none';
+    }
+
+    let wasmModule = null;
+    try {
+      const mod = await import('./pkg/atlas_verify_wasm.js');
+      // wasm-pack emits a default export that initialises the wasm
+      // binary. Calling it (with no args) loads `pkg/atlas_verify_wasm_bg.wasm`
+      // sibling-relative.
+      await mod.default();
+      wasmModule = mod;
+      console.log('Atlas verifier loaded, version:', mod.verifier_version());
+    } catch (err) {
+      showError(
+        'Failed to load WASM module from ./pkg/. Run `wasm-pack build ' +
+        'crates/atlas-verify-wasm --target web --release --out-dir ' +
+        '../../apps/wasm-playground/pkg` from the repo root, then reload. ' +
+        '(' + (err && err.message ? err.message : String(err)) + ')'
+      );
+      verifyBtn.disabled = true;
+      throw err;
+    }
+
+    // Enable verify button only once both files are picked.
+    function refreshEnableState() {
+      verifyBtn.disabled = !(traceInput.files.length && bundleInput.files.length);
+    }
+    traceInput.addEventListener('change', refreshEnableState);
+    bundleInput.addEventListener('change', refreshEnableState);
+
+    async function readFileAsText(file) {
+      // FileReader returns a binary string by default; we want text
+      // decoded as UTF-8 (Atlas JSON is canonical UTF-8). Using
+      // file.text() is the modern shorthand and avoids a manual
+      // FileReader dance.
+      return await file.text();
+    }
+
+    verifyBtn.addEventListener('click', async () => {
+      clearError();
+      verdictEl.textContent = '';
+      verdictEl.className = 'verdict';
+      outputPanel.style.display = 'none';
+      outputEl.textContent = '';
+
+      if (!wasmModule) {
+        showError('WASM module not loaded.');
+        return;
+      }
+
+      try {
+        const traceText = await readFileAsText(traceInput.files[0]);
+        const bundleText = await readFileAsText(bundleInput.files[0]);
+        const outcome = wasmModule.verify_trace_json(traceText, bundleText);
+        const valid = outcome && outcome.valid === true;
+        verdictEl.textContent = valid ? 'VALID — all checks passed' : 'INVALID — see outcome below';
+        verdictEl.className = 'verdict ' + (valid ? 'valid' : 'invalid');
+        outputEl.textContent = JSON.stringify(outcome, null, 2);
+        outputPanel.style.display = 'block';
+      } catch (err) {
+        // The WASM bindings throw a JsValue with a string we forwarded
+        // from Rust (`bundle parse: ...` or `verify: ...`); surface it
+        // verbatim so the auditor sees the exact failure mode.
+        showError(
+          'Verification raised an error: ' +
+          (err && err.message ? err.message : String(err))
+        );
+      }
+    });
+  </script>
+</body>
+</html>

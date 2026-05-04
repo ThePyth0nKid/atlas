@@ -16,7 +16,7 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**V1.14 Scope I + Scope J shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON).**
+**V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm (`@atlas-trust/verify-wasm`) + browser playground.**
 
 Trust-core crate + Rekor anchoring + per-tenant key derivation + HSM-backed signing + independent
 witness attestor (V1.5 mock-issuer, V1.6 live Sigstore Rekor v1, V1.7 anchor-chain + shard
@@ -101,8 +101,11 @@ residual by sealing the witness Ed25519 scalar inside a PKCS#11 token (signing r
 through `CKM_EDDSA`, scalar never enters atlas-witness address space). V1.14 Scope J
 replaces V1.13 wave-C-2's string-match diagnostic surface with a structured
 `witness_failures` JSON wire so auditor tooling can classify per-witness failures
-without keying on human-readable wording. Graph-database integration and policy-engine
-follow in V2.
+without keying on human-readable wording. V1.14 Scope E publishes the WASM verifier
+to npm as `@atlas-trust/verify-wasm` (browser + Node.js targets) and ships a
+zero-build-step browser playground at `apps/wasm-playground/` — the same Rust
+verifier core, packaged for in-browser auditor tooling without a server round-trip.
+Graph-database integration and policy-engine follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
   trust property, write/export flows, V1 → V1.14 → V2 boundaries.
@@ -133,6 +136,34 @@ atlas-verify-cli verify-trace bundle.json -k pubkey-bundle.json
 #   ✓ anchors — 2 anchor(s) verified against pinned log keys
 #   ✓ witnesses — 0 presented / 0 verified  (lenient until --require-witness)
 ```
+
+## Try it in the browser
+
+```bash
+# `@atlas-trust/verify-wasm` ships under two npm dist-tags so the
+# same package name covers both runtimes:
+#
+#   * default tag (`latest`) — ESM + browser-first build (web target)
+#   * `node` dist-tag — CommonJS build for Node.js consumers
+#
+# Browser (ESM, default tag):
+#   npm install @atlas-trust/verify-wasm
+#   import init, { verify_trace_json } from '@atlas-trust/verify-wasm';
+#   await init();
+#   const outcome = verify_trace_json(traceJson, bundleJson);
+#   // outcome.valid === true / false
+#   // outcome.witness_failures[] — V1.14 Scope J classification surface
+#
+# Node.js (CommonJS, `node` dist-tag — pin the tag to get the
+# Node-target build instead of the browser ESM build):
+#   npm install @atlas-trust/verify-wasm@node
+#   const m = require('@atlas-trust/verify-wasm');
+#   const outcome = m.verify_trace_json(traceJson, bundleJson);
+```
+
+Or open the zero-build-step playground at `apps/wasm-playground/` — drop
+a `*.trace.json` + `*.pubkey-bundle.json`, click Verify. Same Rust
+verifier core, byte-identical to the native CLI's output.
 
 No network calls. No talking to our server. Bit-identical determinism —
 the same input produces byte-identical signing-input bytes whether the
