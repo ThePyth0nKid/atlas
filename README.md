@@ -16,7 +16,7 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm (`@atlas-trust/verify-wasm`) + browser playground.**
+**V1.15 Welle A shipped — const-time KID-equality invariant: every wire-side KID compare in production code now routes through `crate::ct::ct_eq_str`, source-level anti-drift pin in `tests/const_time_kid_invariant.rs`. V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm (`@atlas-trust/verify-wasm`) + browser playground.**
 
 Trust-core crate + Rekor anchoring + per-tenant key derivation + HSM-backed signing + independent
 witness attestor (V1.5 mock-issuer, V1.6 live Sigstore Rekor v1, V1.7 anchor-chain + shard
@@ -29,14 +29,16 @@ sealed `Sensitive=true, Extractable=false, Derive=false` keypair).
 
 Current state:
 
-- 342 Rust tests green across the workspace (`--features hsm`): 121 trust-core unit
+- 347 Rust tests green across the workspace (`--features hsm`): 121 trust-core unit
   (incl. V1.14 Scope J `WitnessFailureReason` per-variant pinning + cross-batch dup
   sanitisation pin) + 18 anchor-chain adversary + 13 golden trace + 11 per-tenant-keys
   adversary + 6 Sigstore golden + 6 witness-strict-mode + 8 V1.14 Scope J
-  `witness_failures` integration in `atlas-trust-core`; 115 issuer/anchor/HSM in
-  `atlas-signer`; 5 strict-mode + 3 V1.14 Scope J `--output json` in `atlas-verify-cli`;
-  29 unit + 1 byte-equivalence integration in `atlas-witness` including V1.14
-  Scope I HSM-backed witness
+  `witness_failures` integration + 5 V1.15 Welle A `const_time_kid_invariant`
+  source-level anti-drift (KID-equality audit + helper sanity pins) in
+  `atlas-trust-core`; 115 issuer/anchor/HSM in `atlas-signer`; 5 strict-mode +
+  3 V1.14 Scope J `--output json` in `atlas-verify-cli`; 29 unit + 1
+  byte-equivalence integration in `atlas-witness` including V1.14 Scope I
+  HSM-backed witness
 - Signing-input is deterministic CBOR per RFC 8949 §4.2.1
   (length-first map sort, no floats, byte-pinned golden)
 - Pubkey-bundle hash is canonical-JSON, byte-pinned golden — silent
@@ -83,9 +85,10 @@ Current state:
 - HSM-backed signing (V1.11 wave-3): per-workspace scalar lives only
   inside the HSM token; `CKM_EDDSA(Ed25519)` signs without exposing
   private bytes to the Atlas address space (`atlas-signer --features hsm`)
-- Constant-time hash equality, alg-downgrade rejection, RFC 3339 timestamp
-  validation, duplicate-event-hash detection, `deny_unknown_fields` on the
-  wire format
+- Constant-time hash AND KID equality (V1.15 Welle A extends the V1.5 hash
+  invariant to every wire-side KID compare reachable from the verifier
+  API), alg-downgrade rejection, RFC 3339 timestamp validation,
+  duplicate-event-hash detection, `deny_unknown_fields` on the wire format
 - Bank demo bundle verifies `✓ VALID` end-to-end through both the native
   CLI and the in-browser WASM verifier, including
   `✓ anchors — N anchor(s) verified against pinned log keys` and
@@ -105,10 +108,17 @@ without keying on human-readable wording. V1.14 Scope E publishes the WASM verif
 to npm as `@atlas-trust/verify-wasm` (browser + Node.js targets) and ships a
 zero-build-step browser playground at `apps/wasm-playground/` — the same Rust
 verifier core, packaged for in-browser auditor tooling without a server round-trip.
-Graph-database integration and policy-engine follow in V2.
+V1.15 Welle A extends the V1.5 const-time-hash-equality invariant to every
+wire-side KID compare reachable from the verifier API: the V1.9 per-tenant-keys
+strict-mode check now routes through `crate::ct::ct_eq_str`, joining the V1.13
+wave-C-2 witness-roster compare. A new source-level anti-drift test
+(`tests/const_time_kid_invariant.rs`) audits both `verify.rs` and `witness.rs`
+for forbidden raw-`==` patterns on KID fields and fails the build at the next
+CI run if a future caller re-introduces one. Graph-database integration and
+policy-engine follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
-  trust property, write/export flows, V1 → V1.14 → V2 boundaries.
+  trust property, write/export flows, V1 → V1.15 → V2 boundaries.
 - [docs/SECURITY-NOTES.md](docs/SECURITY-NOTES.md) — defended attack
   surface, per-test mapping for auditors.
 - [docs/OPERATOR-RUNBOOK.md](docs/OPERATOR-RUNBOOK.md) — production

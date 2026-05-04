@@ -1,4 +1,4 @@
-# Atlas — System Architecture (V1.14)
+# Atlas — System Architecture (V1.15)
 
 This document is the system-design reference for Atlas. It describes the
 trust property the system exists to enforce, the data model that carries
@@ -1369,6 +1369,49 @@ Headline:
   (V1.5) means the WASM build produces the same signing-input bytes
   and the same `VerifyOutcome` as the native CLI. Scope E is a new
   *distribution channel*, not a new trust surface.
+
+### V1.15 — Const-time KID-equality invariant (shipped: Welle A)
+
+- **Const-time KID compares everywhere.** V1.5 routed every *hash*
+  comparison (bundle hash, event hash, anchored hash, chain head /
+  previous-head) through `crate::ct::ct_eq_str`. V1.13 wave-C-2 routed
+  the highest-impact *KID* compare (witness-roster lookup) through the
+  same helper. V1.15 Welle A closes the last surviving raw-`==` path
+  on a wire-side KID: the V1.9 per-tenant-keys strict-mode check now
+  routes `event.signature.kid ↔ per_tenant_kid_for(workspace_id)`
+  through `ct_eq_str`. The const-time-equality invariant now extends
+  uniformly across every wire-side KID and hash compare reachable from
+  the public verifier API.
+- **Source-level anti-drift pin.** A new
+  `crates/atlas-trust-core/tests/const_time_kid_invariant.rs` source-
+  audit test asserts that `verify.rs` and `witness.rs` contain no
+  forbidden raw-equality patterns (`.kid ==`, `.kid.eq(`,
+  `.kid.as_str() ==`, `expected_kid ==`, `witness_kid ==`,
+  `signature.kid ==`) in production code. Strips
+  `#[cfg(test)] mod tests` blocks before scanning so test-side
+  `assert_eq!(kid, …)` patterns don't false-positive. A future caller
+  introducing a raw `==` on a KID field in either file fails the test
+  at the next CI run; a new module with KID-compare sites must extend
+  the audit list explicitly. The `crate::ct` module-doc enumerates the
+  six const-time-protected boundaries (bundle hash, event hash,
+  anchored hash, chain head/previous-head, per-tenant KID, witness
+  KID) so reviewers reading any of those sites see the comment
+  pointing back at the helper module.
+- **Trust property unchanged.** Welle A is consistency hardening, not
+  a new trust property. The leak window for `event.signature.kid` was
+  theoretical — both `event.signature.kid` and
+  `per_tenant_kid_for(workspace_id)` are wire-side strings already
+  present in the trace — but the consistency win means a future
+  reviewer reading any KID-equality site sees the same `ct_eq_str`
+  discipline. See [SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-a for
+  the per-boundary trust statement.
+- **What V1.15 is NOT.** Welle A is the only Welle of V1.15 currently
+  shipped. The remaining V1.15-planned Wellen (B: backup-registry
+  mirror for `@atlas-trust/verify-wasm`; C: lock-file pinning runbook
+  for npm consumers) are documented in `.handoff/v1.15-handoff.md` but
+  are independent of the trust-core crate boundary — they affect
+  distribution and consumer-side reproducibility, not verifier
+  semantics.
 
 ### V2 — full COSE + policy + SPIFFE
 

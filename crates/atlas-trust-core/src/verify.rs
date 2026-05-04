@@ -397,11 +397,22 @@ pub fn verify_trace_with(
     // mode (the kids that don't match `trace.workspace_id` fail).
     if opts.require_per_tenant_keys {
         let expected_kid = per_tenant_kid_for(&trace.workspace_id);
+        // V1.15 Welle A invariant: every KID-equality in production code
+        // routes through `crate::ct::ct_eq_str`. `ev.signature.kid` is a
+        // wire-side, attacker-influenceable string; `expected_kid` is
+        // derived from `trace.workspace_id` (also wire-side) but neither
+        // string is secret. The leak window is theoretical — both inputs
+        // are present in the trace itself — but Atlas's stated property
+        // is "byte-identical verification regardless of input shape" and
+        // the cost of `ct_eq_str` is nil. Pin: a future caller using `==`
+        // on a kid field in this file would re-introduce the timing path
+        // and trip `tests/const_time_kid_invariant.rs`. See SECURITY-NOTES
+        // `## scope-a` for the enumerated const-time boundaries.
         let mismatched: Vec<&str> = trace
             .events
             .iter()
             .filter_map(|ev| {
-                if ev.signature.kid == expected_kid {
+                if crate::ct::ct_eq_str(&ev.signature.kid, &expected_kid) {
                     None
                 } else {
                     Some(ev.event_id.as_str())

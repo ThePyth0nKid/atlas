@@ -1,6 +1,6 @@
-# Atlas Verifier — Defended Attack Surface (V1.14)
+# Atlas Verifier — Defended Attack Surface (V1.15)
 
-This document describes what the V1.14 verifier (`atlas-trust-core`, exposed as
+This document describes what the V1.15 verifier (`atlas-trust-core`, exposed as
 `atlas-verify-cli` and `atlas-verify-wasm`) actually defends against. It is
 written for auditors and security reviewers who want to know "what does this
 verifier protect, and where are the limits" without reading Rust.
@@ -1442,6 +1442,97 @@ runtime.
   playground is ever served from a CDN, the served HTML must add an
   `integrity` attribute on the WASM `fetch()` call (per the
   `WebAssembly.compileStreaming` integrity-check spec).
+
+---
+
+## scope-a — KID-equality const-time audit (V1.15 — shipped)
+
+The verifier compares strings in two structurally distinct categories:
+*hashes* (32-byte blake3 outputs and their 64-char hex encodings) and
+*KIDs* (key identifiers — short, structured strings like
+`atlas-anchor:ws-prod-eu` or `atlas-witness:org:host`). Atlas's stated
+property is **byte-identical verification regardless of input shape**;
+to honour it, both categories must compare in time independent of the
+input's byte content.
+
+V1.5 onwards routed every *hash* compare through `crate::ct::ct_eq_str`
+(see `bundle_hash_byte_determinism_pin`, `signing_input_byte_determinism_pin`,
+and the chain-walking `previous_head ↔ chain_head_for(prev_batch)` link
+checks). V1.13 wave-C-2 routed the *witness-roster* lookup through the
+same helper (the highest-impact KID-compare site, where an attacker-
+controlled `witness_kid` lands on a pinned roster). V1.15 Welle A closes
+the last `==` on a wire-side KID: the V1.9 per-tenant-keys strict-mode
+check at `verify::verify_trace_with` previously compared
+`event.signature.kid` against `per_tenant_kid_for(workspace_id)` via raw
+byte-equality, and now routes through `ct_eq_str`.
+
+### What landed in V1.15 Welle A
+
+- **`verify::verify_trace_with` per-tenant strict-mode KID compare.** Raw
+  `if ev.signature.kid == expected_kid` → `if crate::ct::ct_eq_str(&ev.signature.kid, &expected_kid)`.
+  Inline anchor comment cross-references the const-time invariant.
+- **`crate::ct` module-doc upgrade.** The module documentation now
+  enumerates the six const-time-protected boundaries (bundle hash, event
+  hash, anchored hash, chain head/previous-head, per-tenant KID, witness
+  KID) plus three explicitly-not-covered cases (`BTreeMap`/`BTreeSet`
+  scope-local lookups, integer field equality, operator-facing
+  diagnostic Display paths) with the rationale for each exclusion.
+- **Source-level anti-drift pin.** New
+  `crates/atlas-trust-core/tests/const_time_kid_invariant.rs` audits the
+  source bytes of `verify.rs` and `witness.rs`, asserting that no
+  production-code line contains a forbidden raw-equality pattern
+  (`.kid ==`, `.kid.eq(`, `.kid.as_str() ==`, `expected_kid ==`,
+  `witness_kid ==`, `signature.kid ==`). Strips `#[cfg(test)] mod tests`
+  blocks before scanning so legitimate `assert_eq!(kid, …)` test
+  patterns don't false-positive. A future caller introducing a raw `==`
+  on a KID field in either file fails the test at the next CI run.
+
+### Trust property after V1.15 Welle A
+
+**No new trust property.** Welle A is consistency hardening: the
+const-time-equality invariant now extends across every wire-side KID
+compare reachable from the public verifier API. The leak window for
+`event.signature.kid` was theoretical — both `event.signature.kid` and
+`per_tenant_kid_for(workspace_id)` are wire-side strings present in the
+trace itself, so a successful timing attack would surface no new
+attacker information — but the consistency win means a future reviewer
+reading any `kid`-equality site sees the same `ct_eq_str` discipline.
+The byte-identical-determinism pins from V1.5 (signing-input + bundle
+hash) and the const-time-witness-roster invariant from V1.13 wave-C-2
+together with this Welle close the const-time-everywhere story for
+V1.x.
+
+### Residual risks after V1.15 Welle A
+
+- **`BTreeMap` / `BTreeSet` lookups within a single trace verification**
+  (e.g. `verified_kids.contains(&w.witness_kid)`,
+  `kid_counts.entry(w.witness_kid.as_str())`). These are scope-local
+  accumulators built from the trace itself; their contents are kids
+  already present in the same trace's batches. A timing leak from these
+  structures could only surface kids the attacker already provided —
+  no new information.
+- **Operator-facing Display paths** (e.g. `WitnessFailure::Display`).
+  These do not gate trust decisions; a leak is a leak of error-message
+  content, which is already visible to the operator running the
+  verifier.
+- **Future KID-compare sites in new modules.** The anti-drift test
+  audits only `verify.rs` and `witness.rs` today. A V1.16+ feature that
+  introduces a KID-compare site in a new module must extend the audit
+  list in `tests/const_time_kid_invariant.rs::FORBIDDEN`'s scope — there
+  is no automatic discovery. The `crate::ct` module-doc enumerates the
+  boundaries to make this discoverable; the test's per-file `assert_no_forbidden`
+  call list documents the audit scope by source.
+
+### What V1.15 Welle A does NOT cover
+
+- **Const-time integer compares.** Batch indices, threshold counts, and
+  similar numeric fields are compared with `==` and `<` as the data
+  type intends. Const-time compare is structurally not applicable; the
+  fields carry no secret-byte content.
+- **Cryptographic primitives.** `verifying_key.verify_strict(input, sig)`
+  internally performs constant-time scalar arithmetic per the
+  `ed25519-dalek` crate's contract; this is not the V1.15 audit's
+  scope.
 
 ---
 
