@@ -3,47 +3,66 @@
 
 //! atlas-witness — independent cosignature attestor over chain heads.
 //!
-//! Two subcommands for V1.13 Scope C wave 1:
+//! Subcommand surface:
 //!
-//!   * `gen-key` — generate a fresh Ed25519 keypair, write the secret
-//!     bytes (raw 32 bytes) and public key (hex) to disk. Operator
+//!   * `gen-key` (V1.13) — generate a fresh Ed25519 keypair, write the
+//!     secret bytes (raw 32 bytes) and public key (hex) to disk. Operator
 //!     pastes the hex pubkey into `ATLAS_WITNESS_V1_ROSTER` and bumps
 //!     the trust-core crate version (V1.7 boundary rule).
 //!
-//!   * `sign-chain-head` — sign a hex chain head with a stored secret,
-//!     print the resulting `WitnessSig` JSON to stdout. Caller appends
-//!     this to `AnchorBatch.witnesses` before shipping the trace.
+//!   * `sign-chain-head` (V1.13 + V1.14 Scope I) — sign a hex chain
+//!     head and print the resulting `WitnessSig` JSON to stdout. Caller
+//!     appends this to `AnchorBatch.witnesses` before shipping the
+//!     trace. Two backends:
+//!       - `--secret-file PATH` (file-backed) — V1.13 default, reads a
+//!         32-byte raw secret from disk.
+//!       - `--hsm` (HSM-backed) — V1.14 Scope I, dispatches to
+//!         [`atlas_witness::hsm::Pkcs11Witness`]. The witness HSM env
+//!         trio (`ATLAS_WITNESS_HSM_PKCS11_LIB`,
+//!         `ATLAS_WITNESS_HSM_SLOT`, `ATLAS_WITNESS_HSM_PIN_FILE`) MUST
+//!         be set; the binary refuses to start otherwise. Mutually
+//!         exclusive with `--secret-file`.
 //!
-//! Both subcommands are file-backed — HSM-backed witness signing is
-//! deferred to a later wave. The trait shape (`Witness`) is HSM-friendly
-//! so a future PKCS#11 implementation slots in alongside `Ed25519Witness`
-//! without a CLI surface change.
+//!   * `extract-pubkey-hex` (V1.14 Scope I) — extract the witness
+//!     public key from the HSM as a 64-char hex string. Used during
+//!     the operator commissioning ceremony (OPERATOR-RUNBOOK §11) to
+//!     surface the pubkey for pasting into `ATLAS_WITNESS_V1_ROSTER`
+//!     after `pkcs11-tool --keypairgen` places the keypair on the
+//!     token. HSM-only — no file-backed analogue (the file-backed
+//!     `gen-key` already prints the pubkey to disk).
 //!
 //! Operator-surface caveats:
 //!   * `gen-key` writes the secret as raw 32 bytes — apply `chmod 0400`
 //!     immediately and place on a host with restrictive ACLs (mirrors
-//!     OPERATOR-RUNBOOK §2 master-seed-file guidance). The runbook
-//!     ceremony is added in V1.13 Scope C wave 4 doc-sync.
+//!     OPERATOR-RUNBOOK §2 master-seed-file guidance). The witness's
+//!     own runbook section is §11 (V1.14 Scope I).
 //!   * Pubkey is hex (64 chars) so it can be pasted into the roster
 //!     constant directly without base64↔hex juggling.
+//!   * The HSM-backed path requires `--features hsm` at compile time;
+//!     a default-features build with `--hsm` falls through to the
+//!     stub `Pkcs11Witness` which fails closed with an `Unavailable:`
+//!     remediation message. The runbook calls out this build-time
+//!     gate alongside the env-trio check.
 
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{ArgGroup, Parser, Subcommand};
 use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
 use zeroize::Zeroizing;
 
+use atlas_witness::hsm::config::HsmWitnessConfig;
+use atlas_witness::hsm::Pkcs11Witness;
 use atlas_witness::{Ed25519Witness, Witness};
 
 #[derive(Parser)]
 #[command(
     name = "atlas-witness",
     version,
-    about = "Atlas Witness cosignature attestor (V1.13 Scope C wave 1)"
+    about = "Atlas Witness cosignature attestor (V1.13 Scope C + V1.14 Scope I HSM-backed)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -68,10 +87,30 @@ enum Command {
         pubkey_out: PathBuf,
     },
     /// Sign a chain head and print the resulting WitnessSig JSON to stdout.
+    #[command(group(
+        // Exactly one of `--secret-file` / `--hsm` MUST be set. clap
+        // enforces the mutual exclusion at parse time so the wrong
+        // combination surfaces as a CLI usage error before any
+        // signing path is touched. Operator-friendly: the help text
+        // lists both flags so it's obvious which one to add.
+        ArgGroup::new("backend")
+            .args(["secret_file", "hsm"])
+            .required(true)
+            .multiple(false)
+    ))]
     SignChainHead {
-        /// Path to the 32-byte raw secret key file.
+        /// Path to the 32-byte raw secret key file (V1.13 file-backed
+        /// backend). Mutually exclusive with `--hsm`.
         #[arg(long)]
-        secret_file: PathBuf,
+        secret_file: Option<PathBuf>,
+        /// Use the HSM-backed witness backend (V1.14 Scope I). Reads
+        /// the witness HSM env trio (`ATLAS_WITNESS_HSM_PKCS11_LIB`,
+        /// `ATLAS_WITNESS_HSM_SLOT`, `ATLAS_WITNESS_HSM_PIN_FILE`)
+        /// and resolves the keypair on the token by label
+        /// `atlas-witness-key-v1:<kid>`. Mutually exclusive with
+        /// `--secret-file`.
+        #[arg(long)]
+        hsm: bool,
         /// Witness kid — must match the entry the corresponding pubkey
         /// is registered under in `ATLAS_WITNESS_V1_ROSTER`.
         #[arg(long)]
@@ -80,6 +119,17 @@ enum Command {
         /// `chain_head_for(batch)` for the batch being witnessed.
         #[arg(long)]
         chain_head: String,
+    },
+    /// V1.14 Scope I — Extract the witness public key from the HSM as
+    /// a 64-char hex string. HSM-only; reads the witness HSM env trio.
+    /// Used during the operator commissioning ceremony
+    /// (OPERATOR-RUNBOOK §11) to surface the pubkey for pasting into
+    /// `ATLAS_WITNESS_V1_ROSTER`.
+    ExtractPubkeyHex {
+        /// Witness kid — resolves the public-key object by label
+        /// `atlas-witness-key-v1:<kid>` and reads its CKA_EC_POINT.
+        #[arg(long)]
+        kid: String,
     },
 }
 
@@ -95,12 +145,34 @@ fn main() -> ExitCode {
         },
         Command::SignChainHead {
             secret_file,
+            hsm,
             kid,
             chain_head,
-        } => match sign_chain_head(&secret_file, &kid, &chain_head) {
+        } => {
+            let result = if hsm {
+                sign_chain_head_via_hsm(&kid, &chain_head)
+            } else {
+                // `secret_file` is required by the clap ArgGroup when
+                // `--hsm` is unset, so `unwrap()` is safe here. Using
+                // `expect` over `unwrap` so a future ArgGroup change
+                // that drops the `required = true` constraint surfaces
+                // as a clear runtime panic at the seam, not a silent
+                // None-deref further down the call stack.
+                let secret = secret_file.expect("clap ArgGroup guarantees --secret-file present");
+                sign_chain_head(&secret, &kid, &chain_head)
+            };
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("atlas-witness sign-chain-head: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Command::ExtractPubkeyHex { kid } => match extract_pubkey_hex(&kid) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("atlas-witness sign-chain-head: {e}");
+                eprintln!("atlas-witness extract-pubkey-hex: {e}");
                 ExitCode::FAILURE
             }
         },
@@ -234,4 +306,58 @@ fn sign_chain_head(
         .map_err(|e| format!("serialise WitnessSig: {e}"))?;
     println!("{json}");
     Ok(())
+}
+
+/// V1.14 Scope I — HSM-backed sign path. Reads the env trio, opens
+/// the PKCS#11 module via [`Pkcs11Witness::open`], signs the chain
+/// head, and emits the resulting `WitnessSig` JSON to stdout.
+///
+/// Wire-shape and roster contract are identical to the file-backed
+/// path; the byte-equivalence integration test
+/// (`tests/hsm_witness_byte_equivalence.rs`) pins this load-bearing
+/// invariant.
+fn sign_chain_head_via_hsm(kid: &str, chain_head_hex: &str) -> Result<(), String> {
+    let cfg = load_hsm_config_from_env()?;
+    let witness = Pkcs11Witness::open(cfg, kid.to_string())
+        .map_err(|e| format!("open HSM-backed witness: {e}"))?;
+    let sig = witness
+        .sign_chain_head(chain_head_hex)
+        .map_err(|e| format!("sign-chain-head: {e}"))?;
+    let json = serde_json::to_string(&sig)
+        .map_err(|e| format!("serialise WitnessSig: {e}"))?;
+    println!("{json}");
+    Ok(())
+}
+
+/// V1.14 Scope I — extract the witness public key from the HSM as
+/// 64-char hex and print to stdout. The runbook calls this during
+/// commissioning, after `pkcs11-tool --keypairgen` has placed the
+/// keypair on the token: the operator captures the hex output, pastes
+/// it into `ATLAS_WITNESS_V1_ROSTER`, and bumps the trust-core crate
+/// version per OPERATOR-RUNBOOK §11.
+fn extract_pubkey_hex(kid: &str) -> Result<(), String> {
+    let cfg = load_hsm_config_from_env()?;
+    let hex_pubkey = Pkcs11Witness::extract_pubkey_hex(cfg, kid)
+        .map_err(|e| format!("extract-pubkey-hex: {e}"))?;
+    println!("{hex_pubkey}");
+    Ok(())
+}
+
+/// Read the witness HSM env trio into an `HsmWitnessConfig`. Refuses
+/// "trio not set" with a runbook-aware message because both
+/// HSM-mode CLI paths (`sign-chain-head --hsm` and
+/// `extract-pubkey-hex`) require the trio to function — silent
+/// fall-through to file-backed would hide a misconfigured deployment
+/// (the operator wanted HSM, but the wrong trio went down). Mirrors
+/// atlas-signer's "missing trio is a configuration error" stance.
+fn load_hsm_config_from_env() -> Result<HsmWitnessConfig, String> {
+    match HsmWitnessConfig::from_env(|name| std::env::var(name).ok())? {
+        Some(cfg) => Ok(cfg),
+        None => Err(
+            "HSM-mode requested but the witness HSM env trio is unset — set \
+             ATLAS_WITNESS_HSM_PKCS11_LIB, ATLAS_WITNESS_HSM_SLOT, and \
+             ATLAS_WITNESS_HSM_PIN_FILE (all three) per OPERATOR-RUNBOOK §11"
+                .to_string(),
+        ),
+    }
 }

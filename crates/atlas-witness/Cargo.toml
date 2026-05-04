@@ -43,3 +43,39 @@ rand_core = { workspace = true }
 # boundary (V1.11 footgun #20 dyn-safety pattern), and the binary uses
 # the same `Result<_, String>` shape. Adding thiserror back would only
 # be justified by introducing a structured error variant in the lib.
+
+# V1.14 Scope I — PKCS#11 v3.0 bindings for the HSM-backed witness.
+# Optional + feature-gated to mirror atlas-signer: the crate compiles
+# in any context (WASM verifier builds, doc-only CI, default lints),
+# and the stub `Pkcs11Witness` returns `String` errors at the trait
+# boundary when the feature is off. Workspace-pinned so atlas-signer
+# and atlas-witness share a single FFI ABI against the SoftHSM2 token
+# in the CI byte-equivalence lane (vendor-divergent bumps would
+# silently break that lane).
+#
+# Trust-domain note: even though atlas-signer and atlas-witness share
+# the cryptoki crate, they do NOT share PKCS#11 modules at runtime.
+# Each binary opens its own `Pkcs11` context, authenticates with its
+# own `ATLAS_*_HSM_PIN_FILE`, and operates on its own CKA_LABEL prefix
+# (`atlas-workspace-key-v1:` vs `atlas-witness-key-v1:`). The shared
+# library version is purely a build-time invariant; runtime isolation
+# is enforced by separate processes + separate slot/PIN trios.
+cryptoki = { workspace = true, optional = true }
+
+[features]
+# Default off so the crate compiles in any workspace context (mirrors
+# atlas-signer). Operators who want the HSM-backed witness path enable
+# the feature explicitly via `--features hsm`. Without it, the stub in
+# `src/hsm/mod.rs` (under `#[cfg(not(feature = "hsm"))]`) takes the
+# place of the real `Pkcs11Witness` and fails closed with a clear
+# remediation message at runtime.
+default = []
+
+# Enable the PKCS#11 HSM-backed witness backend. Pulls in cryptoki and
+# exposes the real `crate::hsm::pkcs11::Pkcs11Witness` impl.
+hsm = ["dep:cryptoki"]
+
+[dev-dependencies]
+# V1.14 Scope I — isolated SoftHSM2 token dirs + PIN files for the
+# byte-equivalence integration test. Mirrors atlas-signer's pattern.
+tempfile = "3"

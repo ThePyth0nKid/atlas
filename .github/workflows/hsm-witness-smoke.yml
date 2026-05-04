@@ -1,0 +1,327 @@
+# V1.14 Scope I — HSM-backed witness smoke lane (PR-promoted).
+#
+# Exercises the V1.14 atlas-witness HSM backend end-to-end in CI:
+#
+#   SoftHSM2 + ATLAS_WITNESS_HSM_* trio + --features hsm
+#   → atlas-witness::Pkcs11Witness
+#   → CKM_EC_EDWARDS_KEY_PAIR_GEN under atlas-witness-key-v1:<kid>
+#   → CKM_EDDSA(Ed25519) signing inside the token
+#   → byte-equivalence vs ed25519-dalek reference (load-bearing
+#     integration test)
+#   → CLI surface smoke (extract-pubkey-hex + sign-chain-head --hsm)
+#     that mirrors the OPERATOR-RUNBOOK §11 commissioning ceremony
+#
+# The integration test is the load-bearing artefact: it imports a
+# known seed into SoftHSM2, opens the resulting keypair via
+# Pkcs11Witness::open, and asserts that the HSM-produced WitnessSig
+# matches a software-Ed25519 reference signature byte-for-byte. The
+# CLI smoke is layered on top so the §11 commissioning ceremony's
+# user-visible commands (`atlas-witness extract-pubkey-hex`,
+# `atlas-witness sign-chain-head --hsm`) are also exercised against a
+# real SoftHSM2 token — the integration test owns its own keypair via
+# direct seed import, so the CLI smoke generates a separate keypair
+# under a distinct kid using `pkcs11-tool --keypairgen` (the exact
+# command the runbook prescribes).
+#
+# Trust-domain separation from the V1.10/V1.11 atlas-signer lanes:
+# this workflow uses the `ATLAS_WITNESS_HSM_*` env-var prefix (V1.14
+# Scope I), distinct from atlas-signer's `ATLAS_HSM_*`. A misconfigured
+# job that re-uses the signer prefix would skip the witness's HSM
+# detection and fall back to the file-backed witness, masking the
+# regression. The explicit prefix here is the load-bearing assertion
+# that the witness binary's env-var contract is wired correctly.
+#
+# Why a separate workflow file (rather than a job in
+# hsm-wave3-smoke.yml): the witness lane has a different paths filter
+# (it fires on `crates/atlas-witness/**` changes), exercises only the
+# witness binary (no MCP-server / TS toolchain), and uses a distinct
+# env-var prefix. Combining lanes would either over-trigger the
+# wave-3 smoke on witness-only PRs or under-trigger this lane on
+# signer-only PRs. Separate files keep each lane's trigger surface
+# minimal — same rationale as hsm-wave3-smoke.yml's split from
+# hsm-byte-equivalence.yml (V1.12 Scope B2).
+#
+# The PIN-fallback pattern, SHA pinning, paths filter, and
+# permissions block all mirror hsm-byte-equivalence.yml — see that
+# file's header for the rationale (V1.12 Scope B1).
+
+name: hsm-witness-smoke
+
+on:
+  # Manual re-run is preserved for ad-hoc verification + debugging
+  # (e.g. SoftHSM2 quirks surfacing on a non-HSM-touching PR, or
+  # post-merge sanity after a cryptoki bump).
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'crates/atlas-witness/**'
+      - 'crates/atlas-trust-core/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.github/workflows/hsm-witness-smoke.yml'
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - 'crates/atlas-witness/**'
+      - 'crates/atlas-trust-core/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - '.github/workflows/hsm-witness-smoke.yml'
+
+# Minimum permission set: this workflow only reads source and writes
+# nothing back to the repo. Same explicit `read` declaration as the
+# V1.12 Scope B1/B2 lanes for the same blast-radius rationale.
+permissions:
+  contents: read
+
+jobs:
+  witness-smoke:
+    runs-on: ubuntu-latest
+    env:
+      # Ephemeral CI-only token state. Distinct token label from the
+      # other HSM lanes so the three workflows can run in parallel
+      # without colliding on softhsm-tokens directory layout.
+      #
+      # PIN handling: defaults to a literal so fork PRs (which have no
+      # access to repository secrets) still run end-to-end. Repo-internal
+      # PRs and pushes can override via `secrets.SOFTHSM2_PIN` to
+      # exercise the secrets-injection path. The literal default
+      # ('1234' / '0000') matches the byte-equivalence and wave-3 lanes
+      # so an auditor can reproduce the full smoke locally with a
+      # single fresh tokendir.
+      SOFTHSM2_TOKEN_LABEL: atlas-witness-smoke-ci
+      SOFTHSM2_PIN: ${{ secrets.SOFTHSM2_PIN || '1234' }}
+      SOFTHSM2_SO_PIN: ${{ secrets.SOFTHSM2_SO_PIN || '0000' }}
+      # Witness kid for the CLI smoke step. The integration test uses
+      # its own kid (`byte-equiv-test-witness`) and cleans up after
+      # itself; this kid is reserved for the §11 runbook smoke.
+      CLI_SMOKE_WITNESS_KID: smoke-cli-witness-v1
+
+    steps:
+      # All `uses:` pinned to immutable SHAs (V1.12 Scope B1
+      # rationale). Bumping these requires a human-reviewed PR; the
+      # comment after each pin records the resolved tag/branch at
+      # the time of pinning.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install SoftHSM2 + opensc
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y softhsm2 opensc
+
+      - name: Initialise throwaway SoftHSM2 token
+        run: |
+          # Belt-and-suspenders: explicitly disable shell trace so a
+          # future edit accidentally adding `set -x` (or a CI debug
+          # toggle that flips `RUNNER_DEBUG=1`) doesn't echo the PIN
+          # into the run log. GitHub Actions auto-masks values
+          # sourced from `secrets.*`, but the fallback literal
+          # ('1234') is NOT masked, so the explicit `set +x` is the
+          # load-bearing guard for the fork-PR case. (Mirrors the
+          # rationale in hsm-byte-equivalence.yml — kept inline here
+          # so a future editor cannot remove `set +x` without seeing
+          # the why.)
+          #
+          # Orthogonal exposure (NOT addressed by `set +x`):
+          # `softhsm2-util --init-token --pin "${SOFTHSM2_PIN}" --so-pin
+          # "${SOFTHSM2_SO_PIN}"` below puts the PIN onto the process
+          # argv list, readable via `/proc/<pid>/cmdline` for the
+          # entire lifetime of the invocation; the window closes only
+          # when the one-shot process exits (structural bound, not
+          # time-based). See OPERATOR-RUNBOOK §2 for the production
+          # PIN-argv discussion (production deploys MUST use
+          # ATLAS_WITNESS_HSM_PIN_FILE, never argv). Acceptable here:
+          # single-tenant runner, throwaway literal PIN, exposure ends
+          # with the one-shot process exit.
+          set +x
+          mkdir -p "${RUNNER_TEMP}/softhsm-tokens"
+          cat > "${RUNNER_TEMP}/softhsm2.conf" <<EOF
+          directories.tokendir = ${RUNNER_TEMP}/softhsm-tokens
+          objectstore.backend = file
+          log.level = INFO
+          slots.removable = false
+          EOF
+          export SOFTHSM2_CONF="${RUNNER_TEMP}/softhsm2.conf"
+          softhsm2-util --init-token --free \
+            --label "${SOFTHSM2_TOKEN_LABEL}" \
+            --pin "${SOFTHSM2_PIN}" \
+            --so-pin "${SOFTHSM2_SO_PIN}"
+          # Capture the assigned slot id for the test runtime env.
+          # SoftHSM2 randomises the 32-bit slot id assigned on init
+          # to discourage hardcoding; --show-slots is the supported
+          # discovery path.
+          SLOT_ID=$(softhsm2-util --show-slots \
+            | awk '/^Slot [0-9]+/{slot=$2} /Label:[[:space:]]+'"${SOFTHSM2_TOKEN_LABEL}"'$/{print slot; exit}')
+          if [ -z "${SLOT_ID}" ]; then
+            echo "FATAL: could not resolve slot id for token ${SOFTHSM2_TOKEN_LABEL}"
+            softhsm2-util --show-slots
+            exit 1
+          fi
+          PIN_FILE="${RUNNER_TEMP}/atlas-witness-hsm.pin"
+          printf '%s' "${SOFTHSM2_PIN}" > "${PIN_FILE}"
+          chmod 0400 "${PIN_FILE}"
+          # Export the witness HSM trio + the integration-test runtime
+          # gate. The trio uses the V1.14 Scope I `ATLAS_WITNESS_HSM_*`
+          # prefix (NOT atlas-signer's `ATLAS_HSM_*`) — see workflow
+          # header for the trust-domain separation rationale.
+          {
+            echo "SOFTHSM2_CONF=${RUNNER_TEMP}/softhsm2.conf"
+            echo "ATLAS_WITNESS_HSM_PKCS11_LIB=/usr/lib/softhsm/libsofthsm2.so"
+            echo "ATLAS_WITNESS_HSM_SLOT=${SLOT_ID}"
+            echo "ATLAS_WITNESS_HSM_PIN_FILE=${PIN_FILE}"
+            echo "ATLAS_TEST_HSM_WITNESS_BYTE_EQUIV=1"
+          } >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-05-03
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+        with:
+          workspaces: . -> target
+
+      - name: cargo test (HSM-witness byte-equivalence)
+        # Single test binary, single test invocation — keeps the
+        # failure diagnostic isolated from the rest of `cargo test`.
+        # The test owns its own keypair lifecycle on the SoftHSM2
+        # token (import via direct seed bytes, byte-equiv assertion,
+        # cleanup via TokenKeyCleanup Drop). CI only provides the
+        # env trio + the runtime gate.
+        #
+        # `--test-threads=1` is mandatory: the test binary calls
+        # `Pkcs11::new` + `C_Initialize` for both the import phase
+        # (Phase A) and the witness-open phase (Phase B). PKCS#11's
+        # `C_Initialize` is process-global per v3.0 §5.4, and SoftHSM2
+        # returns `CKR_CRYPTOKI_ALREADY_INITIALIZED` if a second
+        # thread races a fresh init while the first holds the
+        # cryptoki session. Forcing serial test execution sidesteps
+        # the race without pulling `serial_test` into dev-deps —
+        # mirrors hsm-byte-equivalence.yml's signer-side rationale.
+        run: cargo test -p atlas-witness --features hsm --test hsm_witness_byte_equivalence -- --nocapture --test-threads=1
+
+      - name: Build atlas-witness (release, --features hsm)
+        # Release build for the CLI smoke step below. Mirrors the
+        # production deployment shape — operators commission the
+        # witness using the release binary, not a debug build.
+        run: cargo build --release -p atlas-witness --features hsm
+
+      - name: CLI smoke — generate keypair via pkcs11-tool, extract pubkey, sign chain head
+        # This step exercises the OPERATOR-RUNBOOK §11 commissioning
+        # ceremony's user-visible CLI surface end-to-end. The
+        # integration test above proves the trait-level signing path;
+        # this step proves that the CLI commands `extract-pubkey-hex`
+        # and `sign-chain-head --hsm` work against a real SoftHSM2
+        # token using the runbook-prescribed `pkcs11-tool --keypairgen`
+        # provisioning shape.
+        #
+        # The kid here is distinct from the integration test's kid
+        # (`byte-equiv-test-witness`) so the keypairs do not collide
+        # on the shared token. The integration test runs first and
+        # cleans up its own objects via TokenKeyCleanup Drop, so this
+        # step starts from a clean label namespace under the
+        # `atlas-witness-key-v1:` prefix.
+        run: |
+          set +x
+          set -euo pipefail
+          # Step 1 — generate the witness keypair on the token using
+          # the same pkcs11-tool invocation OPERATOR-RUNBOOK §11
+          # documents. SoftHSM2 defaults Sensitive=true /
+          # Extractable=false / Derive=false on EC private keys; the
+          # runbook reminds operators to verify these via attribute
+          # readback on production HSMs.
+          export USER_PIN="${SOFTHSM2_PIN}"
+          pkcs11-tool --module "${ATLAS_WITNESS_HSM_PKCS11_LIB}" \
+                      --slot "${ATLAS_WITNESS_HSM_SLOT}" \
+                      --login --pin-source env:USER_PIN \
+                      --keypairgen \
+                      --key-type EC:edwards25519 \
+                      --label "atlas-witness-key-v1:${CLI_SMOKE_WITNESS_KID}" \
+                      --usage-sign
+          unset USER_PIN
+
+          # Step 2 — extract the witness pubkey hex via the V1.14
+          # Scope I CLI surface. Validates that the trio + label
+          # resolution + CKA_EC_POINT unwrap path all work
+          # end-to-end. Output must be exactly 64 hex chars (32
+          # bytes * 2 hex digits per byte).
+          PUBKEY_HEX=$(./target/release/atlas-witness extract-pubkey-hex \
+                       --kid "${CLI_SMOKE_WITNESS_KID}")
+          echo "extracted pubkey: ${PUBKEY_HEX}"
+          if [ "${#PUBKEY_HEX}" -ne 64 ]; then
+            echo "FATAL: extract-pubkey-hex output is ${#PUBKEY_HEX} chars; expected 64"
+            exit 1
+          fi
+          # Sanity-check that every char is a hex digit. A non-hex
+          # output would indicate a regression in the encoding path.
+          if ! [[ "${PUBKEY_HEX}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "FATAL: extract-pubkey-hex output is not lowercase hex: ${PUBKEY_HEX}"
+            exit 1
+          fi
+
+          # Step 3 — sign a chain head via the HSM-backed witness.
+          # The chain head input must be 64 hex chars (32-byte
+          # canonical form per atlas_trust_core::decode_chain_head).
+          # A successful sign emits a JSON line with witness_kid +
+          # sig fields on stdout; non-zero exit + a String error
+          # prefix indicates failure (Locked / Unavailable /
+          # SigningFailed cleaving rule per the witness error
+          # module).
+          CHAIN_HEAD_HEX="$(printf '%064d' 0)"
+          SIGN_OUTPUT=$(./target/release/atlas-witness sign-chain-head \
+                        --hsm \
+                        --kid "${CLI_SMOKE_WITNESS_KID}" \
+                        --chain-head "${CHAIN_HEAD_HEX}")
+          echo "sign-chain-head output: ${SIGN_OUTPUT}"
+          if [ -z "${SIGN_OUTPUT}" ]; then
+            echo "FATAL: sign-chain-head emitted empty output"
+            exit 1
+          fi
+          # The output must contain the witness_kid we signed under
+          # — defends against a regression where the binary silently
+          # signs under a different kid.
+          if ! grep -q "${CLI_SMOKE_WITNESS_KID}" <<< "${SIGN_OUTPUT}"; then
+            echo "FATAL: sign-chain-head output does not contain the configured kid"
+            exit 1
+          fi
+
+          # Step 4 — clean up the smoke keypair. Symmetrical to the
+          # integration test's TokenKeyCleanup. Uses pkcs11-tool's
+          # --delete-object against both halves under the canonical
+          # label. Failure here is non-fatal because the runner is
+          # ephemeral, but a successful cleanup keeps the token
+          # state honest if a future edit shares the runner across
+          # jobs.
+          export USER_PIN="${SOFTHSM2_PIN}"
+          pkcs11-tool --module "${ATLAS_WITNESS_HSM_PKCS11_LIB}" \
+                      --slot "${ATLAS_WITNESS_HSM_SLOT}" \
+                      --login --pin-source env:USER_PIN \
+                      --delete-object --type privkey \
+                      --label "atlas-witness-key-v1:${CLI_SMOKE_WITNESS_KID}" \
+                      || echo "warning: privkey cleanup failed (non-fatal on ephemeral runner)"
+          pkcs11-tool --module "${ATLAS_WITNESS_HSM_PKCS11_LIB}" \
+                      --slot "${ATLAS_WITNESS_HSM_SLOT}" \
+                      --login --pin-source env:USER_PIN \
+                      --delete-object --type pubkey \
+                      --label "atlas-witness-key-v1:${CLI_SMOKE_WITNESS_KID}" \
+                      || echo "warning: pubkey cleanup failed (non-fatal on ephemeral runner)"
+          unset USER_PIN
+
+      - name: cargo test (HSM-witness operational sanity — gate cleared)
+        # Re-run with the runtime gate cleared to confirm the SKIP
+        # path is exercised cleanly. Defends against a future change
+        # that accidentally makes the HSM-dependent tests run
+        # unconditionally on dev machines without SoftHSM2. Mirrors
+        # the byte-equivalence lane's "gate cleared" sanity step.
+        env:
+          ATLAS_TEST_HSM_WITNESS_BYTE_EQUIV: ''
+        run: cargo test -p atlas-witness --features hsm --test hsm_witness_byte_equivalence -- --nocapture --test-threads=1
+
+      - name: cargo test (default features — feature gate sanity)
+        # Final sanity: with the `hsm` feature OFF, the entire
+        # witness crate must still build and test cleanly. A
+        # regression here would break deployments that opt out of
+        # the HSM backend (the V1.14 default) — they should compile
+        # without cryptoki in the dependency closure.
+        run: cargo test -p atlas-witness

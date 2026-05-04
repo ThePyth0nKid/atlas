@@ -29,6 +29,13 @@ pub use atlas_trust_core::WitnessSig;
 mod ed25519_witness;
 pub use ed25519_witness::Ed25519Witness;
 
+// V1.14 Scope I — HSM-backed witness module. The module is always
+// compiled (its `config` submodule is feature-agnostic so the CLI
+// can read the env trio before deciding which backend to use); the
+// `Pkcs11Witness` impl behind it is real with `--features hsm` and
+// stubbed without (returning `Unavailable:` from every operation).
+pub mod hsm;
+
 /// Witness trait: produces a [`WitnessSig`] over a given chain head.
 ///
 /// Implementations sign with their own Ed25519 private key; the public

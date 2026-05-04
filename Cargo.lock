@@ -165,10 +165,12 @@ dependencies = [
  "atlas-trust-core",
  "base64",
  "clap",
+ "cryptoki",
  "ed25519-dalek",
  "hex",
  "rand_core 0.6.4",
  "serde_json",
+ "tempfile",
  "zeroize",
 ]
 

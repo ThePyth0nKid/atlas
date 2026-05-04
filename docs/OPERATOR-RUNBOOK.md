@@ -1212,7 +1212,10 @@ For `sigstore-rekor-nightly` failures:
 | Rotate anchor chain | `atlas-signer rotate-chain --confirm <workspace>` | no | yes (operator-side) |
 | Derive workspace pubkey for inspection | `atlas-signer derive-pubkey --workspace <ws>` | yes | n/a (read-only) |
 | Production-gate enforcement (V1.12+) | configure the HSM trio (§2) — V1.9 `ATLAS_PRODUCTION=1` removed | n/a | n/a |
-| Witness commissioning (V1.13 wave-C-2 — see §10) | edit `ATLAS_WITNESS_V1_ROSTER`, rebuild verifier, deploy with `--require-witness <N>` | no (commissioning is a code-side change) | n/a (verifier-side) |
+| Witness commissioning, verifier side (V1.13 wave-C-2 — see §10) | edit `ATLAS_WITNESS_V1_ROSTER`, rebuild verifier, deploy with `--require-witness <N>` | no (commissioning is a code-side change) | n/a (verifier-side) |
+| HSM-backed witness keypair generation (V1.14 Scope I — see §11) | `pkcs11-tool ... --keypairgen --key-type EC:edwards25519 --label atlas-witness-key-v1:<kid> --usage-sign` | no (re-gen replaces) | n/a (key lives in HSM) |
+| Witness pubkey extract (V1.14 Scope I — see §11) | `atlas-witness extract-pubkey-hex --kid <witness_kid>` | yes (read-only) | n/a (HSM-side) |
+| HSM-backed witness signing (V1.14 Scope I — see §11) | `atlas-witness sign-chain-head --hsm --kid <witness_kid> --chain-head <hex>` | yes (signing is functional) | n/a (HSM-side) |
 
 See [ARCHITECTURE.md §7.3](ARCHITECTURE.md) (V1.9 per-tenant key trust
 model), [§7.4](ARCHITECTURE.md) (V1.10 master-seed gate + wave-2
@@ -1232,6 +1235,17 @@ witnesses against a *pinned, source-controlled roster*
 Wave-C-1 wired the lenient default (any presented witness surfaces
 in evidence; failures do not block); wave-C-2 promotes this to
 operationally load-bearing via the strict-mode threshold flag.
+
+> **Sister procedure §11.** This section is the **verifier-side**
+> half of witness commissioning — pinning a witness's pubkey into
+> the trust-core roster. The **witness-side** half (generating the
+> keypair on the signer/HSM, extracting the pubkey hex) is §11
+> for HSM-backed deployments or follows the V1.13 file-backed
+> seed-file shape for software-backed deployments. For an HSM-
+> backed witness, run §11 first (witness operator generates the
+> keypair, extracts the hex), then this section (verifier
+> maintainer pins the hex). The two sections form a single
+> ceremony split across two trust domains.
 
 ### Why commissioning is a code-side change, not a config knob
 
@@ -1269,6 +1283,15 @@ should be operator-deliberate, not casual.
 #    storage on their end is the witness's responsibility, not
 #    Atlas's). They send you ONLY the 32-byte raw pubkey.
 #    NEVER accept a private key — defeats the independence property.
+#
+#    For an HSM-backed witness operated in-house (V1.14 Scope I),
+#    §11 IS that trusted generation process — run it first, capture
+#    the `extract-pubkey-hex` output, then proceed with this
+#    section against the captured hex. For an external witness
+#    counterparty, ask them which process they used; the
+#    independence property holds regardless of substrate (file,
+#    HSM, smart card) provided the private half never leaves their
+#    control.
 
 # 1. Choose a kid that uniquely names the witness in
 #    auditor-readable form. Suggested format:
@@ -1379,3 +1402,455 @@ batch in the chain already attributed verification to that kid)`.
 
 `require_witness_threshold = N` rejects any trace whose chain
 yields `verified < N`. `N = 0` is the wave-C-1 lenient default.
+
+---
+
+## 11. HSM-backed witness commissioning ceremony (V1.14 Scope I)
+
+V1.13 wave-C wired the witness signing path against a *file-backed*
+secret (a 32-byte Ed25519 seed at `--secret-file <path>`). V1.14
+Scope I closes the residual exposure that the witness's signing
+scalar transits the witness binary's address space on every
+`sign-chain-head` call by introducing an HSM-backed witness backend:
+the Ed25519 private scalar lives inside the PKCS#11 token with
+`Sensitive=true`, `Extractable=false`, `Derive=false`, and signing
+routes through `CKM_EDDSA(Ed25519)`. For an HSM-backed witness
+deployment, no witness signing scalar ever reaches Atlas address
+space — even transiently.
+
+This ceremony is the **sister procedure** to §10 (the verifier-side
+roster pinning ceremony). §11 generates the keypair on the HSM and
+extracts the public-key bytes; §10 takes those bytes and pins them
+into `ATLAS_WITNESS_V1_ROSTER` in the verifier's trust-core source.
+**Both ceremonies must complete before a new HSM-backed witness can
+contribute to a strict-mode quorum.** Run §11 first (witness side),
+hand the extracted hex to the roster maintainer, then run §10
+(verifier side). Skipping the §10 step yields a witness whose
+signatures land in evidence but never count against `verified` — a
+silent disconnect that does not surface until an operator wonders
+why threshold is unmet.
+
+### Why a code-side procedure for the witness side too
+
+The witness binary's HSM backend is opt-in per the env trio
+(`ATLAS_WITNESS_HSM_PKCS11_LIB`, `ATLAS_WITNESS_HSM_SLOT`,
+`ATLAS_WITNESS_HSM_PIN_FILE`). The opt-in is a positive assertion —
+unset trio falls back to the file-backed `--secret-file` path,
+partial trio refuses to start. Same operator-deliberate cadence as
+§3's wave-3 opt-in, for the same reason: silent fallback masks
+typos.
+
+The witness binary does NOT auto-generate a keypair on first use
+(structural difference vs §3 wave-3, which generates per-workspace
+keypairs lazily on first `derive-pubkey` call). The witness's
+`Pkcs11Witness::open` only **resolves** an existing keypair by
+label; missing keypair fails with `SigningFailed: no PKCS#11
+private-key object with CKA_LABEL=...` and a pointer back to this
+section. This is the load-bearing trust property — a witness that
+auto-generated keys could be made to sign on a fresh, unrostered
+keypair and silently bypass the roster contract. Generation is
+therefore an operator action (this section), not a runtime
+side-effect.
+
+### Trust-domain separation from atlas-signer
+
+The witness binary and signer binary use **distinct env-var
+prefixes**: `ATLAS_WITNESS_HSM_*` vs `ATLAS_HSM_*`. An operator who
+accidentally re-uses `ATLAS_HSM_*` for the witness binary gets a
+clean "trio not set" SKIP and falls back to the file-backed witness
+— rather than a surprise authentication against the signer's HSM
+token under the witness's logical identity. Likewise, the on-token
+label prefix is distinct: `atlas-witness-key-v1:` vs the signer's
+`atlas-workspace-key-v1:`. A misconfigured deployment that points
+both binaries at the same slot still cannot cross-resolve keys — the
+label namespaces are disjoint.
+
+Operationally, the recommendation is **separate slots per
+trust-domain**: one slot for atlas-signer's master-seed + per-workspace
+keys, another slot for the witness keypair. The label-prefix
+separation is defence-in-depth on top of the slot separation, not a
+substitute for it.
+
+### What gets generated
+
+A single Ed25519 keypair under the label
+`atlas-witness-key-v1:<witness_kid>`. Both halves carry
+`CKA_ID = CKA_LABEL` so PKCS#11 §10.1.2's id-pairing rule binds
+them. The label prefix is fixed in code at
+[`WITNESS_LABEL_PREFIX`](../crates/atlas-witness/src/hsm/config.rs).
+
+| Object | Attribute | Value | Why |
+|---|---|---|---|
+| **public** | `CKA_CLASS` | `CKO_PUBLIC_KEY` | verify-only half, extracted for roster |
+| **public** | `CKA_KEY_TYPE` | `CKK_EC_EDWARDS` | Ed25519 |
+| **public** | `CKA_TOKEN` | `true` | persists across sessions |
+| **public** | `CKA_PRIVATE` | `false` | pubkey is public material |
+| **public** | `CKA_VERIFY` | `true` | enables `C_Verify` for self-test paths |
+| **public** | `CKA_EC_PARAMS` | Ed25519 OID | `1.3.101.112` (RFC 8410) |
+| **public** | `CKA_LABEL` | `atlas-witness-key-v1:<kid>` | loader lookup |
+| **public** | `CKA_ID` | same bytes as label | pairs with private half |
+| **private** | `CKA_CLASS` | `CKO_PRIVATE_KEY` | the sealed scalar |
+| **private** | `CKA_KEY_TYPE` | `CKK_EC_EDWARDS` | Ed25519 |
+| **private** | `CKA_TOKEN` | `true` | persists across sessions |
+| **private** | `CKA_PRIVATE` | `true` | requires authenticated session |
+| **private** | `CKA_SIGN` | `true` | enables `C_Sign` under `CKM_EDDSA` |
+| **private** | `CKA_SENSITIVE` | `true` | refuse plaintext export |
+| **private** | `CKA_EXTRACTABLE` | `false` | scalar never leaves HSM |
+| **private** | `CKA_DERIVE` | `false` | blocks `C_DeriveKey` indirect-leak path |
+| **private** | `CKA_LABEL` | `atlas-witness-key-v1:<kid>` | loader lookup |
+| **private** | `CKA_ID` | same bytes as label | pairs with public half |
+
+The `CKA_DERIVE=false` choice mirrors §3 wave-3 — defence-in-depth
+against an HSM default that allows a `Sensitive=true,
+Extractable=false` private key to serve as input to `C_DeriveKey`
+whose *output* may be exportable. Pinning `false` slams that door
+for the witness scalar too.
+
+### Procedure (SoftHSM2 example)
+
+The §11 ceremony has two phases: keypair generation (one-shot per
+witness commissioning) and pubkey extraction (hand-off step that
+feeds §10's roster pin). The operator drives generation via
+`pkcs11-tool --keypairgen` directly — atlas-witness does NOT
+auto-generate (per "Why a code-side procedure" above).
+
+SoftHSM2 is the open-source PKCS#11 implementation used in CI;
+production HSMs (Thales Luna, AWS CloudHSM, YubiHSM2, Nitrokey HSM 2)
+support the same `pkcs11-tool` flow with vendor-specific module
+paths.
+
+**Operator caution before you start.** Same handling as §2 / §3:
+PINs read from a secrets manager into shell env vars, never pasted
+literally on the command line, no shell history. Re-read §2's
+"Operator caution before you start" block if it has been a while —
+the threat surface (`/proc/<pid>/cmdline`, shell history,
+session-recording tools) is identical here.
+
+**Pre-flight assumption.** No prior ceremony is required —
+§11 is independent of §2 and §3 (the witness binary is a separate
+process from atlas-signer with its own trust domain). Operators can
+provision a witness slot on a fresh token, or share a token with the
+signer at a different slot. The slot used here MUST NOT be the same
+slot that holds atlas-signer's master seed or per-workspace keys —
+the label-prefix split prevents accidental cross-resolution but
+production hygiene wants the slot split too.
+
+> **STOP — irreversible decision.** Before you generate the keypair,
+> decide single-token vs. multi-token. Each token's hardware entropy
+> generates an independent keypair, so two tokens cannot agree on
+> the same witness pubkey. **Single-token** = accept total loss of
+> the witness key on token failure (§10 rotation required to
+> commission a replacement). **Multi-token shared-witness** = NOT
+> supported (matches §3 wave-3's "generate inside the HSM" model;
+> the file-backed witness via `--secret-file` is the path for
+> deployments needing seed redundancy across substrates). Once the
+> keypair is generated, reversing this decision requires running
+> the rotation procedure below.
+
+```bash
+# 0. Pre-flight: install SoftHSM2 + opensc (provides pkcs11-tool).
+#    On Debian/Ubuntu: apt-get install softhsm2 opensc
+#    On Fedora:        dnf install softhsm opensc
+
+# 0a. Tighten the umask BEFORE writing any file. Same rationale as
+#     §2 step 0a — guarantees subsequent file creates are mode 0600
+#     across libc variants, no chmod race window.
+umask 077
+
+# 0b. Pull the SO PIN and user PIN from your secrets manager. Same
+#     handling as §2 step 0b — env vars, never argv-literal PINs.
+SO_PIN="$(your-secrets-manager get atlas/witness-softhsm/so-pin)"
+USER_PIN="$(your-secrets-manager get atlas/witness-softhsm/user-pin)"
+
+# 1. Initialise a token in slot N for the witness. Use a slot
+#    DIFFERENT from any atlas-signer slot. The label here is
+#    operator-chosen and not parsed by atlas-witness — it identifies
+#    the token to your operations team, not to the binary.
+#
+#    Same /proc/<pid>/cmdline caveat as §2 step 1: softhsm2-util
+#    reads PINs from argv. The exposure window is bounded to this
+#    one-shot init step; the pkcs11-tool keypairgen in step 2 reads
+#    the PIN via --pin-source env: and is not affected.
+softhsm2-util --init-token --slot 0 \
+              --label atlas-witness-prod \
+              --so-pin "${SO_PIN}" \
+              --pin    "${USER_PIN}"
+
+# 2. Generate the witness Ed25519 keypair under the canonical label.
+#    The label is the load-bearing on-token name —
+#    atlas-witness::Pkcs11Witness::open looks up this exact bytes
+#    sequence via C_FindObjects on (CKA_CLASS, CKA_KEY_TYPE,
+#    CKA_LABEL). Choose the witness_kid carefully:
+#      * It MUST match the kid pinned in §10's roster commit
+#        (auditors compare these byte-for-byte across the witness
+#        deploy and the verifier deploy).
+#      * Suggested format: "witness-<org>-<purpose>-<rotation-counter>"
+#        (same convention as §10). Example:
+#        "witness-acme-sec-eu-2026-q2".
+#      * Length <= MAX_WITNESS_KID_LEN (256 bytes).
+#      * MUST NOT contain ':' (parsed as the label-prefix delimiter
+#        — the witness validator rejects kids containing ':' at
+#        Pkcs11Witness::open time).
+WITNESS_KID="witness-acme-sec-eu-2026-q2"
+
+#    The `--key-type EC:edwards25519` flag selects
+#    CKM_EC_EDWARDS_KEY_PAIR_GEN producing a CKK_EC_EDWARDS keypair.
+#    `--usage-sign` sets CKA_SIGN=true on the private half. SoftHSM2
+#    defaults Sensitive=true / Extractable=false / Derive=false on
+#    EC private keys; production HSMs may differ. ALWAYS run the
+#    Stage 2 attribute readback below to confirm — a vendor that
+#    defaults Derive=true on the private half opens the indirect-
+#    leak path and the keypair MUST be regenerated with explicit
+#    attribute overrides.
+pkcs11-tool --module /usr/lib/softhsm/libsofthsm2.so \
+            --slot 0 \
+            --login --pin-source env:USER_PIN \
+            --keypairgen \
+            --key-type EC:edwards25519 \
+            --label "atlas-witness-key-v1:${WITNESS_KID}" \
+            --usage-sign
+
+# 3. Stage the user PIN as a 0400 file for atlas-witness. Same
+#    install -m 0400 / atomic-create pattern as §2 step 5. Note the
+#    distinct path namespace — separate from
+#    /var/run/atlas/hsm.pin which atlas-signer owns.
+PIN_FILE=/var/run/atlas/witness-hsm.pin
+install -m 0400 -o atlas -g atlas /dev/stdin "${PIN_FILE}" \
+    < <(printf '%s' "${USER_PIN}")
+
+# 3a. Wipe the in-memory PINs from this shell now that the file is
+#     on disk.
+unset SO_PIN USER_PIN
+
+# 4. Configure the witness HSM trio. Note the prefix —
+#    ATLAS_WITNESS_HSM_*, NOT ATLAS_HSM_*. This is the structural
+#    separation between witness and signer trust domains; an
+#    operator who re-uses the signer's prefix gets a "trio not set"
+#    SKIP from the witness binary and accidentally falls back to
+#    the file-backed witness, NOT an authentication against the
+#    signer's token under the witness's identity.
+export ATLAS_WITNESS_HSM_PKCS11_LIB=/usr/lib/softhsm/libsofthsm2.so
+export ATLAS_WITNESS_HSM_SLOT=0
+export ATLAS_WITNESS_HSM_PIN_FILE="${PIN_FILE}"
+
+# 5. Extract the witness public-key bytes. atlas-witness reads the
+#    paired CKO_PUBLIC_KEY object's CKA_EC_POINT, unwraps the
+#    PKCS#11 v3.0 §10.10 DER OCTET STRING wrapper (or accepts a raw
+#    32-byte form for vendors that deviate), and prints the hex
+#    representation on stdout. Capture this value — it is the input
+#    to §10 step 2 (roster pinning).
+WITNESS_PUBKEY_HEX="$(atlas-witness extract-pubkey-hex --kid "${WITNESS_KID}")"
+echo "${WITNESS_PUBKEY_HEX}"
+# Expected: 64 hex chars (32-byte raw Ed25519 pubkey).
+
+# 6. Hand the (witness_kid, pubkey hex) pair to the roster
+#    maintainer OUT-OF-BAND. Run §10 (verifier-side commissioning)
+#    against this pair, get the roster commit reviewed and merged,
+#    rebuild and redeploy every verifier before raising
+#    --require-witness <N>. UNTIL §10 is complete, the witness's
+#    signatures land in evidence as "kid not in pinned roster" and
+#    do not count toward the threshold — by design, but cleanly
+#    unobservable as a quorum-met state.
+
+# 7. Smoke-test the witness signing path. The chain head input must
+#    be a 64-char hex string (32-byte chain head), matching the
+#    canonical decoding in atlas_trust_core::decode_chain_head.
+#    A successful sign emits a JSON line with witness_kid + sig
+#    fields on stdout. Failure prints the cleaving String prefix
+#    (Locked / Unavailable / SigningFailed) per the witness error
+#    rules.
+atlas-witness sign-chain-head \
+    --hsm \
+    --kid "${WITNESS_KID}" \
+    --chain-head "0000000000000000000000000000000000000000000000000000000000000000"
+```
+
+### Verifying the keys
+
+The verification has **four** stages, mirroring §3 wave-3 (presence,
+attribute readback, sign smoke) and adding a hand-off check:
+
+```bash
+# Stage 1 — presence. Should show one pubkey object AND one
+# private-key object, both under
+# atlas-witness-key-v1:<witness_kid>.
+pkcs11-tool --module "${ATLAS_WITNESS_HSM_PKCS11_LIB}" \
+            --slot "${ATLAS_WITNESS_HSM_SLOT}" \
+            --login --pin-source "file:${ATLAS_WITNESS_HSM_PIN_FILE}" \
+            --list-objects
+
+# Stage 2 — attribute readback. For the private-key object, the
+# default --list-objects output prints the security attributes.
+# Confirm all of the following appear:
+#
+#   Expected attributes for `atlas-witness-key-v1:<kid>` (private):
+#     Access:     sensitive, always sensitive, never extractable
+#                 ╰──┬───────╯  ╰─────┬──────╯  ╰──────┬─────────╯
+#                    │                │                │
+#                    │                │                └─ CKA_EXTRACTABLE: no
+#                    │                └─ historical guarantee
+#                    └─ CKA_SENSITIVE: yes
+#     Usage:      sign
+#                 └─ CKA_SIGN: yes (CKA_DERIVE deliberately absent)
+#
+# A vendor whose pkcs11-tool emits CKA_DERIVE=true for the private
+# key MUST be investigated — a production HSM defaulting Derive=true
+# opens the indirect-leak path via C_DeriveKey. Re-run step 2 of
+# the procedure with explicit `--attribute CKA_DERIVE:false` (newer
+# pkcs11-tool ≥ 0.21) or use the vendor's attribute-set tool to
+# clear CKA_DERIVE before proceeding.
+
+# Stage 3 — sign smoke. Verify atlas-witness can produce a witness
+# signature under the HSM-resident key. The cli echoes the sig as
+# JSON; non-zero exit + a String error prefix indicates failure.
+atlas-witness sign-chain-head \
+    --hsm \
+    --kid "${WITNESS_KID}" \
+    --chain-head "$(printf '%064d' 0)"
+# Expected (success): one JSON line on stdout with witness_kid and
+# sig fields, exit 0.
+# Expected (failure): "SigningFailed: ..." on stderr, exit 1
+# (atlas-witness uses ExitCode::FAILURE for all error paths; a
+# distinct code-2 lane is reserved for future use).
+
+# Stage 4 — extract round-trip. Re-extract the pubkey and confirm
+# it matches the value handed off to §10. A divergence here would
+# indicate the on-token public object was destroyed or altered
+# between commissioning and verification — investigate before
+# trusting the deployment.
+atlas-witness extract-pubkey-hex --kid "${WITNESS_KID}"
+# Expected: same 64-char hex captured at procedure step 5.
+```
+
+### Backup, recovery, rotation
+
+- **Backup.** The witness keypair is generated with hardware
+  entropy and held with `Extractable=false`; PKCS#11 has no portable
+  export format for the private half. Operators wanting cross-token
+  redundancy must provision multiple tokens and run §11 step 2
+  against EACH token at the same time — but each token will produce
+  a *different* keypair (different entropy → different scalar →
+  different pubkey). The deployment must therefore choose one of:
+    - **Single-token witness** — accept that token loss invalidates
+      the witness identity. Recovery requires the rotation procedure
+      below + a fresh §10 roster commit pinning the new pubkey.
+    - **Multi-token witness farm with distinct kids** — each token
+      runs as an independently-rostered witness
+      (`witness-<org>-<purpose>-<token-id>-<rotation-counter>`).
+      Threshold N at the verifier counts each token's
+      cosignature once. This is the operationally sane redundancy
+      path under HSM-backed witnessing — no shared scalar, M-of-N
+      compromise resistance scales linearly with token count.
+    - **File-backed witness** — for deployments needing the
+      simpler "same scalar across substrates" property, stay on
+      the V1.13 `--secret-file` path. The trade-off is the
+      memory-disclosure exposure that V1.14 closes.
+- **Recovery from token loss.** Equivalent to "witness key
+  compromise" — the rostered pubkey is no longer reachable, so the
+  witness drops out of the quorum. Mitigation: lower
+  `--require-witness <N>` at the verifier to (current quorum -
+  lost-witness count) until a replacement is commissioned. If the
+  remaining quorum cannot meet the configured threshold, every
+  trace rejects until §11 + §10 complete for a replacement.
+- **Rotation.** Generate fresh keypair by destroying the existing
+  pair (`pkcs11-tool --delete-object` against both halves under
+  `atlas-witness-key-v1:<old-kid>`) and re-running §11 step 2 with
+  an *incremented* witness_kid (the rotation-counter trailer in
+  the convention). Then run §10 against the new (kid, pubkey) pair
+  — the old roster entry is removed in the same commit so the old
+  kid no longer counts. Schedule rotations far apart — every
+  rotation invalidates the prior witness identity and requires
+  coordinated verifier rebuild + redeploy.
+
+### Threat model — what HSM-witness sealing does and does not protect
+
+**Does protect (closes V1.13's witness-scalar memory exposure):**
+
+- Memory-disclosure attacks on the witness host (heap dumps, swap,
+  core dumps, debugger attachments) cannot exfiltrate the witness
+  Ed25519 signing scalar. Signing runs **inside** the HSM via
+  `CKM_EDDSA`; only the 64-byte signature exits the device. The
+  scalar never enters atlas-witness address space — not even in a
+  `Zeroizing` buffer (the V1.13 `--secret-file` path's residual).
+- Filesystem-level snapshot of the witness host does not contain
+  the witness scalar — it lives only on the HSM. The PIN file does
+  sit on the filesystem; same operational controls as §2's PIN-file
+  guidance apply (mode 0400, tmpfs-backed, secrets-manager source
+  of truth, rotate on suspected disclosure).
+- Source-code disclosure does not yield the witness scalar. The
+  V1.13 `--secret-file` path required the operator to keep the
+  raw 32-byte seed file out of the source repo and out of process
+  surfaces; V1.14 HSM-backed mode removes the host-side scalar
+  artefact entirely.
+- Indirect leak via `C_DeriveKey` is blocked by `CKA_DERIVE=false`
+  on the private key (defence-in-depth against a sealed key
+  serving as base material to a derivation whose output may be
+  exportable).
+
+**Does not protect (same operational risks as §3 wave-3):**
+
+- HSM physical compromise. An attacker with physical possession of
+  the witness token AND the user PIN can call `C_Sign` against the
+  witness key for the lifetime of that PIN. Mitigation matches §2:
+  PIN file in tmpfs, SO PIN in a separate secret manager, rotate
+  the PIN if exposure is suspected.
+- Malicious code running inside the witness process. The PKCS#11
+  session is held open for the lifetime of the binary; an attacker
+  who achieves code execution **inside** atlas-witness can call
+  `Pkcs11Witness::sign_chain_head` arbitrarily during that
+  session's lifetime, signing whatever chain head they like.
+  Mitigated by short-lived witness invocations — the V1.14 CLI
+  is single-shot per invocation (`sign-chain-head` produces one
+  sig, then exits), so no long-lived session exists in production
+  unless an embedder explicitly holds the handle open.
+- TOCTOU on the PKCS#11 module path. Same residual as §2 / §3
+  (V1.14 absolute-path guard fires at config-parse, but
+  `dlopen(3)` is a separate syscall — an attacker with write
+  access to the absolute path or a parent directory can swap the
+  .so between checks). Filesystem ACLs on
+  `${ATLAS_WITNESS_HSM_PKCS11_LIB}` AND its parent directories
+  remain a *required* operational control — identical to §2's
+  prescription.
+- HSM driver compromise. The PKCS#11 module runs in atlas-witness's
+  address space and has full access to the witness key in the
+  session. Vendor module signing + filesystem ACLs are the
+  defences; there is no in-process sandbox between cryptoki and
+  the rest of the witness binary.
+- Malicious *issuer* producing traces. The witness check confirms
+  third-party observation of the chain head; it does NOT certify
+  that the underlying events are honest. See
+  [SECURITY-NOTES.md](SECURITY-NOTES.md) §wave-c for the full
+  threat model and the lenient/strict mode trust-property table.
+
+### How §11 composes with §10
+
+| Step | Side | Section | What happens |
+|---|---|---|---|
+| 1 | Witness operator | §11 | Generate keypair on HSM, extract pubkey hex |
+| 2 | Hand-off | — | Witness operator publishes (kid, pubkey hex) out-of-band |
+| 3 | Verifier maintainer | §10 | Pin (kid, pubkey) into `ATLAS_WITNESS_V1_ROSTER`, code review, merge |
+| 4 | Verifier ops | §10 | Rebuild + redeploy verifier with the new roster |
+| 5 | Witness ops | §11 step 7 | Smoke `sign-chain-head --hsm` once verifier rollout is complete |
+| 6 | Verifier ops | §10 | Raise `--require-witness <N>` to include the new witness in the quorum |
+
+A failure at any step rolls back to the prior threshold. The
+witness's signatures continue to land in evidence regardless — only
+the threshold check is gated by §10 completion. This is intentional:
+auditors can confirm the witness is *operating* (signing) before the
+verifier flips it to *load-bearing* (counted toward quorum).
+
+### Test mode
+
+CI exercises the full HSM-witness path against SoftHSM2. The
+[`hsm_witness_byte_equivalence`](../crates/atlas-witness/tests/hsm_witness_byte_equivalence.rs)
+integration test imports a known seed into a SoftHSM2 token, opens
+the resulting keypair via `Pkcs11Witness::open`, and verifies that
+the HSM-produced signature matches a software-Ed25519 reference
+signature byte-for-byte. The test honours the same `ATLAS_TEST_HSM=1`
++ trio-set gate as §2 / §3 — no SoftHSM2 installed → SKIP, no
+silent pass. Operators verifying the V1.14 cutover before
+production can run the test locally to confirm the signing path
+produces byte-equivalent output to the V1.13 file-backed witness
+(invariant: the witness sig is a function of the scalar and the
+chain head, independent of whether the scalar lives in a file or on
+the HSM).

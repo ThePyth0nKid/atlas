@@ -16,21 +16,24 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**V1.13 wave C-2 shipped — independent witness cosignature (strict-mode operationally load-bearing).**
+**V1.14 Scope I shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token).**
 
 Trust-core crate + Rekor anchoring + per-tenant key derivation + HSM-backed signing + independent
 witness attestor (V1.5 mock-issuer, V1.6 live Sigstore Rekor v1, V1.7 anchor-chain + shard
 expansion, V1.8 per-tenant key separation, V1.9 strict-mode + master-seed positive opt-in,
 V1.10 in-HSM HKDF derivation, V1.11 wave-3 sealed-signer (per-workspace scalar never enters
 Atlas address space), V1.12 CI lane promotion + nightly Sigstore lane, V1.13 wave C-1 lenient
-witness + wave C-2 strict mode).
+witness + wave C-2 strict mode, V1.14 Scope I HSM-backed witness — witness Ed25519 scalar
+never enters atlas-witness address space, signing routes through `CKM_EDDSA` against a
+sealed `Sensitive=true, Extractable=false, Derive=false` keypair).
 
 Current state:
 
-- 279 Rust tests green across the workspace (109 trust-core unit + 18 anchor-chain adversary
+- 319 Rust tests green across the workspace (109 trust-core unit + 18 anchor-chain adversary
   + 13 golden trace + 11 per-tenant-keys adversary + 6 Sigstore golden + 6 witness-strict-mode
-  integration in `atlas-trust-core`; 106 issuer/anchor/HSM in `atlas-signer`; 5 strict-mode
-  CLI in `atlas-verify-cli`; 5 round-trip + determinism in `atlas-witness`)
+  integration in `atlas-trust-core`; 121 issuer/anchor/HSM in `atlas-signer`; 5 strict-mode
+  CLI in `atlas-verify-cli`; 29 unit + 1 byte-equivalence integration in `atlas-witness`
+  including V1.14 Scope I HSM-backed witness)
 - Signing-input is deterministic CBOR per RFC 8949 §4.2.1
   (length-first map sort, no floats, byte-pinned golden)
 - Pubkey-bundle hash is canonical-JSON, byte-pinned golden — silent
@@ -51,6 +54,15 @@ Current state:
   V1.7 boundary rule). `--require-witness <N>` promotes wave-C-1's
   lenient evidence row to a hard error when fewer than `N` distinct
   roster-resolved witnesses verify
+- HSM-backed witness (V1.14 Scope I): `atlas-witness sign-chain-head --hsm`
+  routes signing through a PKCS#11 token's `CKM_EDDSA(Ed25519)` against
+  a sealed (`Sensitive=true, Extractable=false, Derive=false`) keypair —
+  the witness Ed25519 scalar never enters atlas-witness address space.
+  Trust-domain separation extends to the env-var trio
+  (`ATLAS_WITNESS_HSM_*` distinct from `ATLAS_HSM_*`) and label prefix
+  (`atlas-witness-key-v1:` distinct from `atlas-workspace-key-v1:`).
+  `atlas-witness extract-pubkey-hex --kid X` retrieves the rostering
+  hex per OPERATOR-RUNBOOK §11
 - `workspace_id` bound into the signing-input + per-workspace key
   derivation (HKDF-SHA256) — cross-workspace replay structurally
   impossible AND no shared signing key across tenants
@@ -70,16 +82,19 @@ roster expansion. V1.8/V1.9/V1.10/V1.11 ship per-tenant key separation and HSM-b
 signing through to wave-3 (per-workspace scalar never enters Atlas address space). V1.12
 promotes the HSM and Sigstore CI lanes to `pull_request:` and adds a nightly live-Rekor
 sentry. V1.13 ships the independent witness cosignature attestor (wave C-1 lenient,
-wave C-2 strict-mode + commissioning ceremony). Graph-database integration and
-policy-engine follow in V2.
+wave C-2 strict-mode + commissioning ceremony). V1.14 Scope I closes the witness-side
+residual by sealing the witness Ed25519 scalar inside a PKCS#11 token (signing routes
+through `CKM_EDDSA`, scalar never enters atlas-witness address space). Graph-database
+integration and policy-engine follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
-  trust property, write/export flows, V1 → V1.13 → V2 boundaries.
+  trust property, write/export flows, V1 → V1.14 → V2 boundaries.
 - [docs/SECURITY-NOTES.md](docs/SECURITY-NOTES.md) — defended attack
   surface, per-test mapping for auditors.
 - [docs/OPERATOR-RUNBOOK.md](docs/OPERATOR-RUNBOOK.md) — production
   operator procedures: master-seed import, HSM wave-3 setup, witness
-  commissioning, CI lane reference.
+  commissioning (verifier-side §10 + HSM-backed witness §11),
+  CI lane reference.
 - [docs/COMPLIANCE-MAPPING.md](docs/COMPLIANCE-MAPPING.md) —
   clause-by-clause regulatory mapping (EU AI Act, GAMP 5, ICH E6(R3),
   DORA, GDPR).

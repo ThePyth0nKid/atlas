@@ -1,6 +1,6 @@
-# Atlas Verifier — Defended Attack Surface (V1.13)
+# Atlas Verifier — Defended Attack Surface (V1.14)
 
-This document describes what the V1.13 verifier (`atlas-trust-core`, exposed as
+This document describes what the V1.14 verifier (`atlas-trust-core`, exposed as
 `atlas-verify-cli` and `atlas-verify-wasm`) actually defends against. It is
 written for auditors and security reviewers who want to know "what does this
 verifier protect, and where are the limits" without reading Rust.
@@ -941,6 +941,167 @@ informational evidence without enforcement.
   witness must sign" — useful as a deployment-readiness signal but
   not as a defence against witness compromise. Operators should
   start at N=1 to validate the commissioning ceremony, then raise.
+
+---
+
+## scope-i — HSM-backed witness (V1.14 — in scope)
+
+V1.13 wave-C wired the witness signing path against a 32-byte
+file-backed seed (`atlas-witness sign-chain-head --secret-file
+<path>`). The seed lived on the witness operator's filesystem and
+the scalar transited the witness binary's address space in a
+`Zeroizing<[u8; 32]>` buffer for the lifetime of one sign call —
+exposing the scalar to memory-disclosure attacks (heap dumps,
+swap, core dumps, debugger attachments) on the witness host for
+that window. V1.14 Scope I closes this residual exposure for
+HSM-backed witness deployments by sealing the witness Ed25519
+scalar inside a PKCS#11 token: signing routes through
+`CKM_EDDSA(Ed25519)` with `Sensitive=true`, `Extractable=false`,
+`Derive=false` on the private half. The scalar never enters
+atlas-witness address space, even transiently — only the
+ready-formed 64-byte signature exits the device.
+
+### What landed in V1.14 Scope I
+
+- **`Pkcs11Witness` impl.** A new
+  [`Pkcs11Witness`](../crates/atlas-witness/src/hsm/pkcs11.rs)
+  struct implementing the dyn-safe
+  [`Witness`](../crates/atlas-witness/src/lib.rs) trait under
+  `--features hsm`. Holds a long-lived authenticated PKCS#11
+  session + the cached private-key handle behind a `Mutex` for
+  thread-safety; signs via `CKM_EDDSA(Ed25519)` against the
+  resolved sealed scalar.
+- **Trust-domain separation env-var trio.** New
+  `ATLAS_WITNESS_HSM_PKCS11_LIB` / `ATLAS_WITNESS_HSM_SLOT` /
+  `ATLAS_WITNESS_HSM_PIN_FILE` (distinct from atlas-signer's
+  `ATLAS_HSM_*`). Same parsing semantics as atlas-signer's HSM
+  trio — absolute-path guards on module + PIN file, full-or-none
+  partial-trio rejection, surrounding-whitespace tolerant.
+- **On-token label namespace separation.** Witness keypairs sit
+  under the `atlas-witness-key-v1:` prefix (distinct from
+  atlas-signer's `atlas-workspace-key-v1:`). A misconfigured
+  deployment that points both binaries at the same slot still
+  cannot cross-resolve keys — the label namespaces are disjoint
+  by construction.
+- **No auto-generation.** `Pkcs11Witness::open` only **resolves**
+  an existing keypair by `(CLASS=PRIVATE_KEY, KEY_TYPE=EC_EDWARDS,
+  LABEL=atlas-witness-key-v1:<kid>)`; missing keypair fails with a
+  `SigningFailed:` error pointing at OPERATOR-RUNBOOK §11.
+  Generation is an operator action via `pkcs11-tool --keypairgen`.
+  This is the load-bearing trust property — a witness that
+  auto-generated keys could be made to sign on a fresh, unrostered
+  keypair and silently bypass `ATLAS_WITNESS_V1_ROSTER`.
+- **CLI mutual exclusion.** `atlas-witness sign-chain-head --hsm`
+  and `atlas-witness sign-chain-head --secret-file <path>` form a
+  clap `ArgGroup` with `required = true, multiple = false`. An
+  invocation that passes neither, both, or any other combination
+  fails at argument parse — before any IO or HSM access. This is
+  structural rather than runtime enforcement: a future code edit
+  cannot accidentally allow both backends to fire and produce
+  divergent signatures from the same kid.
+- **`extract-pubkey-hex` subcommand.** A new
+  `atlas-witness extract-pubkey-hex --kid <kid>` subcommand
+  retrieves the paired `CKO_PUBLIC_KEY` object's `CKA_EC_POINT`,
+  unwraps the PKCS#11 v3.0 §10.10 DER OCTET STRING wrapper (also
+  accepts the raw 32-byte form for vendors that deviate from
+  spec), and prints the 64-char hex pubkey. Used in OPERATOR-RUNBOOK
+  §11 step 5 as the hand-off step that feeds §10's roster pin.
+- **Byte-equivalence integration test.** A new
+  `hsm_witness_byte_equivalence` integration test imports a known
+  seed into a SoftHSM2 token, opens the resulting keypair via
+  `Pkcs11Witness::open`, and asserts that the HSM-produced
+  signature matches a software-Ed25519 reference signature
+  byte-for-byte. Pinned as a CI lane (`hsm-witness-smoke.yml`).
+  Locks the property "the signing path is a function of the scalar
+  and the chain head, independent of substrate" — V1.13 file-backed
+  witnesses and V1.14 HSM-backed witnesses produce byte-identical
+  sigs given the same scalar, so a deployment can mix both in one
+  quorum and the verifier cannot tell them apart.
+
+### Trust property (Scope I)
+
+V1.14 Scope I strengthens the *substrate* in which the witness
+scalar lives without changing the trust contract.
+`ATLAS_WITNESS_V1_ROSTER` continues to pin (kid, pubkey) pairs;
+the verifier accepts any signature that validates against a
+rostered pubkey under `ATLAS_WITNESS_DOMAIN || chain_head_bytes`,
+regardless of whether the witness backend was a file or an HSM.
+Operators can migrate per-witness without coordinating a global
+cutover — the verifier sees only the resulting signatures.
+
+The `verified ==` formula from wave-C-2 above is unchanged.
+Scope I changes only what an attacker who lands a memory-disclosure
+exploit on the witness host can extract: under V1.13 file-backed,
+they got the 32-byte scalar (full impersonation for the lifetime
+of the rostered pubkey); under V1.14 HSM-backed, they get nothing
+(the scalar is unreachable from the witness's address space). The
+PIN file is reachable, but a stolen PIN without physical access to
+the HSM only enables `C_Sign` calls *while the attacker still
+holds the witness host* — recoverable by the operator restarting
+the witness on clean infrastructure with a rotated PIN.
+
+### Residual risks after V1.14 Scope I
+
+- **HSM physical compromise.** An attacker with physical possession
+  of the witness token AND the user PIN can call `C_Sign` against
+  the witness key for the lifetime of that PIN. Mitigation matches
+  V1.10 wave 2 / V1.11 wave-3: PIN file in tmpfs (cleared on reboot),
+  SO PIN in a separate secret manager, rotate on suspected exposure.
+- **Malicious code inside the witness process.** The PKCS#11
+  session is held open for the lifetime of the binary; an attacker
+  who achieves code execution **inside** atlas-witness can call
+  `Pkcs11Witness::sign_chain_head` arbitrarily during that
+  session's lifetime, signing whatever chain head they like. This
+  is a strict equivalence — any chain head an attacker presents,
+  the HSM signs. Mitigated by the V1.14 CLI's single-shot shape
+  (`sign-chain-head` produces one sig, then exits) — no long-lived
+  session exists in production unless an embedder explicitly holds
+  the handle open.
+- **TOCTOU on the PKCS#11 module path.** Same residual as V1.10
+  wave 2 / V1.11 wave-3: the absolute-path guard fires at
+  config-parse, but `dlopen(3)` is a separate syscall; an attacker
+  with write access to the absolute path or a parent directory
+  can swap the .so between checks. Filesystem ACLs on
+  `${ATLAS_WITNESS_HSM_PKCS11_LIB}` AND its parent directories
+  remain a *required* operational control.
+- **HSM driver compromise.** The PKCS#11 module runs in
+  atlas-witness's address space and has full access to the
+  witness key in the session. Vendor module signing + filesystem
+  ACLs are the defences; there is no in-process sandbox between
+  cryptoki and the rest of the witness binary.
+- **Witness-issuer collusion.** Unchanged from V1.13 wave-C. A
+  witness colluding with the issuer defeats independence — Scope I
+  changes the substrate of the witness's scalar but not the trust
+  property that requires organisational independence between
+  witness and issuer.
+- **Single compromised witness scalar still meaningful at N=1.**
+  Same as V1.13 wave-C-2 — strict mode at threshold N=1 is a
+  deployment-readiness signal, not a defence against witness
+  compromise. Operators should run at N >= 2 with witnesses drawn
+  from organisationally-independent parties for any production
+  deployment relying on witness attestation.
+
+### What V1.14 Scope I does NOT cover
+
+- **File-backed witness exposure remains unchanged.** Operators
+  who continue with `--secret-file` retain the V1.13 memory-
+  disclosure exposure on the witness host. V1.14 does not deprecate
+  the file-backed path — small deployments without HSM access can
+  continue using it; the trade-off is documented in
+  OPERATOR-RUNBOOK §11.
+- **Verifier-side roster mechanism.** §10 (the verifier-side
+  commissioning ceremony) is unchanged. V1.14 Scope I produces
+  pubkey hex for §10 to consume; §10 continues to pin
+  `(kid, [u8; 32])` tuples into the trust-core source. A V1.14
+  deployment whose witness operator runs §11 but whose verifier
+  operator skips §10 produces witness signatures that land in
+  evidence as "kid not in pinned roster" and do not count toward
+  threshold — the same disposition as V1.13 with the same fix
+  (run §10).
+- **Bundle-rotation cadence or roster scaling.** Scope I changes
+  per-witness substrate; it does not change how often rosters
+  rotate or how many witnesses a deployment can pin. Both remain
+  operator-deliberate code-side ceremonies.
 
 ---
 

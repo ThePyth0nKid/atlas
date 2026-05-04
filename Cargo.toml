@@ -53,6 +53,19 @@ zeroize = { version = "1.8", features = ["zeroize_derive"] }
 # pull from the kernel directly rather than the heavier `rand` umbrella.
 rand_core = { version = "0.6", default-features = false, features = ["getrandom"] }
 
+# V1.14 Scope I — PKCS#11 v3.0 bindings. Pinned to 0.12 series:
+#   * 0.11 introduced HKDF mechanisms (used by atlas-signer wave-2).
+#   * 0.12 marks `Session: Send` (used by atlas-signer wave-3 and
+#     V1.14 atlas-witness). Decouples session lifetime from `Pkcs11`
+#     context so we can hold an authenticated session behind a `Mutex`
+#     without fighting the borrow checker.
+# Workspace-pinned (instead of per-crate) so atlas-signer and
+# atlas-witness move in lockstep — a vendor-divergent bump in one and
+# not the other would silently produce two FFI ABIs against the same
+# SoftHSM2 token in CI. Per-crate Cargo.toml flags it `optional = true`
+# behind the `hsm` feature.
+cryptoki = { version = "0.12" }
+
 # Serde
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
