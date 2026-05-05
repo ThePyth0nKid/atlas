@@ -1,0 +1,16 @@
+lockfileVersion: '6.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+dependencies:
+  '@atlas-trust/verify-wasm':
+    specifier: 1.15.0
+    version: 1.15.0
+
+packages:
+
+  '@atlas-trust/verify-wasm@1.15.0':
+    resolution:
+      tarball: https://registry.npmjs.org/@atlas-trust/verify-wasm/-/verify-wasm-1.15.0.tgz

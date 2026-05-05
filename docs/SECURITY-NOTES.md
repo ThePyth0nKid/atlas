@@ -1,4 +1,4 @@
-# Atlas Verifier — Defended Attack Surface (V1.16)
+# Atlas Verifier — Defended Attack Surface (V1.16 + V1.17)
 
 This document describes what the V1.16 verifier (`atlas-trust-core`, exposed as
 `atlas-verify-cli` and `atlas-verify-wasm`) actually defends against. It is
@@ -2213,15 +2213,20 @@ scope-d is delivery-side hardening. It composes with — does not replace
 | **V1.16 scope-d (Welle A) CSP + SRI + TT** | **playground `app.js` bytes + browser sink discipline** | **UI-side injection in a hosted deployment** |
 | **V1.16 scope-d (Welle B) `report-uri`** | **post-block visibility into CSP violations** | **silent in-prod CSP failures (XSS attempts, accidental sink introduction, mis-config)** |
 | **V1.16 scope-d (Welle C) Worker-emitted headers + executable receiver + AE→R2 archive** | **HTTP-layer hardening (HSTS preload, COOP, COEP, header-mode CSP so `frame-ancestors` takes effect, per-path Cache-Control) + receiver implementation matching the spec from Welle B** | **CDN/proxy strip of meta-tag-only directives, network-side SSL stripping, cross-window leak via Spectre, naive receiver becoming an attack surface, per-IP rate-limit bypass via IPv6 `/64` rotation, financial-DoS via per-report R2 writes** |
+| **V1.17 scope-k (Welle A) consumer-side auto-verify CI Action** | **all three CONSUMER-RUNBOOK §1 trust layers (version pin → lockfile integrity → SLSA L3 provenance) re-asserted on every consumer CI build via `verify-wasm-pin-check@v1`** | **consumer follows runbook once at install time, then forgets to re-verify on every CI run — silent window where a maintainer-token-compromise can land between two installs and only be caught at the next manual quarterly audit** |
 
 Each layer guards a different boundary; an attacker has to defeat all
-seven to land a forged-trace-as-valid result against an operator using
+eight to land a forged-trace-as-valid result against an operator using
 the playground. Welle B pins *visibility* (without it, the other layers
 fire silently and operators have no incident-detection signal from the
 browser side); Welle C pins the *delivery channel* (HTTP-layer
 hardening that the page-bytes alone cannot enforce) AND ships the
 receiver that turns Welle B's plumbing into an actual incident-
-detection signal.
+detection signal. V1.17 Welle A pins the *consumer-side cadence* —
+without it, every layer above is checked once at install time and
+then assumed to hold across every subsequent CI build; with it, every
+layer is re-asserted on every install with no possibility of skipping
+a step or forgetting the audit ceremony.
 
 The verifier crates (`atlas-trust-core`, `atlas-verify-cli`,
 `atlas-verify-wasm`, `atlas-signer`) are licensed Apache-2.0. An auditor
@@ -2232,6 +2237,322 @@ server in `apps/`.
 
 This is the load-bearing trust property of Atlas: any third party can
 independently verify a trace bundle without buying anything from us.
+
+---
+
+## scope-k — Consumer-side auto-verify CI Action (V1.17 Welle A — shipped)
+
+CONSUMER-RUNBOOK §1 (V1.15 Welle C) defines the three-layer trust
+stack that downstream npm consumers of `@atlas-trust/verify-wasm` are
+expected to maintain: (1) exact-version pin in `package.json`, (2)
+lockfile integrity hash, (3) SLSA L3 provenance via `npm audit
+signatures`. The runbook walks through the install-time ceremony and
+the operator-side composition table at §7. **scope-k closes the
+structural failure mode that the runbook by itself does not address:
+the consumer follows the ceremony once at install time, then forgets
+to re-verify on every CI build.** The action is the executable form of
+the runbook ceremony.
+
+Threat addressed:
+
+- **F-4 (consumer-side cadence drift).** A consumer follows
+  CONSUMER-RUNBOOK §2 / §5 once at install time. They commit a
+  correctly-pinned `package.json` + a lockfile with an `integrity`
+  field + a one-time `npm audit signatures` log line in the CI
+  pipeline output. Six months later, an attacker compromises a
+  maintainer token (Layer 3's threat) and publishes a malicious
+  `1.15.99`. The consumer's `package.json` is pinned to `1.15.0` so
+  the attack does not auto-land. But: a junior developer files a
+  PR that bumps to `^1.16.0` for a feature, which on merge silently
+  resolves to the malicious version. The lockfile-integrity check
+  passes (the new version's bytes are self-consistent), the audit-
+  signatures step is missing from the PR's CI lane (it was only
+  added to the original install commit and never enforced as a gate
+  on every build), and the malicious bytes land in the consumer's
+  next deploy. **scope-k closes F-4 by making all three layers a
+  single one-line CI step that cannot be omitted without removing
+  it from the workflow file.**
+
+What scope-k ships:
+
+1. **`.github/actions/verify-wasm-pin-check/action.yml`** — a
+   composite action with five sequential `shell: bash` steps:
+   setup → Layer 1 → Layer 2 → Layer 3 → summary. Inputs:
+   `package-name` (default `@atlas-trust/verify-wasm`), `expected-version`
+   (optional bare semver, asserts exact match), `package-manager`
+   (`auto` / `npm` / `pnpm` / `bun`), `working-directory`,
+   `skip-provenance` (default `false`), `fail-on-local-file`
+   (default `false`, promotes V1.15 Welle B backup-channel `file:`
+   resolved entries from WARN to FAIL), `provenance-retries`
+   (default 3, exponential backoff 10s / 30s / 90s on transient
+   Sigstore Rekor outages).
+2. **`scripts/check-version-pin.sh`** — Layer 1 implementation.
+   Parses `package.json` via `node -e` (env-var-passed for shell-
+   escape safety), iterates all four dep buckets (`dependencies`,
+   `devDependencies`, `peerDependencies`, `optionalDependencies`),
+   rejects any value matching `^*`, `~*`, `>*`, `<*`, `=*`, `**`,
+   `*||*`, `x` / `X` / `*.x`, `latest` / `next`, `workspace:`,
+   `file:`, `link:`, `git+`, `github:`, `http:`, `https:`. Bare-
+   semver shape check (`[0-9]+.[0-9]+.[0-9]+` with optional
+   `-rc.N` / `+sha.abc` suffix) rejects any non-semver value that
+   slipped past the bucket scan.
+3. **`scripts/check-lockfile-integrity.sh`** — Layer 2 router that
+   dispatches to PM-specific helpers (`-npm.sh`, `-pnpm.sh`,
+   `-bun.sh`, `-bun-text.sh`). Each helper validates that the
+   `integrity` field exists, has a strong-hash prefix
+   (`sha512-` / `sha384-` / `sha256-` are OK; `sha1-` / `md5-` are
+   HARD FAIL — collisions are practical against sha1 and don't
+   defend against registry-side replacement), and the `resolved`
+   URL has an HTTPS origin (canonical `registry.npmjs.org` is
+   silent-OK; corporate-mirror HTTPS hosts emit a WARN so the
+   integrity hash being mirror-served is visible; `file:` is the
+   V1.15 Welle B backup-channel state — WARN by default, HARD FAIL
+   with `fail-on-local-file: true`). The npm helper supports
+   `lockfileVersion` 1 (`dependencies` recursive tree), 2, and 3
+   (`packages` map). The pnpm helper uses a state-machine awk
+   parser for `pnpm-lock.yaml` block boundaries (no YAML library
+   dependency). The bun-text helper parses `bun.lock` JSONC via a
+   string-aware tokenizer (NOT a regex — a regex `//[^\n]*` would
+   mis-treat `//` inside a URL like `"https://registry.npmjs.org/..."`
+   as a line-comment start; the tokenizer tracks `inString` state
+   with backslash-escape handling to avoid this class of bug).
+4. **`scripts/check-provenance.sh`** — Layer 3 implementation.
+   Validates `npm` is on PATH and version ≥ 9.5 (the version that
+   introduced the attestation API; older npm silently lacks the
+   `signatures` subcommand). Runs `npm audit signatures` with
+   exponential-backoff retry on transient classifications
+   (`ENOTFOUND` / `ECONNREFUSED` / `ETIMEDOUT` / `503` / `502` /
+   `504` / `network` / `socket hang up` / `unable to verify`).
+   Hard-fails immediately on `attestation-failure` /
+   `signature-failure` classifications (cryptographic rejection —
+   never transient). Asserts post-success that the output contains
+   a `verified attestation` line AND the package is NOT in any
+   failure context (an `audited 0 packages` empty-tree case would
+   otherwise exit 0 silently — defence in depth).
+5. **`scripts/lib/log.sh`** — `tput`-based ANSI colour with graceful
+   degrade to plain text when no TTY (e.g. GitHub Actions
+   `TERM=dumb` runs).
+6. **`scripts/lib/detect-pm.sh`** — package-manager auto-detection
+   with `npm > pnpm > bun` precedence, multi-lockfile WARN, and
+   explicit override via `package-manager:` input.
+7. **`test/fixtures/`** — 16 synthetic fixtures covering Layer 1
+   pass/fail (caret / tilde / mismatched expected-version /
+   package-not-installed / `dev-dependencies` bucket / pnpm /
+   bun-text / npm v1 lockfile schema), Layer 2 pass/fail (missing
+   integrity / sha1 weak hash / local-file backup-channel WARN
+   path / `fail-on-local-file: true` HARD FAIL path / multi-lockfile
+   auto-detect WARN), and the matching expected-version exact-match
+   path.
+8. **`test/run-tests.sh`** — fixture-based harness running 36 cases
+   covering every fixture × script combination. Asserts exit code
+   only (output strings are user-facing copy and may change without
+   altering the contract); on mismatch, dumps the captured stderr+
+   stdout for debug. Runs in ~30 seconds, no network.
+9. **`.github/workflows/verify-wasm-pin-check-self-test.yml`** — CI
+   workflow with four jobs: `fixture-unit-tests` (runs the harness),
+   `action-fixture-invocation` (`uses:` the action against
+   Layer-2-passing fixtures via the GitHub Actions runtime),
+   `action-negative-cases` (negative-path matrix with
+   `continue-on-error: true` + `outcome != 'failure'` assertion),
+   and `live-install-layer-3` (real `npm install --save-exact
+   @atlas-trust/verify-wasm@latest` + Sigstore round-trip). The
+   live-install job runs on weekly cron at `Mon 06:17 UTC` to catch
+   Sigstore regressions independent of code changes.
+10. **`README.md`** in the action directory — consumer-facing
+    docs covering threat model, full input surface, recommended
+    pinning posture (commit-SHA over `@v1.17.0` tag), composition
+    with `npm ci` / `pnpm install --frozen-lockfile`, and the
+    self-test workflow structure.
+
+Adversarial-input hardening (post-review-pass defences applied
+before V1.17 Welle A shipped — every one is a defence against an
+attacker who controls the consumer's `package.json`, lockfile, or
+the action's own input plumbing):
+
+- **`scripts/lib/canonicalize-workdir.sh`** — sourced by every
+  layer script. `realpath`s the `working-directory` input and
+  (when `$GITHUB_WORKSPACE` is set, i.e. running in GitHub
+  Actions) asserts the resolved path is contained within the
+  workspace root. Defends against a fork-PR-poisoning scenario
+  where a malicious PR commits a symlink at the consumer-supplied
+  path (`packages/foo` → `../../../../etc`) so the action would
+  `cd` outside the checkout root. Per-script sourcing is
+  load-bearing because composite-action `env:` blocks re-evaluate
+  `${{ inputs.working-directory }}` for every step — a single
+  `$GITHUB_ENV` write from setup.sh would be silently overridden.
+- **AWK regex-injection defence in pnpm helper.** The original
+  pnpm parser used the `~` regex-match operator and dynamic
+  `sub()` with the package-name interpolated into the pattern. A
+  consumer (or fork-PR author) supplying `package-name` with
+  AWK regex metacharacters (`.`, `+`, `*`, `[`, `^`, `$`, `|`,
+  `(`, `\`) could either crash AWK (DoS the integrity check
+  entirely → fail-open if subsequent layer state is mishandled)
+  or cause the regex to match an unintended lockfile entry with a
+  valid integrity hash (Layer 2 silent pass on a substituted
+  package). Replaced with `index()` (literal substring match) +
+  `substr()`-based prefix-stripping — no regex engine ever sees
+  the user-supplied name.
+- **`bun pm ls --json` size cap + iterative walk + `WeakSet`
+  visited-set.** A maliciously-crafted `bun.lockb` could cause
+  `bun pm ls --json` to emit gigabyte-scale output. We cap the
+  shell-variable size at 10 MB before passing to node (defends
+  against runner OOM and Linux ARG_MAX truncation). The Node-
+  side `walk()` is iterative (queue-based) instead of recursive
+  to defend against an adversarially-deep dependency tree
+  triggering V8 stack overflow (`RangeError: Maximum call stack
+  size exceeded`). `WeakSet`-based cycle detection defends
+  against peerDep cycles in the bun output. Same defence applies
+  to the bun-text JSONC parser via the existing 10 MB shell-
+  variable upper bound (no separate cap needed there since
+  `bun.lock` is checked-in repo content, not bun-runtime output).
+- **Layer 3 `npm ls` pre-condition** (`scripts/check-provenance.sh`).
+  `npm audit signatures` reports counts in the success case
+  (`N package(s) have a verified attestation`), NOT per-package
+  verdicts. A tree where our package is NOT installed but other
+  packages ARE signed would have passed Layer 3 silently — the
+  positive grep would match the unrelated package's count line.
+  Pre-conditioning Layer 3 with `npm ls "$PACKAGE" --depth=0`
+  asserts our package is in the resolved install tree before the
+  audit step runs, closing the false-pass gap.
+- **ASCII Unit Separator (`\x1f` / octal `\037`) field-passing in
+  every script.** The bash `read` builtin merges consecutive
+  whitespace IFS chars (tab, space, newline) — so an empty middle
+  field in a tab-separated tuple would shift all trailing fields
+  one column left, silently masking an integrity-failure as a
+  resolved-URL field check. `\x1f` is the canonical C-locale
+  field-separator char and never appears in any realistic
+  lockfile content; AWK output uses the octal `\037` escape for
+  portability (gawk supports `\x` but mawk and busybox awk only
+  speak octal). Applied in `check-version-pin.sh` (BUCKET ↔
+  VERSION) AND every Layer 2 helper (KEY ↔ VERSION ↔ RESOLVED ↔
+  INTEGRITY). The version-pin script's original `:` separator
+  would have corrupted any future package-name input containing
+  a colon (e.g. an `npm:other-pkg@1.0.0` alias spec — rejected
+  by the range check, but only if the field-split runs cleanly
+  first).
+- **String-aware JSONC tokenizer in bun-text helper.** The Node-
+  side fallback parser walks the input character by character,
+  tracking `inString` state with backslash-escape handling. A
+  regex-based JSONC stripper (`/\/\/[^\n]*\n/g`) would mistakenly
+  treat `//` inside a URL string like
+  `"https://registry.npmjs.org/..."` as the start of a line
+  comment, eat the rest of the JSON, and produce a parse error
+  that makes the helper fail-open or report a bogus diagnostic.
+  The tokenizer tries plain `JSON.parse` first (bun emits valid
+  JSON in current versions) and only falls back to JSONC stripping
+  on failure — defence-in-depth without paying tokenizer cost on
+  the common path.
+- **SHA-pinned `actions/checkout` + `actions/setup-node` in the
+  self-test workflow.** The self-test workflow is itself the
+  enforcement mechanism for V1.17's supply-chain hardening claim.
+  Depending on a mutable `@v4` tag for `actions/checkout` would
+  be self-undermining — a tag-rewrite or upstream compromise
+  could inject code into the very workflow that proves the action
+  works. Both pinned to commit SHA with `# v4.x.y` comment so
+  future audits can verify the pinned commit matches the labelled
+  release.
+- **`bun pm ls` stderr capture.** Original implementation silenced
+  stderr with `2>/dev/null` — a non-zero bun exit would produce
+  the opaque "no output" diagnostic. Now captures both streams
+  via the `BUN_RC=0; ... || BUN_RC=$?` pattern so the consumer
+  sees the real bun error message on a CI fail.
+- **Layer 3 grep is case-insensitive (`grep -iF` / `grep -iE`).**
+  Defends against a future npm output-format change that may
+  alter casing of failure verbs ("Missing" vs "missing", etc.).
+  Also extended the failure-context vocabulary to include `error`
+  and `untrusted` in addition to `missing|invalid|failed`.
+- **bun-text fixture corrected.** The `bun-text-no-integrity-bad`
+  fixture originally had `[..., {}]` as the last element — the
+  Node parser converted the `{}` object to `"[object Object]"`,
+  failing the `sha512-` prefix check with a misleading "unrec-
+  ognised hash format" diagnostic. Changed to `[..., ""]` so the
+  test exercises the genuine "missing integrity" code path with
+  the correct diagnostic.
+
+What scope-k does NOT cover (V1.18+ candidates):
+
+- **Standalone `atlas-trust/verify-wasm-pin-check` repo with
+  marketplace publishing.** scope-k uses the monorepo path
+  `.github/actions/verify-wasm-pin-check/`. Marketplace publishing
+  unlocks `@v1` major-version-tracking tags (vs. the current
+  full-path `@v1.17.0` reference) and discoverability via
+  GitHub's marketplace search. Deferred because marketplace
+  publishing is itself a publish ceremony that needs its own
+  trust-domain analysis (who controls the standalone repo, how
+  releases are tagged, whether the repo is itself SLSA L3).
+- **Auto-bump PR generation.** scope-k tells the consumer when
+  their pin is stale relative to a target version (`expected-version`
+  input) but does not open a PR to bump the pin. A future Welle
+  could add an opt-in "if expected-version is set and the
+  package.json pin is older, open a Renovate-style PR" mode.
+  Deferred because bumping is a consumer policy decision (cadence,
+  approval workflow) that should live in the consumer's tooling
+  (Renovate, Dependabot), not in the verifier action itself.
+- **Cross-package transitive provenance scan.** scope-k checks
+  `@atlas-trust/verify-wasm` only. The Atlas WASM crate has no
+  runtime npm dependencies (the WASM payload is the only artefact),
+  so transitive-scan is structurally not needed for our package.
+  A consumer who wants `npm audit signatures` against their entire
+  tree should run the bare command — scope-k delegates the broader
+  audit responsibility to the consumer.
+- **Air-gapped / offline-mirror Layer 3 alternative.** Layer 3
+  requires `registry.npmjs.org` + `rekor.sigstore.dev` reachability.
+  Air-gapped consumer pipelines must set `skip-provenance: true`
+  and accept the SLSA L3 layer is not enforced on every build (it
+  was enforced at the install-time ceremony when the lockfile was
+  generated). A future scope could ship a sigstore-bundle-as-file
+  alternative (offline verification against a pre-fetched bundle),
+  but that requires the publisher side to also publish the bundle
+  artefact — a V1.18+ consideration tied to V1.15 Welle B's
+  backup-channel composition.
+- **Multi-package coverage in a single action invocation.** For
+  monorepos with multiple Atlas-consuming packages, the action
+  must be invoked once per package directory (with `working-directory:`
+  pointing at each). A future scope could add a `discover` mode
+  that walks the monorepo and runs all three layers per discovered
+  `package.json`. Deferred because monorepo layouts are
+  consumer-specific and a per-call action keeps the failure
+  surface explicit.
+
+### Trust composition with scope-d + V1.14 Scope E + V1.15 Welle B/C
+
+scope-k is consumer-side cadence enforcement. It composes with — does
+not replace — every prior trust layer:
+
+| Layer | What it pins | Failure mode addressed |
+|---|---|---|
+| V1.5 `signing_input_byte_determinism_pin` | CBOR signing-input bytes | issuer-side encoding drift |
+| V1.14 Scope E SLSA L3 OIDC provenance | npm tarball bytes ↔ Git commit | npm-registry compromise |
+| V1.15 Welle B GH-Releases backup | second tarball channel | npm-registry outage |
+| V1.15 Welle C consumer pinning runbook | install-time ceremony for npm / pnpm / Bun | cold-start mis-install |
+| V1.16 scope-d (Wellen A+B+C) | playground delivery hardening | UI-side injection in hosted deployments |
+| **V1.17 scope-k (Welle A) `verify-wasm-pin-check@v1`** | **CI-time re-assertion of all three §1 layers on every consumer build** | **consumer-side cadence drift between install-time ceremony and ongoing CI** |
+
+scope-k pins the *cadence* of the consumer trust ceremony. Without it,
+every layer is checked once at install time and then assumed to hold
+across every subsequent CI build. With it, every layer is re-asserted
+on every install with no possibility of skipping a step or forgetting
+the audit ceremony — and the action's own pure-bash composite shape
+means the verifier itself does not become a supply-chain risk worth
+auditing (no opaque `dist/index.js` bundle, no transitive npm deps).
+
+### Anti-drift
+
+- **Self-test workflow** (`.github/workflows/verify-wasm-pin-check-self-test.yml`)
+  re-runs the fixture harness AND a live `npm install --save-exact
+  @atlas-trust/verify-wasm@latest` + full action invocation on every
+  push / PR that touches the action, plus a weekly cron at
+  `Mon 06:17 UTC` to catch Sigstore regressions independent of code.
+- **Negative-case matrix** in the same workflow — six bad fixtures
+  invoked via `continue-on-error: true` + `outcome != 'failure'`
+  assertion. A regression that loosens any check (e.g. accepts a
+  `^1.15.0` pin where it should reject) would fail at least one of
+  these matrix legs.
+- **Trust composition table row** in this document and in
+  ARCHITECTURE.md V1.17 Welle A boundary block — a future scope
+  that intends to deprecate scope-k must update both docs and the
+  row above, providing a single discoverable trail for the
+  decision.
 
 ---
 

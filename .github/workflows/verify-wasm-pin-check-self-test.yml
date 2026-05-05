@@ -1,0 +1,216 @@
+# Self-test workflow for `.github/actions/verify-wasm-pin-check`.
+#
+# Why a self-test workflow:
+#   * The action is consumed by every downstream consumer of
+#     `@atlas-trust/verify-wasm`. A regression here breaks every
+#     consumer's CI lane silently (or noisily, but their build, not
+#     ours). We MUST detect any regression at our own merge time,
+#     not at consumer-pull-of-@v1 time.
+#   * The fixture-based unit tests (test/run-tests.sh) cover Layers
+#     1 + 2 by direct script invocation. They do NOT cover the
+#     composite action's own input-passing + step orchestration.
+#     This workflow covers that — it actually invokes
+#     `uses: ./.github/actions/verify-wasm-pin-check` against the
+#     fixtures in the same repo.
+#   * Layer 3 (`npm audit signatures`) requires a real round-trip
+#     to npmjs.org + rekor.sigstore.dev. Local fixtures cannot
+#     cover that — only a live install can. We do that against the
+#     published `@atlas-trust/verify-wasm` package in a job at the
+#     bottom (`live-install-layer-3`).
+
+name: verify-wasm-pin-check (self-test)
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '.github/actions/verify-wasm-pin-check/**'
+      - '.github/workflows/verify-wasm-pin-check-self-test.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - '.github/actions/verify-wasm-pin-check/**'
+      - '.github/workflows/verify-wasm-pin-check-self-test.yml'
+  # Weekly scheduled run — catches Sigstore / npm attestation regressions
+  # in the live-install-layer-3 job without requiring a code change.
+  schedule:
+    - cron: '17 6 * * 1'  # Mon 06:17 UTC
+  workflow_dispatch: {}
+
+# Minimum permissions. We never need write — this workflow is pure
+# read-only validation against fixtures + the public npm registry.
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------
+  # Job 1 — Unit tests against fixtures (Layers 1 + 2 only).
+  # Exercises the helper scripts directly via the harness.
+  # No npm install, no network — fast (< 30s).
+  # ---------------------------------------------------------------
+  fixture-unit-tests:
+    name: Fixture-based unit tests (Layer 1 + 2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        # SHA-pinned (v4.2.2). The whole point of this workflow is to
+        # enforce supply-chain hygiene; depending on a mutable tag for
+        # `actions/checkout` would be self-undermining.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Run fixture harness
+        run: bash .github/actions/verify-wasm-pin-check/test/run-tests.sh
+
+  # ---------------------------------------------------------------
+  # Job 2 — Composite action invocation against fixtures.
+  # Runs the action via `uses:` against each Layer-2-passing fixture
+  # with `skip-provenance: true` (Layer 3 is exercised separately
+  # in `live-install-layer-3`). Verifies the action's input plumbing
+  # (the action.yml step pipeline) correctly forwards env vars to
+  # each script.
+  # ---------------------------------------------------------------
+  action-fixture-invocation:
+    name: Action invocation (fixture, ${{ matrix.fixture }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture:
+          - npm-pinned-good
+          - dev-dependencies-pinned
+          - npm-v1-lockfile
+          - pnpm-pinned-good
+          - bun-text-pinned-good
+    steps:
+      - name: Checkout
+        # SHA-pinned (v4.2.2). The whole point of this workflow is to
+        # enforce supply-chain hygiene; depending on a mutable tag for
+        # `actions/checkout` would be self-undermining.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Run verify-wasm-pin-check (skip Layer 3)
+        uses: ./.github/actions/verify-wasm-pin-check
+        with:
+          working-directory: .github/actions/verify-wasm-pin-check/test/fixtures/${{ matrix.fixture }}
+          expected-version: '1.15.0'
+          skip-provenance: 'true'
+
+  # ---------------------------------------------------------------
+  # Job 3 — Negative path: the action MUST fail on bad fixtures.
+  # GitHub Actions has no built-in `expect-failure`, so we use
+  # `continue-on-error: true` on the action step, then assert the
+  # outcome was `failure` in the next step.
+  # ---------------------------------------------------------------
+  action-negative-cases:
+    name: Action negative case (${{ matrix.fixture }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - fixture: npm-caret-bad
+            expectation: 'caret pin is rejected by Layer 1'
+          - fixture: npm-tilde-bad
+            expectation: 'tilde pin is rejected by Layer 1'
+          - fixture: npm-no-integrity
+            expectation: 'missing integrity is rejected by Layer 2'
+          - fixture: npm-weak-hash
+            expectation: 'sha1 hash is rejected by Layer 2'
+          - fixture: pnpm-no-integrity-bad
+            expectation: 'pnpm missing integrity is rejected by Layer 2'
+          - fixture: bun-text-no-integrity-bad
+            expectation: 'bun-text missing integrity is rejected by Layer 2'
+    steps:
+      - name: Checkout
+        # SHA-pinned (v4.2.2). The whole point of this workflow is to
+        # enforce supply-chain hygiene; depending on a mutable tag for
+        # `actions/checkout` would be self-undermining.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Run verify-wasm-pin-check (expect failure — ${{ matrix.expectation }})
+        id: run_action
+        continue-on-error: true
+        uses: ./.github/actions/verify-wasm-pin-check
+        with:
+          working-directory: .github/actions/verify-wasm-pin-check/test/fixtures/${{ matrix.fixture }}
+          skip-provenance: 'true'
+
+      - name: Assert action FAILED as expected
+        run: |
+          if [ "${{ steps.run_action.outcome }}" != "failure" ]; then
+            echo "::error::Expected action to fail (${{ matrix.expectation }}), but outcome was: ${{ steps.run_action.outcome }}"
+            exit 1
+          fi
+          echo "OK — action failed as expected (${{ matrix.expectation }})"
+
+  # ---------------------------------------------------------------
+  # Job 4 — Live Layer 3 validation against the published package.
+  # Real `npm audit signatures` round-trip to npmjs.org +
+  # rekor.sigstore.dev. Catches regressions in:
+  #   * The Sigstore attestation pipeline (publisher side).
+  #   * npm's attestation API (consumer side).
+  #   * Our retry / backoff logic in check-provenance.sh.
+  #
+  # Runs against a clean throwaway directory with `npm install
+  # --save-exact @atlas-trust/verify-wasm@latest`. We use `latest`
+  # rather than a pinned version so the schedule (cron) catches
+  # regressions in newly-published versions, but a `pull_request`
+  # run will also exercise whatever the latest published version is.
+  # ---------------------------------------------------------------
+  live-install-layer-3:
+    name: Live install + Layer 3 (npm audit signatures)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        # SHA-pinned (v4.2.2). The whole point of this workflow is to
+        # enforce supply-chain hygiene; depending on a mutable tag for
+        # `actions/checkout` would be self-undermining.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        # SHA-pinned (v4.1.0). Same self-undermining concern as
+        # actions/checkout — a mutable tag here would let an upstream
+        # compromise insert code into the very workflow that enforces
+        # supply-chain hardening.
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
+        with:
+          # Pin to v22 LTS — npm 10.x ships here, well past the >= 9.5
+          # threshold the action enforces for the attestation API.
+          node-version: '22'
+
+      - name: Create throwaway consumer project
+        run: |
+          mkdir -p /tmp/atlas-pin-check-live
+          cd /tmp/atlas-pin-check-live
+          # Minimal package.json. We let `npm install --save-exact`
+          # populate the dependency entry — that mirrors the install
+          # ceremony a fresh consumer would follow per CONSUMER-RUNBOOK §1.
+          cat > package.json <<EOF
+          {
+            "name": "atlas-pin-check-live-test",
+            "version": "1.0.0",
+            "private": true
+          }
+          EOF
+          npm install --save-exact @atlas-trust/verify-wasm@latest
+
+      - name: Run verify-wasm-pin-check (full — Layer 1, 2, 3)
+        uses: ./.github/actions/verify-wasm-pin-check
+        with:
+          working-directory: /tmp/atlas-pin-check-live
+          # No expected-version pin — we just want to verify whatever
+          # `latest` was when we installed, and `npm audit signatures`
+          # asserts it carries a verified attestation.
+          provenance-retries: '3'

@@ -16,7 +16,7 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**V1.16 Welle A + Welle B + Welle C shipped — browser-runtime hardening for `apps/wasm-playground/`: strict CSP via `<meta http-equiv>` (`default-src 'none'`, `script-src 'self' 'wasm-unsafe-eval'` — no `'unsafe-inline'`, no `'unsafe-eval'`), Subresource Integrity (sha384) on the application JS, Trusted Types enforcement (`require-trusted-types-for 'script'; trusted-types 'none'` against a sink-free `app.js`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, AND (Welle B) `report-uri /csp-report` so deployed playgrounds surface every blocked CSP violation as a same-origin JSON POST instead of failing silently, AND (Welle C) a Cloudflare Workers + Static Assets host that emits the full security-header set as HTTP headers on every response (HSTS preload, COOP `same-origin`, COEP `require-corp`, the same CSP as a header so `frame-ancestors` finally takes effect, `report-to` + `Reporting-Endpoints` for forward-compat, per-path Cache-Control), runs an executable receiver at `/csp-report` (silent-204 + categorised internal logs + Origin-anchored CSRF + per-IP `/64` + global rate-limit via Durable Object + JSON-bomb defence + ANSI-strip + field allow-list + Workers Analytics Engine `writeDataPoint` persistence), and writes a daily AE → R2 archive heartbeat. Anti-drift pin in `tools/playground-csp-check.sh` (pure-bash CI validator + `--live-check <url>` for post-deploy Worker validation) covers all three Wellen, plus a repo-tracked `tools/git-hooks/pre-commit` activated by `bash tools/install-git-hooks.sh`. V1.15 CLOSED previously (Welle A const-time KID-equality invariant, Welle B dual-channel WASM distribution via GitHub Releases — see [OPERATOR-RUNBOOK §12](docs/OPERATOR-RUNBOOK.md), Welle C consumer-side reproducibility runbook — see [CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md)). V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm + browser playground.**
+**V1.17 Welle A shipped — `verify-wasm-pin-check@v1` consumer-side auto-verify CI Action at `.github/actions/verify-wasm-pin-check/`: a pure-bash composite GitHub Action that re-asserts every CONSUMER-RUNBOOK §1 trust layer on every consumer CI install — Layer 1 (`package.json` exact-version pin — rejects caret/tilde/range/file/git/github/http/workspace/etc.), Layer 2 (lockfile integrity — every entry for `@atlas-trust/verify-wasm` carries `sha512`/`sha384`/`sha256` integrity, HTTPS-origin `resolved`, version matching the pin, across npm `lockfileVersion` 1+2+3 / pnpm v6+ / Bun `bun.lockb` binary + `bun.lock` text), Layer 3 (`npm audit signatures` round-trip → SLSA L3 OIDC provenance attestation via Sigstore Rekor + npm registry, with exponential-backoff retry 10s/30s/90s on transient registry/Sigstore outage and immediate-fail on cryptographic-rejection). Field-separator hardening (`\x1f` ASCII Unit Separator, octal `\037` for AWK portability) defends against bash IFS-whitespace collapse silently masking Layer 2 failures. String-aware JSONC tokenizer for `bun.lock` (regex-based JSONC strippers trip on `//` inside HTTPS URLs). Read-only against consumer files + npm attestation API; pure-bash composite action with no `dist/index.js` bundle (the irony of a supply-chain-hardening action being itself a supply-chain risk would defeat the point). 16 fixture-based unit tests + 4-job self-test workflow at `.github/workflows/verify-wasm-pin-check-self-test.yml` (fixture harness, action-fixture invocation matrix, action-negative-case matrix with outcome assertion, and `live-install-layer-3` with real `npm install --save-exact @atlas-trust/verify-wasm@latest` + live Sigstore round-trip on every push/PR + weekly cron Mon 06:17 UTC to catch live regressions). V1.16 CLOSED previously (Welle A strict CSP + SRI + Trusted Types on `apps/wasm-playground/`, Welle B `report-uri /csp-report` for blocked-violation surfacing, Welle C Cloudflare Workers + Static Assets host with executable receiver, security-header layering, and AE → R2 daily archive — see [docs/ARCHITECTURE.md V1.16 boundary](docs/ARCHITECTURE.md)). V1.15 CLOSED previously (Welle A const-time KID-equality invariant, Welle B dual-channel WASM distribution via GitHub Releases — see [OPERATOR-RUNBOOK §12](docs/OPERATOR-RUNBOOK.md), Welle C consumer-side reproducibility runbook — see [CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md)). V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm + browser playground.**
 
 Trust-core crate + Rekor anchoring + per-tenant key derivation + HSM-backed signing + independent
 witness attestor (V1.5 mock-issuer, V1.6 live Sigstore Rekor v1, V1.7 anchor-chain + shard
@@ -157,8 +157,26 @@ SRI hash + `report-uri` declaration on every CI run; with
 `--live-check <url>` it asserts every Worker-emitted hardening
 invariant against the deployed URL post-deploy. A repo-tracked
 `tools/git-hooks/pre-commit` activated by `bash tools/install-git-
-hooks.sh` runs the validator at commit time. Graph-database
-integration and policy-engine follow in V2.
+hooks.sh` runs the validator at commit time. V1.17 Welle A closes
+the V1.15 Welle C automation gap with a reusable consumer-side
+GitHub Action (`.github/actions/verify-wasm-pin-check@v1`) that
+re-asserts every CONSUMER-RUNBOOK §1 trust layer on every CI run:
+exact-version pin in `package.json` (rejecting caret/tilde/range/
+file/git/github/http/workspace), per-entry `sha512`/`sha384`/
+`sha256` lockfile integrity (across npm v1+v2+v3 / pnpm v6+ /
+Bun binary + text formats), and `npm audit signatures` SLSA L3
+provenance with exponential-backoff retry against transient
+Sigstore/registry outage but immediate-fail on cryptographic
+rejection. The action is pure-bash composite (no `dist/index.js`
+bundle, no transitive npm dependency tree of its own), read-only
+against consumer files + the npm attestation API, and runs
+entirely on the consumer's GitHub Actions runner. 16 fixture-based
+unit tests + a 4-job self-test workflow including a weekly cron
+that performs a live `npm install --save-exact @atlas-trust/
+verify-wasm@latest` + real `npm audit signatures` round-trip
+catch publisher-side or Sigstore-side regressions before they
+reach downstream consumers. Graph-database integration and
+policy-engine follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
   trust property, write/export flows, V1 → V1.16 → V2 boundaries.

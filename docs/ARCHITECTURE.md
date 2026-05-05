@@ -1564,6 +1564,112 @@ Headline:
   [docs/SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-d "What scope-d
   does NOT cover".
 
+### V1.17 — Consumer-side auto-verify CI Action (shipped: Welle A)
+
+- **`verify-wasm-pin-check@v1` composite GitHub Action.** A
+  reusable, pure-bash composite action at
+  `.github/actions/verify-wasm-pin-check/` that re-asserts every
+  CONSUMER-RUNBOOK §1 trust layer on every consumer CI install:
+  Layer 1 (`package.json` exact-version pin — rejects caret/tilde/
+  range/file/git/github/http/workspace/etc.), Layer 2 (lockfile
+  integrity — every entry for `@atlas-trust/verify-wasm` carries a
+  `sha512`/`sha384`/`sha256` integrity hash, HTTPS-origin
+  `resolved`, `version` matching the pin), Layer 3 (`npm audit
+  signatures` round-trip → SLSA L3 OIDC provenance attestation
+  served by Sigstore Rekor + npm registry), with exponential-
+  backoff retry (10s/30s/90s) on transient registry/Sigstore outage
+  and immediate-fail on cryptographic-rejection (attestation-/
+  signature-failure). Auto-detects npm / pnpm / Bun (npm precedence
+  on tie); supports npm `lockfileVersion` 1+2+3, pnpm `lockfileVersion`
+  6+, Bun `bun.lockb` binary (via `bun pm ls --json`) and `bun.lock`
+  text (JSONC parsed via a string-aware tokenizer that does NOT
+  trip on `//` inside URL strings — the regex-based JSONC stripper
+  pattern is unsafe for any input that may contain HTTPS URLs).
+  Inputs include `expected-version` (asserts an exact match),
+  `package-manager` override, `working-directory`, `skip-provenance`
+  (only for npm < 9.5 emergency lanes), `fail-on-local-file` (HARD
+  FAIL on V1.15 Welle B `file:`-resolved backup-channel installs
+  for high-assurance consumer pipelines), and `provenance-retries`.
+- **Closes the V1.15 Welle C automation gap.** CONSUMER-RUNBOOK §1
+  defines the three-layer integrity ceremony, but the runbook is a
+  procedure document — a consumer who follows it once at install
+  time and then forgets to re-run on every CI build leaves a
+  silent window in which a maintainer-token-compromise can land
+  between two installs and only be caught at the next manual
+  quarterly audit. V1.17 Welle A makes the CONSUMER-RUNBOOK §1
+  ceremony continuously self-enforcing: every CI run repeats the
+  three-layer check, no possibility of forgetting a layer, no
+  possibility of skipping the audit step. The action is itself
+  pure-bash (no opaque `dist/index.js` bundle, no transitive npm
+  dependency tree of its own — the irony of a supply-chain-
+  hardening action being itself a supply-chain risk would defeat
+  the point).
+- **Field-separator hardening (`\x1f` ASCII Unit Separator).** The
+  per-lockfile scripts pass extracted `(key, version, resolved,
+  integrity)` tuples from their helper interpreter (Node for npm/
+  bun-text, AWK for pnpm) back into bash via `read`. The original
+  implementation used `\t` as the field separator, which collides
+  with bash IFS-whitespace semantics: when IFS is a whitespace
+  character (tab, space, newline), consecutive separators are
+  merged into one — so any empty middle field would shift all
+  trailing fields by one column and silently mask Layer 2
+  integrity failures. Switched to `\x1f` (ASCII Unit Separator,
+  the canonical field-separator char in the C locale, never
+  appears in any realistic lockfile content) so empty fields stay
+  empty and the assertions remain crisp. AWK side uses the octal
+  form `\037` for portability (gawk supports `\x1f` hex but mawk
+  and busybox awk only handle octal).
+- **16 fixture-based unit tests + 4-job self-test workflow.** The
+  fixture harness `test/run-tests.sh` runs 36 assertions across 16
+  synthetic fixtures (good + bad lockfiles for npm v1/v2/v3, pnpm
+  v6+, Bun text + binary, plus negative cases for caret pins,
+  tilde pins, missing integrity, sha1 weak hash, file: backup-
+  channel resolved entries) — Layers 1 + 2 only, no network. The
+  GitHub Actions self-test workflow
+  `.github/workflows/verify-wasm-pin-check-self-test.yml` runs
+  four jobs on every push/PR that touches the action, plus a
+  weekly cron (Mon 06:17 UTC) to catch live Sigstore regressions:
+  `fixture-unit-tests` (the harness directly), `action-fixture-
+  invocation` (matrix: invokes the composite action via `uses:`
+  against each Layer-2-passing fixture), `action-negative-cases`
+  (matrix with `continue-on-error: true` + outcome assertion that
+  the action FAILED for each bad fixture), and `live-install-
+  layer-3` (real `npm install --save-exact @atlas-trust/verify-
+  wasm@latest` against npmjs.org + a full action invocation
+  including the live `npm audit signatures` round-trip to
+  rekor.sigstore.dev — the end-to-end smoke test that catches
+  publisher-side or Sigstore-side regressions).
+- **Trust property unchanged; consumer-side automation tightened.**
+  V1.17 Welle A ships zero verifier-logic change — the verifier
+  binary, the WASM bundle, the byte-determinism pins, the SLSA L3
+  provenance attestation produced by the V1.14 Scope E publish
+  workflow are all unchanged. The shipped action is read-only
+  against the consumer's `package.json` + lockfile + the npm
+  attestation API, runs entirely on the consumer's GitHub Actions
+  runner, has access to no Atlas secret, and makes only the one
+  network round-trip required by `npm audit signatures`. The
+  trust property closed by V1.17 Welle A is **F-4 — consumer-side
+  cadence-pinning of all three CONSUMER-RUNBOOK §1 layers**:
+  before V1.17 the runbook was procedural; after V1.17 the
+  runbook is enforceable at every CI run with a one-line
+  `uses:` step.
+- **What V1.17 Welle A is NOT yet (V1.18+ candidates):** GitHub
+  Marketplace publishing of the action with its own SLSA L3
+  attestation; auto-bump PRs for the pinned version (Renovate /
+  Dependabot integration that respects the exact-version-pin
+  invariant); transitive-dependency provenance scan (would
+  require expanding the trust-domain beyond the verifier
+  package itself); air-gapped Layer 3 alternative (the action
+  currently requires reachability of npmjs.org + rekor.sigstore.
+  dev — an offline deployment would need a local Sigstore mirror
+  + signed-attestation cache — not load-bearing for V1.17
+  scope); multi-package extension (one action invocation per
+  Atlas npm package — works today via repeated `uses:` blocks,
+  but a `packages:` array input would be ergonomic). These are
+  V1.18+ candidates documented in
+  [docs/SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-k "What
+  scope-k does NOT cover".
+
 ### V2 — full COSE + policy + SPIFFE
 
 - Switch to RFC 9052 COSE_Sign1 with full CTAP2 canonical CBOR

@@ -1,4 +1,4 @@
-# Atlas — Consumer Runbook (V1.15)
+# Atlas — Consumer Runbook (V1.15 + V1.17)
 
 This document is the reference for **downstream consumers** of
 `@atlas-trust/verify-wasm` — auditor tooling, in-house verification
@@ -485,6 +485,7 @@ npm install --ignore-scripts \
 | 4 | Consumer | §1 | Commit lockfile to source control |
 | 5 | Consumer | §2 | CI lane runs `npm ci` (or pnpm/Bun strict equivalent) on every build |
 | 6 | Consumer | §5 | CI lane runs `npm audit signatures` on every install (recommended) |
+| 6a | Consumer | §9 (V1.17) | CI lane runs `verify-wasm-pin-check@v1` to assert all three layers automatically — replaces the manual §6 step with a one-line auditable action |
 | 7 | Consumer | OPERATOR-RUNBOOK §12 | If npm unreachable: backup-channel install, re-pin lockfile |
 | 8 | Consumer | §6 | If both channels unreachable: rebuild from source, byte-compare |
 
@@ -519,7 +520,154 @@ git clone https://github.com/ThePyth0nKid/atlas.git && cd atlas
 git checkout v1.15.0
 cargo install wasm-pack --version 0.13.1 --locked
 wasm-pack build crates/atlas-verify-wasm --target web --release --out-dir pkg-web
+
+# Auto-verify on every CI install (V1.17 Welle A — see §9):
+#   - uses: ThePyth0nKid/atlas/.github/actions/verify-wasm-pin-check@v1.17.0
 ```
+
+---
+
+## 9. Auto-Verify CI Action (V1.17 Welle A — `verify-wasm-pin-check@v1`)
+
+Sections 1–8 describe the consumer-side trust ceremony as a sequence
+of manual `npm install --save-exact` + `npm audit signatures`
+commands. That ceremony is correct, but it has a structural failure
+mode: a consumer follows it once at install time, then forgets to
+re-verify on every CI run, leaving a silent window where a
+maintainer-token-compromise can land between two installs and only be
+caught at the next manual quarterly audit.
+
+V1.17 Welle A closes that gap with a one-line GitHub Action:
+
+```yaml
+- uses: ThePyth0nKid/atlas/.github/actions/verify-wasm-pin-check@v1.17.0
+```
+
+### What the action asserts on every CI run
+
+The action runs all three §1 trust layers automatically and fails the
+build on any drift:
+
+1. **Layer 1 — Version pin.** Reads `package.json`, rejects any
+   `^1.15.0`, `~1.15.0`, `>=`, `||`, `*`, `latest`, `next`, `x`,
+   `workspace:`, `file:`, `link:`, `git+`, `github:`, `http:`, or
+   `https:` value. Bare semver only (`1.15.0` / `1.15.0-rc.1` /
+   `1.15.0+sha.abc`). Checks `dependencies`, `devDependencies`,
+   `peerDependencies`, and `optionalDependencies`.
+2. **Layer 2 — Lockfile integrity.** Reads the lockfile (auto-detected:
+   `package-lock.json` / `pnpm-lock.yaml` / `bun.lockb` / `bun.lock`)
+   and asserts every entry for the package has an `integrity` field
+   whose hash prefix is `sha512-` / `sha384-` / `sha256-`. `sha1-` and
+   `md5-` are HARD FAIL (collisions are practical and don't defend
+   against registry-side replacement). Validates the `resolved` URL
+   origin (canonical `registry.npmjs.org` is silent-OK; corporate-
+   mirror HTTPS hosts emit a warning so the integrity hash being
+   mirror-served is visible; `file:` is the V1.15 Welle B
+   backup-channel state — WARN by default, HARD FAIL with
+   `fail-on-local-file: true`).
+3. **Layer 3 — SLSA L3 provenance.** Runs `npm audit signatures` and
+   asserts (i) the command exits 0, (ii) the output reports a
+   `verified attestation` line, and (iii) the package is not
+   mentioned in any failure context. Retries on transient Sigstore
+   Rekor / npm attestation endpoint outages with exponential backoff
+   (10s / 30s / 90s, ~2 min total on 3 retries).
+
+### Minimal usage
+
+```yaml
+# .github/workflows/ci.yml
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'   # ships npm >= 10, well past the npm >= 9.5 attestation threshold
+      - run: npm ci             # consumer's own install step — action does not install anything itself
+      - uses: ThePyth0nKid/atlas/.github/actions/verify-wasm-pin-check@v1.17.0
+```
+
+### Full input surface
+
+```yaml
+- uses: ThePyth0nKid/atlas/.github/actions/verify-wasm-pin-check@v1.17.0
+  with:
+    package-name: '@atlas-trust/verify-wasm'   # default
+    expected-version: '1.15.0'                  # if set, must match exactly
+    package-manager: 'auto'                     # auto | npm | pnpm | bun
+    working-directory: '.'                      # default — repo root; set per-package for monorepos
+    skip-provenance: 'false'                    # set 'true' ONLY for npm < 9.5 or scheduled outage acceptance
+    fail-on-local-file: 'false'                 # set 'true' to refuse V1.15 Welle B backup-channel installs once npm is reachable
+    provenance-retries: '3'                     # exponential backoff: 10s / 30s / 90s on transient Sigstore outages
+```
+
+### Recommended pinning posture (consumer side)
+
+For high-assurance pipelines, pin the action itself to a **commit
+SHA**, not the moving `@v1.17.0` tag — this is the same defence-in-
+depth the action enforces on the package it verifies:
+
+```yaml
+- uses: ThePyth0nKid/atlas/.github/actions/verify-wasm-pin-check@<full-40-char-sha>
+```
+
+### Composition with `npm ci` / `pnpm install --frozen-lockfile`
+
+The action **does not** run `npm install` itself. It is a read-only
+post-install verifier. Run your own install step first (typically
+`npm ci` / `pnpm install --frozen-lockfile` / `bun install
+--frozen-lockfile`) and then invoke the action. The separation is
+deliberate: install steps are user-side concerns (caching, registry
+config, lockfile regeneration), and bundling install with
+verification would obscure responsibility on failure.
+
+### Why a composite action (not a TypeScript or Docker action)
+
+The action ships as a pure-bash composite (every step `shell: bash`
+against per-script files in `.github/actions/verify-wasm-pin-check/scripts/`),
+not a TypeScript bundle. This is deliberate: a TypeScript action would
+become its own dependency tree that itself needs auditing — a supply-
+chain-hardening action that introduces supply-chain risk would defeat
+the point. The composite is reviewable in one scroll, with no opaque
+`dist/index.js` and no transitive npm deps.
+
+### Self-test workflow
+
+`.github/workflows/verify-wasm-pin-check-self-test.yml` exercises the
+action on every push / PR that touches it, plus a weekly cron at
+`Mon 06:17 UTC` to catch live Sigstore regressions independent of
+code changes. Four jobs:
+
+1. `fixture-unit-tests` — 16 synthetic fixtures, Layers 1 + 2 only,
+   no network (~30s).
+2. `action-fixture-invocation` — invokes the composite action via
+   `uses:` against each Layer-2-passing fixture; validates input
+   plumbing.
+3. `action-negative-cases` — invokes the action against bad fixtures,
+   asserts each fails with the expected exit code (`continue-on-error:
+   true` + outcome assertion in the next step).
+4. `live-install-layer-3` — `npm install --save-exact
+   @atlas-trust/verify-wasm@latest` then runs the full action with all
+   three layers and a real Sigstore round-trip.
+
+### When to skip a layer
+
+Don't, in production CI. Three legitimate reasons exist:
+
+- `skip-provenance: true` for npm < 9.5 (no attestation API). Upgrade
+  npm instead — `actions/setup-node@v4` ships ≥10.
+- `skip-provenance: true` for a known-scheduled Sigstore /
+  rekor.sigstore.dev outage. Re-enable as soon as the outage closes.
+- The `fail-on-local-file: true` toggle is the OPPOSITE — it
+  *increases* strictness, not decreases it (rejects backup-channel
+  installs after npm reachability is restored).
+
+For threat-model background see [SECURITY-NOTES §scope-k](SECURITY-NOTES.md)
+and the V1.17 Welle A boundary block in
+[ARCHITECTURE.md](ARCHITECTURE.md). For action implementation +
+input documentation see
+[`.github/actions/verify-wasm-pin-check/README.md`](../.github/actions/verify-wasm-pin-check/README.md).
 
 ---
 

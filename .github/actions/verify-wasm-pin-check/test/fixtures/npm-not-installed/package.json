@@ -1,0 +1,8 @@
+{
+  "name": "fixture-npm-not-installed",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "some-other-package": "1.0.0"
+  }
+}

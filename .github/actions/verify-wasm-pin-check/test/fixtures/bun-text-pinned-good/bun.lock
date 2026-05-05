@@ -1,0 +1,19 @@
+{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "fixture-bun-text-pinned-good",
+      "dependencies": {
+        "@atlas-trust/verify-wasm": "1.15.0"
+      }
+    }
+  },
+  "packages": {
+    "@atlas-trust/verify-wasm": [
+      "@atlas-trust/verify-wasm@1.15.0",
+      "https://registry.npmjs.org/@atlas-trust/verify-wasm/-/verify-wasm-1.15.0.tgz",
+      {},
+      "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    ]
+  }
+}

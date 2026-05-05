@@ -1,0 +1,190 @@
+# V1.17 Welle A — `verify-wasm-pin-check` Composite Action.
+#
+# Closes the consumer-side automation gap from V1.15 Welle C
+# (CONSUMER-RUNBOOK.md): every downstream consumer of
+# `@atlas-trust/verify-wasm` should verify all three integrity layers
+# (version-pin → lockfile-integrity → SLSA L3 provenance) on every CI
+# install, not just at the install-time `npm audit signatures` ceremony.
+# This action makes that a one-line CI step.
+#
+# Trust property:
+#   "Consumer-side CI lane automatically re-verifies the three
+#    CONSUMER-RUNBOOK §1 integrity layers on every build, with no
+#    possibility of skipping a layer by accident or forgetting the
+#    `npm audit signatures` step."
+#
+# Failure mode addressed:
+#   "Consumer follows CONSUMER-RUNBOOK once at install time but forgets
+#    to re-verify on every CI run, leaving a silent window where a
+#    maintainer-token-compromise can land between two installs and
+#    only be caught at the next manual quarterly audit."
+#
+# Why a composite action (not a TypeScript / docker action):
+#   * Pure-bash + small per-script files. Auditable from the action.yml
+#     down — no opaque `dist/index.js` bundle to trust.
+#   * No build step; no transitive npm dependency tree of its own; no
+#     possibility for the action itself to become a supply-chain risk.
+#   * Matches the V1.15 Welle B + V1.16 Welle A/B/C pattern: the
+#     `tools/playground-csp-check.sh` validator and the git pre-commit
+#     hook are also pure-bash, also sink-free, also reviewable in one
+#     scroll.
+#
+# Composes with — does not replace — `npm ci` / `pnpm install
+# --frozen-lockfile` / `bun install --frozen-lockfile`. Run those first
+# (or after, doesn't matter for our checks since we only read static
+# files), then run this action to assert the lockfile + the package.json
+# + the npm-side attestation are all consistent.
+#
+# Versioning: tag this action via `git tag v1.17.0` against the Atlas
+# monorepo. Consumers reference as
+# `uses: ThePyth0nKid/atlas/.github/actions/verify-wasm-pin-check@v1.17.0`
+# (full SHA pin recommended for high-assurance pipelines —
+# `@<commit-sha>` instead of `@v1.17.0`). A future Welle may extract
+# this into a standalone `atlas-trust/verify-wasm-pin-check` repo with
+# major-version tags (`@v1`); for V1.17 the monorepo path is the
+# canonical reference.
+#
+# Trust-domain note: this action runs on the CONSUMER's GitHub Actions
+# runner. It does NOT have access to any Atlas secret, MUST NOT make
+# any network call other than `npm audit signatures` (which talks to
+# `registry.npmjs.org` + `rekor.sigstore.dev` — both load-bearing for
+# the SLSA L3 verification), and MUST NOT mutate any consumer file.
+# Read-only against `package.json` + `package-lock.json` /
+# `pnpm-lock.yaml` / `bun.lockb`. The npm-audit-signatures step is
+# the only step that exercises the network.
+
+name: 'verify-wasm-pin-check'
+description: 'Verify @atlas-trust/verify-wasm is exact-pinned, lockfile-integrity-locked, and SLSA L3 provenance-attested.'
+
+# Atlas brand colour + a check-shield icon for the marketplace listing.
+# (Marketplace publication is a future-Welle decision; the icon/color
+# render in the GitHub Actions UI either way.)
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  package-name:
+    description: |
+      Package to verify. Defaults to `@atlas-trust/verify-wasm` — the
+      canonical Atlas consumer-side package. Override only if you
+      maintain a private fork under a different scope (e.g.
+      `@your-org/atlas-verify-wasm-mirror`); the integrity-checks
+      themselves are package-name-agnostic.
+    required: false
+    default: '@atlas-trust/verify-wasm'
+
+  expected-version:
+    description: |
+      If set (e.g. `1.15.0`), the lockfile pin MUST match this version
+      exactly. Bare semver only — no `^`, `~`, or `>=` ranges (those
+      defeat the point of the check). If empty (default), any
+      exact-pinned version passes Layer 1 — useful when the action is
+      invoked from a matrix job that pins multiple versions, or when
+      the consumer is fine with version-floor flexibility as long as
+      every install is itself exact-pinned and lockfile-locked.
+    required: false
+    default: ''
+
+  package-manager:
+    description: |
+      One of: `auto` (default — detect from lockfile presence),
+      `npm`, `pnpm`, `bun`. The auto-detect is order-sensitive
+      (npm > pnpm > bun) — explicit override is recommended for
+      multi-PM monorepos that may have stale lockfiles from a
+      prior PM.
+    required: false
+    default: 'auto'
+
+  working-directory:
+    description: |
+      Directory containing `package.json` + the lockfile. Default `.`
+      (repo root). For monorepos, set to the package directory
+      (e.g. `apps/auditor-web`).
+    required: false
+    default: '.'
+
+  skip-provenance:
+    description: |
+      Skip the Layer 3 `npm audit signatures` check. Set to `true`
+      ONLY if you are on npm < 9.5 (no attestation API) OR you are
+      deliberately accepting a transient Sigstore / npm attestation
+      outage. Skipping permanently defeats the SLSA L3 layer — use
+      sparingly and document the reason in your CI config.
+    required: false
+    default: 'false'
+
+  fail-on-local-file:
+    description: |
+      If `true`, a lockfile entry resolved to a local file (e.g.
+      `file:atlas-trust-verify-wasm-1.15.0-web.tgz` — typical of the
+      V1.15 Welle B GitHub-Releases backup-channel install path) is
+      a HARD FAIL, not a WARN. Use this in pipelines that have
+      cleared the npm-side outage and want to enforce re-pinning to
+      the registry source. Default `false` — backup-channel installs
+      are warned but accepted (the bytes are byte-identical between
+      channels per V1.15 Welle B by design).
+    required: false
+    default: 'false'
+
+  provenance-retries:
+    description: |
+      Number of retries for `npm audit signatures` against transient
+      Sigstore Rekor / npm attestation endpoint outages. Total wait
+      time on max retries is roughly 10s + 30s + 90s = ~2 minutes
+      (exponential backoff). Set to `0` to fail fast on the first
+      attempt — useful for pipelines where transient-outage handling
+      is done at a higher layer.
+    required: false
+    default: '3'
+
+# Composite step pipeline. Every step is `shell: bash`. We do not use
+# `working-directory:` on the step (it changes the cwd inside the bash
+# subprocess but does NOT propagate to subsequent steps, so we'd have
+# to set it on every step anyway); instead we pass `ATLAS_PIN_CHECK_WORKDIR`
+# and the scripts `cd` explicitly, which makes path errors easier to
+# debug from logs.
+runs:
+  using: 'composite'
+  steps:
+    - name: Detect package manager + validate inputs
+      shell: bash
+      env:
+        ATLAS_PIN_CHECK_PACKAGE: ${{ inputs.package-name }}
+        ATLAS_PIN_CHECK_WORKDIR: ${{ inputs.working-directory }}
+        ATLAS_PIN_CHECK_PM: ${{ inputs.package-manager }}
+        ATLAS_PIN_CHECK_EXPECTED_VERSION: ${{ inputs.expected-version }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/setup.sh"
+
+    - name: Layer 1 — Version pin in package.json
+      shell: bash
+      env:
+        ATLAS_PIN_CHECK_PACKAGE: ${{ inputs.package-name }}
+        ATLAS_PIN_CHECK_WORKDIR: ${{ inputs.working-directory }}
+        ATLAS_PIN_CHECK_EXPECTED_VERSION: ${{ inputs.expected-version }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/check-version-pin.sh"
+
+    - name: Layer 2 — Lockfile integrity hash
+      shell: bash
+      env:
+        ATLAS_PIN_CHECK_PACKAGE: ${{ inputs.package-name }}
+        ATLAS_PIN_CHECK_WORKDIR: ${{ inputs.working-directory }}
+        ATLAS_PIN_CHECK_PM: ${{ inputs.package-manager }}
+        ATLAS_PIN_CHECK_FAIL_ON_LOCAL: ${{ inputs.fail-on-local-file }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/check-lockfile-integrity.sh"
+
+    - name: Layer 3 — SLSA L3 provenance via `npm audit signatures`
+      if: ${{ inputs.skip-provenance != 'true' }}
+      shell: bash
+      env:
+        ATLAS_PIN_CHECK_PACKAGE: ${{ inputs.package-name }}
+        ATLAS_PIN_CHECK_WORKDIR: ${{ inputs.working-directory }}
+        ATLAS_PIN_CHECK_RETRIES: ${{ inputs.provenance-retries }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/check-provenance.sh"
+
+    - name: Summary
+      shell: bash
+      env:
+        ATLAS_PIN_CHECK_PACKAGE: ${{ inputs.package-name }}
+        ATLAS_PIN_CHECK_SKIPPED_PROVENANCE: ${{ inputs.skip-provenance }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/summary.sh"

@@ -1,0 +1,8 @@
+{
+  "name": "fixture-npm-local-file",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@atlas-trust/verify-wasm": "1.15.0"
+  }
+}
