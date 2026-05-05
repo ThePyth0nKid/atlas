@@ -112,6 +112,30 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      # actions/checkout@v4 with `fetch-tags: true` can leave annotated
+      # tag OBJECTS missing under partial-clone/filter modes — only the
+      # tag REF is fetched, pointing directly at the target commit
+      # (lightweight). `git verify-tag` then refuses to verify the
+      # non-tag object, breaking the V1.17 Welle B gate even on a
+      # legitimately-signed tag. This was caught on the v1.17.0 first
+      # tag-cut (run 25394785761). Force-refetching tags after checkout
+      # repopulates the annotated objects so verification sees the
+      # signed tag, not the dereferenced commit.
+      #
+      # Unconditional on purpose. An earlier draft gated this on the
+      # same `push + refs/tags/v*` predicate as the verify-tag step
+      # below, which created a latent fragility: if a future trigger
+      # change adds a new path that needs the verify-tag gate (e.g.
+      # `repository_dispatch` for a re-publish from a hot-fix tag), a
+      # maintainer could update the verify-tag step's `if:` and silently
+      # leave the refetch step skipped — re-introducing the exact bug
+      # this fix repairs. Cost of unconditional fetch: ~1 s on a
+      # workflow-dispatch run with no tag activity. Benefit: the
+      # invariant "verify-tag never runs without its required preamble"
+      # holds regardless of future trigger surface evolution.
+      - name: Refetch annotated tag objects
+        run: git fetch --tags --force origin
+
       # V1.17 Welle B — Tag-Signing Enforcement.
       #
       # FIRST gate: refuse to build / publish if the just-pushed tag is

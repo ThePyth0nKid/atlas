@@ -181,6 +181,46 @@ for tag in "${TAGS[@]}"; do
     continue
   fi
 
+  # Lightweight-tag pre-check. A lightweight tag is a ref pointing
+  # directly at a commit object, with no tag object in between — and
+  # therefore no signature surface. `git verify-tag` rejects these with
+  # the cryptic "cannot verify a non-tag object of type commit". We
+  # pre-detect via `git cat-file -t` and emit an actionable diagnostic.
+  #
+  # Three real-world causes:
+  #   1. Maintainer used `git tag <name>` instead of `git tag -s <name>`.
+  #      The tag was never annotated and therefore never signed.
+  #   2. CI: `actions/checkout@v4` with `fetch-tags: true` under
+  #      partial-clone fetches the tag REF but not the annotated tag
+  #      OBJECT. The local ref then resolves to the commit. Workflow
+  #      fix: add `git fetch --tags --force origin` after checkout so
+  #      the tag objects are repopulated. (V1.17 Welle B v1.17.0
+  #      tag-cut #1 hit exactly this — run 25394785761.)
+  #   3. INCIDENT: a previously-annotated v* tag has been replaced with
+  #      a lightweight ref pointing at a different (or same) commit.
+  #      Operator's first action: `git fetch --tags --force origin` AND
+  #      `git for-each-ref --format="%(refname) %(objecttype)" refs/tags/v*`
+  #      to confirm types match expectations. If a remote-side tag has
+  #      genuinely been overwritten, treat as a potential trust-root
+  #      compromise and consult `docs/SECURITY-NOTES.md` scope-l.
+  REF_TYPE="$(git cat-file -t "refs/tags/${tag}" 2>/dev/null || echo "")"
+  if [ "${REF_TYPE}" != "tag" ]; then
+    echo "  FAIL: ${tag} (lightweight tag — no tag object, no signature)"
+    echo "        ref type: ${REF_TYPE:-<unknown>} (annotated tag would be 'tag')"
+    echo "        Cause 1 (local): tag created with 'git tag <name>'"
+    echo "          instead of 'git tag -s <name>'."
+    echo "        Cause 2 (CI): actions/checkout fetched the ref but not"
+    echo "          the tag object. Add 'git fetch --tags --force origin'"
+    echo "          after checkout to repopulate annotated tag objects."
+    echo "        Cause 3 (incident): a remote-side annotated tag has"
+    echo "          been overwritten with a lightweight ref. If the local"
+    echo "          fetch + reverify still shows commit-typed ref, treat"
+    echo "          as potential trust-root compromise — see scope-l."
+    FAIL=$((FAIL + 1))
+    FAILED_TAGS+=("${tag}")
+    continue
+  fi
+
   # Reuse the pre-allocated ERR_LOG; truncate per iteration. The EXIT
   # trap (set above the loop) handles cleanup on any exit path.
   : > "${ERR_LOG}"

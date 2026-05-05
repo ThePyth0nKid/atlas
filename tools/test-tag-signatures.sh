@@ -153,7 +153,16 @@ git tag v0.0.0-test-lightweight HEAD >/dev/null 2>&1
 assert "lightweight tag → FAIL with non-tag-object diagnostic" \
   "bash tools/verify-tag-signatures.sh v0.0.0-test-lightweight" \
   "1" \
-  "(cannot verify a non-tag object|FAIL: v0.0.0-test-lightweight)"
+  "lightweight tag — no tag object"
+# Sub-assertion: the diagnostic must remain actionable for the two
+# real-world causes (local maintainer used `git tag` not `git tag -s`,
+# OR CI environment fetched the ref without the annotated tag object).
+# Failing this regression catches a future "helpful refactor" that
+# strips the actionable hints from the error path.
+assert "lightweight tag diagnostic includes local + CI remediation" \
+  "bash tools/verify-tag-signatures.sh v0.0.0-test-lightweight 2>&1" \
+  "1" \
+  "git fetch --tags --force origin"
 git tag -d v0.0.0-test-lightweight >/dev/null 2>&1
 
 echo ""

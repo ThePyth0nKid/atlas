@@ -86,6 +86,24 @@ jobs:
           fetch-tags: true
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
 
+      # actions/checkout@v4 with `fetch-tags: true` fetches tag REFS but
+      # under partial-clone or filter modes can leave annotated tag
+      # OBJECTS missing — `refs/tags/v1.17.0` then resolves directly to
+      # the target commit (lightweight ref) rather than to the tag
+      # object. `git verify-tag` correctly refuses to verify a non-tag
+      # object: "cannot verify a non-tag object of type commit". This
+      # was the failure surface on the very first signed tag-cut
+      # (v1.17.0 attempt 1, run 25394785761). Force-refetching all
+      # tags after checkout repopulates the annotated tag objects,
+      # closing the gap. `--force` overwrites any lightweight-converted
+      # local tag refs with the remote's annotated objects.
+      #
+      # Belt-and-suspenders: if a future actions/checkout release fixes
+      # the partial-fetch behaviour, this step becomes a redundant
+      # ~1-second no-op rather than a hidden hazard.
+      - name: Refetch annotated tag objects
+        run: git fetch --tags --force origin
+
       # Sanity-print so a CI log on a quiet day still confirms the
       # verification ran against the expected trust root rather than
       # silently exiting 0 on a missing-file path. The verifier script
