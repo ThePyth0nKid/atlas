@@ -2317,6 +2317,108 @@ If any of these drift from expected, scope-m's defence is partially
 or fully bypassable. Restore the configuration via the Settings UI
 or `gh api PATCH`.
 
+### Modern-Rulesets equivalent (recommended path)
+
+GitHub now recommends **Repository Rulesets** over classic Branch
+Protection for new configurations. The Atlas-2026-05-05 production
+configuration uses a Ruleset (id `15986324`, name "Master trust-root
+protection"). The mappings between the classic-protection settings
+above and the Ruleset rule types are:
+
+| Classic setting | Ruleset rule type / parameter |
+|---|---|
+| Require pull request before merging | `pull_request` rule |
+| Require approvals → 1 | `pull_request.required_approving_review_count` (see solo caveat below) |
+| Require review from Code Owners | `pull_request.require_code_owner_review: true` |
+| Dismiss stale approvals on push | `pull_request.dismiss_stale_reviews_on_push: true` |
+| Require status checks | `required_status_checks` rule |
+| (status check contexts) | `required_status_checks.required_status_checks[].context` |
+| Require branches up-to-date | `required_status_checks.strict_required_status_checks_policy: true` |
+| Require signed commits | `required_signatures` rule |
+| Allow force pushes (UNCHECKED) | `non_fast_forward` rule (= force-push BLOCKED) |
+| Allow deletions (UNCHECKED) | `deletion` rule (= deletion BLOCKED) |
+| Include administrators / Do not allow bypassing | `bypass_actors: []` (empty list) |
+
+Verify a Ruleset configuration with:
+
+```bash
+gh api -H "Accept: application/vnd.github+json" \
+  repos/ThePyth0nKid/atlas/rulesets/15986324
+```
+
+Expect `enforcement: active`, `bypass_actors: []`,
+`current_user_can_bypass: never`, and the six rule types listed in
+the mapping table above.
+
+### Solo-maintainer caveats
+
+The recommended `Require approvals → 1` value above is correct for a
+multi-maintainer team. **For a solo-maintainer repository (Atlas's
+current state — single maintainer `@ThePyth0nKid` for V1.0 through
+V1.17)**, that value should be `0`, not `1`. The Atlas-2026-05-05
+configuration uses
+`pull_request.required_approving_review_count: 0`. The reasons:
+
+  1. **GitHub does not allow self-review of a PR you authored.** With
+     a single maintainer and `required_approving_review_count: 1`,
+     every PR — even trivial ones — would be unmergeable without
+     temporarily disabling the Ruleset. That defeats the entire
+     point of the Ruleset.
+  2. **Welle C's defence does NOT depend on the generic approval
+     count.** It depends on `require_code_owner_review: true` +
+     `.github/CODEOWNERS` pinning the PROTECTED_SURFACE to
+     `@ThePyth0nKid`. CODEOWNERS-required-review IS the two-identity
+     requirement for trust-root mutation; the generic approval count
+     is orthogonal.
+  3. **Defence-in-depth for non-trust-root PRs comes from
+     `required_signatures`** — a PAT-takeover attacker still has to
+     produce SSH-signed commits with a key in the in-repo trust
+     root, which they don't have.
+
+**Side-effect to be aware of:** PROTECTED_SURFACE files (the 10
+entries in `tools/verify-trust-root-mutations.sh`'s
+`PROTECTED_SURFACE` array + the `.github/actions/verify-wasm-pin-
+check/` subtree) are **factually frozen for solo-maintainer**: the
+solo maintainer cannot self-approve a PR that hits CODEOWNERS,
+because GitHub disallows self-review on code-owner-required PRs.
+This is *by design* under Welle C's threat model — the assumption
+is that trust-root surfaces change rarely, and any change must
+involve an out-of-band recovery procedure.
+
+**Recovery path** (rare, expected ≤1× per year):
+
+```bash
+# 1. Open the Settings → Rules → Rulesets UI for the repo.
+# 2. Click "Master trust-root protection" → set Enforcement to
+#    "Disabled" (NOT "Evaluate" — that still gates merges).
+# 3. Make + sign + push the trust-root-modifying commit on a
+#    feature branch, open the PR, ensure
+#    verify-trust-root-mutations CI passes (the in-repo gate
+#    still fires on PR; only the Ruleset's status-check
+#    requirement is paused).
+# 4. Self-merge (no CODEOWNERS-required-review-blocker because the
+#    Ruleset is disabled).
+# 5. IMMEDIATELY re-enable the Ruleset: Settings → Rules →
+#    Rulesets → "Master trust-root protection" → Enforcement
+#    "Active".
+# 6. Log the operation in your maintainer logbook (date, PR number,
+#    SHA, reason).
+```
+
+This recovery path is auditable: every disable/enable transition
+shows up in the repo's Audit Log under "ruleset.update" events. A
+review of the audit log reveals every time the Ruleset was paused
+and for how long. Pair this with a maintainer-side discipline of
+"only ever disable for the minimum interval required" — disable,
+push, re-enable — and the recovery path remains a non-bypassable
+gap in attacker-time-budget terms.
+
+When (if) Atlas grows to multiple maintainers, raise
+`required_approving_review_count` to `1` via Settings → Rules →
+Rulesets → "Master trust-root protection" → "Require a pull request
+before merging" → "Required approvals" — single-click change, no
+code edit required.
+
 ### Adding a new file to the protected surface
 
 The PROTECTED_SURFACE list in `tools/verify-trust-root-mutations.sh`
