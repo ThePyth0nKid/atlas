@@ -2654,6 +2654,181 @@ auditing (no opaque `dist/index.js` bundle, no transitive npm deps).
 
 ---
 
+## scope-l — Tag-Signing Enforcement (V1.17 Welle B — shipped)
+
+V1.14 Scope E introduced the `wasm-publish.yml` workflow that fires on
+`push: tags: ['v*']` and ships `@atlas-trust/verify-wasm` to npm with
+SLSA L3 provenance. V1.15 Welle B extended the same trigger to upload
+identical tarballs to GitHub Releases as a backup distribution channel.
+Both publish lanes trust the *tag* — whoever can push a `v*` tag to the
+canonical repo can fire the publish lane and place bytes on consumer
+machines via the next `npm install`.
+
+scope-l closes the structural failure mode that the previous trust
+layers do not address: **the publish gate trusts that a `v*` tag was
+authored by an authorised maintainer, but until V1.17 Welle B nothing
+in the repo or workflow enforced that trust.** The threat is not
+hypothetical — a single compromised maintainer GitHub PAT (push-on-
+contents scope, no admin) is sufficient to push a `v*` tag pointing
+at a smuggled commit, and the publish lane fires automatically.
+
+Threats addressed:
+
+- **F-5 (tag-authenticity gap).** Attacker holding `contents: write`
+  on the repo (compromised maintainer PAT, account-takeover, or
+  short-window-of-opportunity insider access) pushes a `v*` tag
+  pointing at a commit they introduced (smuggled into a feature
+  branch, never reviewed on master) or at a legitimate commit they
+  intend to mis-attribute. `wasm-publish.yml` fires; npm publishes
+  byte-identical-to-attacker-input bytes; SLSA L3 attestation
+  correctly attributes the bytes to the GitHub Actions run, but the
+  *commit* the run was triggered from was attacker-controlled. A
+  consumer running V1.17 Welle A's `verify-wasm-pin-check@v1` would
+  see Layer 3 PASS (the publish was OIDC-attested by a real run on
+  the canonical repo) — the SLSA L3 layer was never designed to
+  defend against in-repo tag-authoring.
+- **F-5a (tag re-pointing).** Attacker with the same PAT scope
+  force-pushes an existing `v*` tag onto a different commit. Without
+  signed tags, the new commit is published-trusted on next workflow
+  fire (e.g. via a re-run trigger).
+- **F-5b (workflow-file mutation in unsigned-tag world).** A future
+  attacker who lands a malicious change to `wasm-publish.yml` itself
+  (e.g. removing the publish-gate guards) can ship without ever
+  needing PAT access — branch protection on master is the defence,
+  but a malicious tag pointing at a malicious commit before branch
+  protection landed would already be live.
+
+scope-l ships:
+
+1. **`.github/allowed_signers`** — SSH public-key trust root in the
+   canonical OpenSSH `allowed_signers` format (`<principal> <key-type>
+   <base64>` per line). Initial entry: both ed25519 keys of the
+   primary maintainer (sourced from `https://github.com/<user>.keys`
+   at commit time). Adding/removing keys here is the addition/
+   revocation ceremony.
+2. **`tools/verify-tag-signatures.sh`** — pure-bash verifier (~190
+   lines). Iterates `v*` tags (or specific tags passed as args), runs
+   `git verify-tag` with `gpg.format=ssh` + `gpg.ssh.allowedSignersFile`
+   pointed at `.github/allowed_signers`. Validates trust root is
+   present + non-empty, validates git ≥ 2.34 (SSH-signing-aware),
+   per-tag PASS/FAIL with stderr captured. Locally-runnable — a
+   maintainer can verify before pushing, catching local-config drift
+   before a CI red-fail.
+3. **`tools/setup-tag-signing.sh`** — three subcommands (`init`,
+   `add`, `status`) for the maintainer one-time setup + key-rotation
+   ceremonies. `init --key auto` walks `~/.ssh/*.pub`, finds the
+   first key whose body matches an entry in `.github/allowed_signers`,
+   and configures local git (`gpg.format=ssh`, `user.signingkey`,
+   `tag.gpgSign=true`, `gpg.ssh.allowedSignersFile`). Refuses to
+   configure an untrusted key (defends "developer accidentally
+   configures a key whose public counterpart isn't in the trust
+   root and burns CI cycles before noticing").
+4. **`.github/workflows/verify-tag-signatures.yml`** — standalone
+   verification workflow. Triggers: `push: tags: ['v*']` (catches
+   any tag push), weekly cron `Mon 06:37 UTC` (catches drift —
+   expired keys, allowed_signers mutations, retroactive trust-root
+   changes), `workflow_dispatch` (operator-on-demand re-verification),
+   and `pull_request` on the tag-signing surfaces (regression catch
+   on the verifier script + trust-root file). SHA-pinned `actions/
+   checkout@v4.2.2` (no mutable-tag self-undermine — same rationale
+   as V1.17 Welle A).
+5. **First-step guard inside `wasm-publish.yml`** — defence-in-depth.
+   Even if `verify-tag-signatures.yml` is paused, dispatch-disabled,
+   or fails for a transient reason, `wasm-publish.yml` runs
+   `tools/verify-tag-signatures.sh "$GITHUB_REF_NAME"` as its first
+   real step (after `actions/checkout` with `fetch-depth: 0` +
+   `fetch-tags: true`). Failure here exits the publish lane non-zero
+   BEFORE any `npm publish` or GH-Release upload.
+6. **`tools/test-tag-signatures.sh`** — anti-drift harness, 13 cases.
+   Pure-bash, no fixtures-on-disk, every case built from scratch in
+   a tempdir + torn down. Covers the trust-root validation paths
+   (missing/empty/comments-only allowed_signers), the tag-existence
+   check, the lightweight-tag rejection, the annotated-unsigned-tag
+   rejection, the no-tags-yet early exit, and the
+   `setup-tag-signing.sh` subcommand surface (status/usage/unknown
+   subcommand/missing-args/deprecated-key-type rejection). The path
+   we cannot cover here — "tag signed by trusted key → PASS" — is
+   exercised live in the first `wasm-publish.yml` tag-push run plus
+   maintainer-side `bash tools/verify-tag-signatures.sh vX.Y.Z`
+   between `git tag -m '…'` and `git push`.
+
+What scope-l does NOT cover (V1.18+ candidates):
+
+- **Sigstore-keyless / `gitsign`-based tag signing.** SSH-based
+  signing keeps the trust root in the repo, which is auditable but
+  also means a compromised maintainer key signs validly until the
+  rotation lands. Sigstore/gitsign binds tag signatures to the
+  maintainer's GitHub OIDC identity (no long-lived signing key) and
+  logs every signature to the public Rekor transparency log. The
+  philosophy-coherent path forward — V1.17 Welle A already binds
+  npm publish trust to Sigstore Rekor — but Sigstore tooling on
+  Windows is rough enough today that V1.17 Welle B sticks with
+  SSH. V1.18 candidate: dual-rail signing where both an SSH
+  signature AND a Sigstore signature are produced, and CI accepts
+  EITHER. Lets the maintainer transition without a hard cutover.
+- **Branch-protection rule for `.github/allowed_signers`.** The
+  trust-root file itself can be modified by anyone with `contents:
+  write` on master. A future Welle could require commit-signing on
+  changes to this file specifically, via a CODEOWNERS rule + branch
+  protection requiring CODEOWNERS approval on `.github/allowed_signers`
+  edits. Deferred because this is policy-side (GitHub repo settings),
+  not in-repo-code-side.
+- **Hardware-token enforcement.** All keys in `.github/allowed_signers`
+  are equally trusted. A future Welle could enforce that signing
+  keys are FIDO2-backed (`sk-ssh-ed25519@openssh.com` key type) by
+  rejecting non-`sk-` types in the verifier. Deferred because the
+  primary maintainer's current keys are software-keys; switching to
+  hardware-backed is an additive future improvement.
+- **Retroactive tag-signature timestamping.** scope-l verifies the
+  signature against the *current* state of `.github/allowed_signers`.
+  A maintainer key revocation invalidates past tags from the
+  revocation forward (consumers cloning fresh see the verify-tag
+  fail). For "this past tag was signed by a then-trusted key at
+  the time of signing", the auditor would need to checkout the
+  repo state at the tag's commit and run the verifier against that
+  snapshot of allowed_signers. Documented in the OPERATOR-RUNBOOK
+  §13 "revocation" subsection but not automated in CI.
+
+### Trust composition with scope-e + V1.14 + V1.15 + scope-k
+
+scope-l is publish-lane authentication. It composes with — does not
+replace — every prior trust layer:
+
+| Layer | What it pins | Failure mode addressed |
+|---|---|---|
+| V1.5 `signing_input_byte_determinism_pin` | CBOR signing-input bytes | issuer-side encoding drift |
+| V1.14 Scope E SLSA L3 OIDC provenance | npm tarball bytes ↔ GitHub Actions run | npm-registry compromise |
+| V1.15 Welle B GH-Releases backup | second tarball channel | npm-registry outage |
+| V1.15 Welle C consumer pinning runbook | install-time ceremony for npm / pnpm / Bun | cold-start mis-install |
+| V1.16 scope-d (Wellen A+B+C) | playground delivery hardening | UI-side injection in hosted deployments |
+| V1.17 scope-k (Welle A) `verify-wasm-pin-check@v1` | CI-time re-assertion of all three §1 layers on every consumer build | consumer-side cadence drift between install-time ceremony and ongoing CI |
+| **V1.17 scope-l (Welle B) Tag-Signing Enforcement** | **`v*` tag → maintainer SSH signature, gated inside `wasm-publish.yml`'s first step** | **publish-lane authentication: who can fire the publish via a `v*` push** |
+
+scope-l pins *who can fire the publish lane*. Without it, the publish
+trusts the GitHub-side tag-protection rules (operator-runbook level —
+prone to drift between Settings UI state and the maintainer's mental
+model). With it, the publish trusts an in-repo cryptographic trust
+root — auditable, version-controlled, and verified inside the same
+workflow run that fires the publish.
+
+### Anti-drift
+
+- **`tools/test-tag-signatures.sh` harness** — 13 cases, runs in
+  ~5 seconds. Run before any change to `tools/verify-tag-signatures.sh`,
+  `tools/setup-tag-signing.sh`, or `.github/allowed_signers`.
+- **`verify-tag-signatures.yml` weekly cron** — re-verifies every
+  `v*` tag in the repo against the current trust root every Monday
+  at 06:37 UTC. Catches the drift cases (expired keys, retroactive
+  trust-root edits, force-pushed tags).
+- **First-step guard in `wasm-publish.yml`** — guarantees the
+  publish lane cannot fire without a passing tag-signature check.
+- **Trust composition table row** in this document, in
+  ARCHITECTURE.md (V1.17 Welle B boundary block), and in
+  CONSUMER-RUNBOOK.md §6 step 2 — a future scope that intends to
+  deprecate scope-l must update all three docs and the row above.
+
+---
+
 ## Reporting issues
 
 Verifier vulnerabilities — bypasses, signature-acceptance bugs,

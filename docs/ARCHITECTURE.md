@@ -1564,7 +1564,7 @@ Headline:
   [docs/SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-d "What scope-d
   does NOT cover".
 
-### V1.17 — Consumer-side auto-verify CI Action (shipped: Welle A)
+### V1.17 — Consumer-side auto-verify CI Action + Tag-Signing Enforcement (shipped: Welle A + Welle B)
 
 - **`verify-wasm-pin-check@v1` composite GitHub Action.** A
   reusable, pure-bash composite action at
@@ -1669,6 +1669,71 @@ Headline:
   V1.18+ candidates documented in
   [docs/SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-k "What
   scope-k does NOT cover".
+
+#### V1.17 Welle B — Tag-Signing Enforcement (shipped)
+
+- **In-repo SSH trust root for `v*` release tags.** The repo ships
+  `.github/allowed_signers` (canonical OpenSSH `allowed_signers`
+  format), which lists every maintainer SSH public key authorised
+  to sign release tags. `tools/verify-tag-signatures.sh` runs
+  `git verify-tag` against this trust root and exits non-zero on
+  any tag that's unsigned, signed-by-untrusted-key, or
+  signature-invalid. The existing `wasm-publish.yml` workflow
+  (V1.14 Scope E) gains a first-step verification gate that fails
+  the publish lane closed on any unsigned tag push, BEFORE any
+  `npm publish` or GH-Release upload step. A standalone
+  `verify-tag-signatures.yml` workflow re-asserts the same
+  invariant on every tag push, weekly cron (Mon 06:37 UTC), and
+  on PRs touching the tag-signing surfaces.
+- **Closes the V1.14 Scope E publish-lane authentication gap.**
+  Before V1.17 Welle B, the publish-lane fired on `push: tags:
+  ['v*']` with no in-repo verification of who pushed the tag —
+  the only defence was operator-runbook tag-protection rules in
+  GitHub Settings, which are configuration-side (drift-prone) and
+  do nothing if a maintainer PAT with `contents: write` is
+  compromised. With V1.17 Welle B the publish-lane trusts a
+  cryptographic signature against an in-repo trust root, verified
+  inside the same workflow run that fires the publish — auditable,
+  version-controlled, and fail-closed.
+- **Maintainer-side ergonomics.** `tools/setup-tag-signing.sh init`
+  (one-time per checkout) auto-picks the maintainer's SSH key from
+  `~/.ssh/*.pub` whose body matches an entry in
+  `.github/allowed_signers`, configures `git config gpg.format=ssh
+  + user.signingkey + tag.gpgSign=true + gpg.ssh.allowedSigners
+  File`, and refuses to configure an untrusted key. After init,
+  `git tag -m '…' v1.17.0` defaults to signing; local
+  `bash tools/verify-tag-signatures.sh v1.17.0` confirms before
+  push. Operator-runbook §13 is the full setup + key-rotation
+  ceremony.
+- **Anti-drift harness.** `tools/test-tag-signatures.sh` covers 13
+  cases: trust-root validation (missing/empty/comments-only
+  allowed_signers), tag-existence check, lightweight-tag rejection,
+  annotated-unsigned-tag rejection, no-tags-yet early exit, and
+  the `setup-tag-signing.sh` subcommand surface. Runs in ~5
+  seconds, no fixtures-on-disk. Run before any change to
+  `tools/verify-tag-signatures.sh`, `tools/setup-tag-signing.sh`,
+  or `.github/allowed_signers`.
+- **Trust property unchanged; publish-lane authentication
+  tightened.** V1.17 Welle B ships zero verifier-logic change.
+  The trust property closed is **F-5 — publish-lane
+  authentication**: before V1.17 Welle B, "tag was pushed by an
+  authorised maintainer" was a configuration assumption (GitHub
+  Settings tag-protection rules); after V1.17 Welle B it is a
+  cryptographic invariant verified by every publish run.
+- **What V1.17 Welle B is NOT yet (V1.18+ candidates):**
+  Sigstore-keyless (`gitsign`) tag signing — V1.17 Welle A
+  already binds npm publish trust to Sigstore Rekor, so dual-
+  rail (SSH OR Sigstore) signing is the philosophy-coherent next
+  step; deferred because Sigstore-on-Windows tooling is rough.
+  CODEOWNERS-protected `.github/allowed_signers` (require
+  commit-signing on trust-root mutations). Hardware-token
+  enforcement (reject software keys, require
+  `sk-ssh-ed25519@openssh.com` FIDO2-backed types only).
+  Retroactive tag-signature timestamping (verify a past tag
+  against allowed_signers as it was at the tag's commit, not
+  current). These are V1.18+ candidates documented in
+  [docs/SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-l "What
+  scope-l does NOT cover".
 
 ### V2 — full COSE + policy + SPIFFE
 

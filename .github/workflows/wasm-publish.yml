@@ -9,12 +9,20 @@
 #
 # Trigger surface — explicit + auditable:
 #
-#   * `workflow_dispatch` — manual run for ad-hoc publish + dry-run
+#   * `workflow_dispatch` — manual run for build-pipeline dry-run
 #     verification (e.g. confirming the build pipeline works on a
-#     branch before tagging).
-#   * `push: tags: ['v*']` — automated publish on tag push. The tag
-#     name MUST match a release tag (`v1.14.0`, `v1.14.1`, …); the
-#     workflow does NOT publish on every push to master.
+#     branch before tagging). V1.17 Welle B made dispatch
+#     publish-incapable: the publish step's `if:` only matches
+#     tag-push, so dispatch always behaves as a dry-run regardless
+#     of the `dry_run` input. The input is preserved for
+#     backwards-compat with prior tooling but no longer changes
+#     publish behaviour.
+#   * `push: tags: ['v*']` — automated publish on signed-tag push.
+#     The tag name MUST match a release tag (`v1.14.0`, `v1.14.1`, …)
+#     AND the tag MUST be cryptographically signed by an SSH key in
+#     `.github/allowed_signers` (V1.17 Welle B — first step of this
+#     job verifies). Unsigned-tag push fails the publish lane
+#     closed BEFORE any build step runs.
 #
 # Why a separate workflow file (rather than a job in CI):
 #   * It uses a different secret (`NPM_TOKEN`) than the HSM lanes.
@@ -92,7 +100,62 @@ jobs:
     steps:
       # All `uses:` pinned to immutable SHAs — same rationale as the
       # V1.12 / V1.14 HSM lanes. Bumping requires a human-reviewed PR.
+      #
+      # `fetch-depth: 0` + `fetch-tags: true` are required so the
+      # tag-signature verification step (next) can resolve the tag
+      # object and walk the commit history — the default shallow clone
+      # has neither. The cost is ~1–2 s of additional clone time on
+      # the average runner, well below the noise floor of the wasm-pack
+      # cold cache (~2–4 min), so the trade is unconditionally worth it.
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # V1.17 Welle B — Tag-Signing Enforcement.
+      #
+      # FIRST gate: refuse to build / publish if the just-pushed tag is
+      # not cryptographically signed by an SSH key listed in
+      # `.github/allowed_signers`. This is the defence against a
+      # repo-takeover / compromised-PAT attacker who pushes a `v*` tag
+      # pointing at a smuggled commit — the whole publish lane fails
+      # closed before any `npm publish` or GH-Release upload step ever
+      # runs.
+      #
+      # `workflow_dispatch` runs from `master` (no tag push) skip this
+      # step entirely — there's no tag to verify, and the publish gate
+      # at the end already restricts dispatch publishes to the master
+      # branch with `dry_run=false`. The tag-signature gate is
+      # specifically for the tag-push trigger.
+      #
+      # See `.github/workflows/verify-tag-signatures.yml` for the
+      # standalone verification surface (push/cron/dispatch over all
+      # historical v* tags), and `docs/SECURITY-NOTES.md scope-l` for
+      # the threat model.
+      - name: Verify tag signature (V1.17 Welle B)
+        id: verify-tag
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        # `unset ATLAS_ALLOWED_SIGNERS` is belt-and-suspenders against
+        # a future workflow edit (or a compromised dependency action)
+        # that writes to $GITHUB_ENV to redirect the trust root. The
+        # script itself also rejects ATLAS_ALLOWED_SIGNERS in CI when
+        # it doesn't resolve to the in-repo file (defence-in-depth).
+        run: |
+          set -euo pipefail
+          unset ATLAS_ALLOWED_SIGNERS
+          bash tools/verify-tag-signatures.sh "${GITHUB_REF_NAME}"
+          # Capture the verified commit SHA — every later step that
+          # references the tag (npm publish takes its bytes from the
+          # checked-out tree, but `gh release create` resolves the tag
+          # at upload time, which is a TOCTOU window if the tag is
+          # force-pushed mid-run) pins to this SHA explicitly via
+          # `--target`. `git rev-parse <tag>^{}` dereferences an
+          # annotated tag to its target commit (a plain `rev-parse <tag>`
+          # would yield the tag-object SHA, which is not what
+          # `gh release create --target` accepts).
+          VERIFIED_SHA="$(git rev-parse "${GITHUB_REF_NAME}^{}")"
+          echo "verified_sha=${VERIFIED_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "Verified ${GITHUB_REF_NAME} → commit ${VERIFIED_SHA}"
 
       - uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b # stable
         with:
@@ -289,12 +352,16 @@ jobs:
       # Publish gate — defence-in-depth across three independent
       # checks, all of which must pass for an `npm publish` to fire:
       #
-      #   1. The trigger encodes a publish intent:
-      #        * `push` from a `refs/tags/v*` tag (release publish), OR
-      #        * `workflow_dispatch` with `dry_run=false` AND from the
-      #          default branch (`refs/heads/master`) — i.e. someone
-      #          manually approved the release on master, not a
-      #          feature branch.
+      #   1. The trigger is a `push` from a `refs/tags/v*` tag —
+      #      release publishes ONLY happen via signed-tag push. Earlier
+      #      versions also accepted `workflow_dispatch` with
+      #      `dry_run=false` from master; V1.17 Welle B removed that
+      #      path because it bypassed the new tag-signature gate
+      #      entirely (a maintainer / compromised PAT with `actions:
+      #      write` could trigger dispatch on any master commit and
+      #      ship without ever creating a signed tag). Dispatch is
+      #      still useful for build-pipeline dry-runs (default
+      #      `dry_run: true`); it just no longer fires the publish.
       #   2. `NPM_TOKEN` is present (fork PRs and unauthorised manual
       #      runs have no token and skip cleanly with exit 0).
       #   3. The job-level `id-token: write` permission is granted
@@ -306,10 +373,9 @@ jobs:
       # `tags: ['v*']`, so `github.ref` is guaranteed to start with
       # `refs/tags/v` — the explicit `startsWith` here is a redundant
       # check that still fires correctly if someone later relaxes the
-      # `on:` filter. Tag-from-non-master is mitigated separately via
-      # the GitHub repo's tag protection rules (a release tag cannot
-      # be created on a feature branch by a non-maintainer); see
-      # SECURITY-NOTES.md scope-e for the operator runbook.
+      # `on:` filter. The first-step `tools/verify-tag-signatures.sh`
+      # (V1.17 Welle B) gate guarantees the tag is signed by an
+      # `.github/allowed_signers` key BEFORE this publish step runs.
       #
       # The publish targets BOTH the web and node builds under the
       # same package name. The web build is the canonical default
@@ -320,10 +386,7 @@ jobs:
       # iteration may merge both into a single package with
       # conditional exports — out of scope for V1.14.
       - name: Publish to npm
-        if: >-
-          ${{ (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
-              (github.event_name == 'workflow_dispatch' && inputs.dry_run == false &&
-               github.ref == 'refs/heads/master') }}
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
@@ -386,9 +449,29 @@ jobs:
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
+          # MED-5 (TOCTOU): pin the GH Release object to the commit SHA
+          # that the verify-tag step authenticated. If `gh release create`
+          # re-resolves `${TAG}` at upload time and an attacker has
+          # force-pushed the tag onto a different commit between the
+          # verify-tag step and this step, `--target ${VERIFIED_SHA}`
+          # binds the release to the originally-verified commit, closing
+          # the TOCTOU window. (`gh release upload` is asset-only and
+          # does not re-resolve the tag, so it doesn't need --target.)
+          VERIFIED_SHA: ${{ steps.verify-tag.outputs.verified_sha }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
+
+          # Defence-in-depth: assert VERIFIED_SHA is non-empty. If the
+          # verify-tag step's output capture ever silently regresses
+          # (e.g. someone refactors the workflow and drops the `id:`),
+          # we want this step to fail closed rather than silently fall
+          # back to the un-pinned create path.
+          if [ -z "${VERIFIED_SHA:-}" ]; then
+            echo "ERROR: VERIFIED_SHA empty — verify-tag step output missing." >&2
+            echo "  This step requires the verify-tag step to expose verified_sha." >&2
+            exit 1
+          fi
 
           # Resolve the single tarball expected in each pkg-* dir.
           # Pipe-then-head silently masks `ls` failure (head exits 0)
@@ -453,10 +536,15 @@ jobs:
               --clobber \
               --repo "${GITHUB_REPOSITORY}"
           else
-            echo "Release ${TAG} does not exist — creating with assets."
+            echo "Release ${TAG} does not exist — creating with assets pinned to ${VERIFIED_SHA}."
+            # --target pins the release-object's `target_commitish` to
+            # the SHA verify-tag authenticated. Without this, `gh release
+            # create` resolves the tag again at this point, opening a
+            # TOCTOU window between verify-tag and release-create.
             gh release create "${TAG}" \
               "${WEB_TGZ}" "${NODE_TGZ}" tarball-sha256.txt \
               --title "${TAG}" \
+              --target "${VERIFIED_SHA}" \
               --notes "Auto-generated release for ${TAG}. WASM verifier tarballs (web + node) plus a SHA256 manifest. See [OPERATOR-RUNBOOK §12](${NOTES_URL}) for the backup-channel installation flow." \
               --repo "${GITHUB_REPOSITORY}"
           fi

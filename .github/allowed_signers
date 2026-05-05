@@ -1,0 +1,68 @@
+# V1.17 Welle B — SSH allowed-signers trust root for `git verify-tag`.
+#
+# Format: `<principal> <key-type> <base64-key>` per line, comments with `#`.
+# This is the canonical OpenSSH `allowed_signers` file format consumed by
+# `ssh-keygen -Y verify` (which `git verify-tag` invokes when
+# `gpg.format = ssh`).
+#
+# WHO IS LISTED
+#   Every entry in this file is a maintainer key authorised to sign
+#   `v*` release tags on this repo. Adding a key here grants release-
+#   signing authority; removing a key revokes it.
+#
+# WHY THIS FILE EXISTS (the threat addressed)
+#   Without tag-signing enforcement, an attacker with `contents: write`
+#   on this repo (e.g. compromised maintainer GitHub PAT, repo-takeover)
+#   can push a `v*` tag pointing at a smuggled commit. The
+#   `wasm-publish.yml` workflow auto-fires on `push: tags: ['v*']` and
+#   would publish the smuggled bytes to npm before any human notices.
+#   With this file + the verification step in `wasm-publish.yml`, an
+#   unsigned-or-untrusted-key tag push fails the publish gate inside
+#   the same workflow run, BEFORE any `npm publish` step.
+#
+# HOW VERIFICATION WORKS
+#   * `wasm-publish.yml` step 1 runs `tools/verify-tag-signatures.sh
+#     "$GITHUB_REF_NAME"` (the just-pushed tag), which calls
+#     `git verify-tag` with `gpg.ssh.allowedSignersFile` pointed here.
+#   * `verify-tag-signatures.yml` (separate workflow) re-verifies all
+#     `v*` tags weekly via cron — catches expired keys, revoked keys,
+#     or any historical tag that lost its signed status (e.g. force-
+#     push attempt).
+#
+# HOW TO ROTATE
+#   Removing a key from this file is the revocation. The next CI run
+#   (push, cron, or workflow_dispatch) that re-verifies a tag signed
+#   by the removed key will fail. Past releases stay signed by the
+#   key as committed at that release tag's snapshot of this file —
+#   removing a key now does NOT retroactively invalidate a release;
+#   it just refuses to verify the tag against the CURRENT trust root.
+#   For a hard revocation that retroactively invalidates a known-bad
+#   tag, the operator-side flow is: remove the key, force-push-delete
+#   the tag (requires repo-admin + tag-protection-rule override), and
+#   re-publish from a new tag signed by a non-compromised key.
+#
+# HOW TO ADD A KEY
+#   `tools/setup-tag-signing.sh add <principal> <ssh-pubkey-path>`
+#   appends to this file with consistent formatting. Manual edits
+#   are OK as long as the format stays one-entry-per-line and the
+#   key-type is one of `ssh-ed25519`, `ssh-rsa` (>= 3072-bit), or
+#   `sk-ssh-ed25519@openssh.com` (FIDO2/WebAuthn-backed). DO NOT add
+#   `ecdsa-sha2-*` keys without the operator weighing the curve-
+#   parameter footgun (NIST P-256/384/521 are fine, but other curves
+#   leak info under crafted-message attacks). DO NOT add deprecated
+#   key types (`ssh-dss`/DSA).
+#
+# WHY SSH (not GPG, not Sigstore/gitsign)
+#   * SSH keys are already in maintainers' GitHub accounts (`/keys`
+#     endpoint), no separate keyserver / OIDC infrastructure needed.
+#   * Git 2.34+ has first-class SSH signing support; no plugins.
+#   * Works on Windows out-of-the-box (Sigstore/gitsign tooling on
+#     Windows is rough; defer to V1.18 as additive enhancement).
+#   * Trust root is in-repo (auditable), not pinned to an external
+#     OIDC issuer's certificate transparency log.
+#
+# Keys for nelson@ultranova.io (Atlas project lead, primary maintainer):
+# Sourced from https://github.com/ThePyth0nKid.keys at commit-time.
+# Both ed25519 keys are listed; either may be used to sign tags.
+nelson@ultranova.io ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJo/AQstfMlkiUVSwA7E9CdmSM9tbFxua8geAmNfr6T6
+nelson@ultranova.io ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKtHVJNWaGjXhzUq8mFLhO+oQicHHwWo/nEOf1jnnMp1

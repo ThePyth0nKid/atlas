@@ -1,0 +1,97 @@
+# V1.17 Welle B — Tag-Signing Enforcement self-test workflow.
+#
+# Re-asserts that every `v*` tag in this repo is cryptographically
+# signed by an SSH key listed in `.github/allowed_signers`. This
+# workflow is the *standalone* verification surface — separate from
+# the inline first-step verification inside `wasm-publish.yml`.
+#
+# Two distinct signals:
+#
+#   1. `wasm-publish.yml` runs `tools/verify-tag-signatures.sh "$TAG"`
+#      as its FIRST step. Fails closed if the just-pushed tag isn't
+#      signed, BEFORE any `npm publish` or release-asset upload.
+#
+#   2. THIS workflow runs `tools/verify-tag-signatures.sh` against
+#      ALL `v*` tags in the repo on:
+#        * push of any v* tag (catches an unsigned tag at push-time
+#          even if `wasm-publish.yml` is dispatch-disabled or paused),
+#        * weekly cron (catches expired/revoked keys, force-pushed
+#          tags, lost signatures — drift signals that aren't visible
+#          on a per-push basis),
+#        * `workflow_dispatch` (allows on-demand re-verification, e.g.
+#          after a key rotation or a contested release).
+#
+# Trust posture: this workflow itself uses SHA-pinned `actions/checkout`
+# (not the mutable `@v4` tag). The whole point of the V1.17 effort is
+# supply-chain hygiene; depending on a mutable tag for the workflow
+# that enforces tag-signing would be self-undermining.
+
+name: verify-tag-signatures
+
+on:
+  # Fire on any v* tag push. Defence-in-depth: even if a future change
+  # to `wasm-publish.yml` accidentally drops the inline verification
+  # step, this workflow catches the same condition.
+  push:
+    tags:
+      - 'v*'
+  # Weekly cron — Mon 06:37 UTC. Prime-number-minute offset stays out
+  # of the hour-boundary GitHub Actions queue spike. Catches the slow
+  # drift cases (signing key expiry, allowed_signers file mutated by a
+  # bad commit that nobody else has noticed yet, …).
+  schedule:
+    - cron: '37 6 * * 1'
+  # Allow operators to re-verify on demand without pushing a tag.
+  workflow_dispatch: {}
+  # Also fire on PRs that touch tag-signing surfaces — catches
+  # accidental regressions in the verifier script or the trust-root
+  # file itself before merge.
+  pull_request:
+    paths:
+      - 'tools/verify-tag-signatures.sh'
+      - 'tools/setup-tag-signing.sh'
+      - '.github/allowed_signers'
+      - '.github/workflows/verify-tag-signatures.yml'
+
+# Minimum permissions. We only need to read tags + the allowed_signers
+# file; we don't write anywhere. Explicit `contents: read` overrides
+# any repository-level default that might be more permissive.
+permissions:
+  contents: read
+
+jobs:
+  verify-all-tags:
+    name: Verify all v* tags
+    runs-on: ubuntu-latest
+    steps:
+      # SHA-pinned. v4.2.2 = `11bd71901bbe5b1630ceea73d27597364c9af683`.
+      # `fetch-depth: 0` is required so all tags + their target commits
+      # are present locally; the default shallow clone has neither.
+      # `fetch-tags: true` is belt-and-suspenders for the same goal.
+      - name: Checkout (full history + all tags)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Sanity-print so a CI log on a quiet day still confirms the
+      # verification ran against the expected trust root rather than
+      # silently exiting 0 on a missing-file path. The verifier script
+      # itself errors out on missing/empty allowed_signers, so the
+      # silent-pass path is closed; this echo is purely diagnostic.
+      - name: Show trust root summary
+        run: |
+          set -eu
+          echo "=== .github/allowed_signers (signer count + sha256) ==="
+          if [ -f .github/allowed_signers ]; then
+            COUNT=$(grep -v -c -E '^[[:space:]]*(#|$)' .github/allowed_signers || true)
+            HASH=$(sha256sum .github/allowed_signers | awk '{print $1}')
+            echo "  signer entries: ${COUNT}"
+            echo "  file sha256:    ${HASH}"
+          else
+            echo "  <missing>"
+            exit 1
+          fi
+
+      - name: Verify every v* tag
+        run: bash tools/verify-tag-signatures.sh

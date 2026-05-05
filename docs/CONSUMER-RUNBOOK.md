@@ -368,16 +368,30 @@ This is the trust root that does not depend on either registry.
 ### Steps
 
 ```bash
-# 1. Clone the repo at the tagged release commit.
+# 1. Clone the repo at the tagged release commit. Replace ${VERSION}
+#    with the tag matching the WASM verifier version you intend to
+#    install (e.g. v1.15.0, v1.17.0, …).
+VERSION=v1.17.0   # ← set to the release you want to verify
 git clone https://github.com/ThePyth0nKid/atlas.git
 cd atlas
-git checkout v1.15.0    # the tag matching the version you want
+git checkout "${VERSION}"
 
-# 2. Verify the tag is signed (V1.16+ if tag-signing is enforced;
-#    V1.15 relies on tag-protection rules — see SECURITY-NOTES
-#    §scope-e). Inspect the commit SHA and confirm against the
-#    SLSA provenance attestation if you have a previously-verified
-#    install on file.
+# 2. Verify the tag is signed by an authorised maintainer key
+#    (V1.17 Welle B onwards — tag-signing enforcement, SECURITY-NOTES
+#    §scope-l). The repo ships a trust root at `.github/allowed_signers`
+#    and a verification helper that returns 0 iff the tag is
+#    cryptographically signed by an SSH key in that file.
+bash tools/verify-tag-signatures.sh "${VERSION}"
+# Expected output (with ${VERSION} substituted):
+#   Verifying 1 tag(s) against .../.github/allowed_signers ...
+#   ---
+#     PASS: ${VERSION}
+#   ---
+#   PASS: 1 / 1    FAIL: 0 / 1
+#
+# Cross-check: also inspect the commit SHA and confirm against the
+# SLSA provenance attestation if you have a previously-verified
+# install on file.
 git log -1 --format=%H
 
 # 3. Install the pinned wasm-pack version from crates.io with

@@ -2034,3 +2034,176 @@ SHA512 integrity.
 | 5 | Auditor | §12 | `npm install ./atlas-trust-verify-wasm-${VERSION}-web.tgz` |
 | 6 | Auditor | — | Run verifier as normal — same exports, same bytes, same trust property |
 | 7 | Auditor | §12 | When primary channel returns: `npm install @atlas-trust/verify-wasm@${VERSION}` to re-pin to the registry source |
+
+---
+
+## 13. Cutting a signed release tag (V1.17 Welle B)
+
+Tag-Signing Enforcement is the V1.17 Welle B trust-stack addition: every
+`v*` tag in this repo MUST be cryptographically signed by an SSH key
+listed in [`.github/allowed_signers`](../.github/allowed_signers), and
+both `wasm-publish.yml` and `verify-tag-signatures.yml` enforce this on
+every tag push (plus `verify-tag-signatures.yml` re-verifies all
+historical `v*` tags weekly via cron). An unsigned-or-untrusted-key
+tag fails the publish lane BEFORE any `npm publish` step.
+
+This section is the maintainer-side flow for cutting a signed tag.
+Auditor-side verification of a published tag is in
+[CONSUMER-RUNBOOK.md §6 step 2](CONSUMER-RUNBOOK.md#6-bypass-both-channels--rebuild-from-source).
+
+For the threat model + design rationale (why SSH and not GPG /
+Sigstore-gitsign for V1.17), see
+[SECURITY-NOTES.md scope-l](SECURITY-NOTES.md).
+
+### One-time setup (per maintainer machine)
+
+```bash
+# 1. Confirm your SSH public key is in the trust root.
+#    The file is human-readable; check that one of your ~/.ssh/*.pub
+#    keys (the "<base64>" middle field) appears in it.
+cat .github/allowed_signers
+
+# 2. Configure git for SSH-based tag signing in this checkout.
+#    Picks the first ~/.ssh/*.pub key whose body matches an entry in
+#    .github/allowed_signers. Errors out if no match.
+bash tools/setup-tag-signing.sh init
+
+# 2a. (Optional) If your signing key isn't in ~/.ssh/, pass it
+#     explicitly:
+bash tools/setup-tag-signing.sh init --key /path/to/my-signing.pub
+
+# 3. Confirm the local config.
+bash tools/setup-tag-signing.sh status
+# Expected output:
+#   gpg.format                     = ssh
+#   user.signingkey                = /home/.../.ssh/id_ed25519.pub
+#   tag.gpgSign                    = true
+#   gpg.ssh.allowedSignersFile     = /path/to/.github/allowed_signers
+```
+
+### Cutting a signed tag
+
+```bash
+# 1. Cut the tag (annotated + signed). Because tag.gpgSign is true,
+#    `git tag` defaults to signing — you do not need `-s` explicitly.
+#    Use `-m` to set the tag message; the message becomes the GH
+#    Release notes header on push.
+git tag -m 'release v1.17.0' v1.17.0
+
+# 2. Verify locally BEFORE pushing — catches a misconfigured local
+#    signing key without spending a CI red-fail cycle.
+bash tools/verify-tag-signatures.sh v1.17.0
+# Expected output:
+#   Verifying 1 tag(s) against .github/allowed_signers ...
+#   ---
+#     PASS: v1.17.0
+#   ---
+#   PASS: 1 / 1    FAIL: 0 / 1
+
+# 3. Push the tag. This fires:
+#    - wasm-publish.yml → builds + publishes to npm + GH-Releases
+#      (after verifying the tag signature as its first step).
+#    - verify-tag-signatures.yml → re-verifies all v* tags
+#      (push-trigger surface, separate from wasm-publish.yml).
+git push origin v1.17.0
+
+# 4. Watch both workflows turn green at:
+#    https://github.com/ThePyth0nKid/atlas/actions
+```
+
+### Adding a new maintainer key to the trust root
+
+```bash
+# 1. Add the key.
+bash tools/setup-tag-signing.sh add new-maintainer@example.com /path/to/their.pub
+
+# 2. Commit the trust-root update on master.
+git add .github/allowed_signers
+git commit -m 'chore(v1.17/welle-b): add maintainer key to allowed_signers'
+git push origin master
+
+# 3. The new maintainer can now run setup-tag-signing.sh init on their
+#    machine (their key is in the trust root), and their tag pushes
+#    will pass CI verification.
+```
+
+### Rotating vs. revoking a maintainer key
+
+There are two distinct operations on the trust root, and they have
+**opposite security semantics** — be deliberate about which one you
+intend.
+
+**Rotation (non-compromise) — preserve historical signatures.** The
+maintainer wants to switch to a new signing key (e.g. moving from a
+software key to a FIDO2 hardware token, or replacing a key on a
+retired laptop) without invalidating tags signed by the old key.
+
+```bash
+# 1. ADD the new key first.
+bash tools/setup-tag-signing.sh add nelson@ultranova.io /path/to/new.pub
+
+# 2. Commit + push.
+git add .github/allowed_signers
+git commit -m 'chore(v1.17/welle-b): rotate maintainer key (add new)'
+git push origin master
+
+# 3. Configure local git to use the new key.
+bash tools/setup-tag-signing.sh init --key /path/to/new.pub
+
+# 4. LEAVE the old key in `.github/allowed_signers`. Past tags signed
+#    by the old key continue to verify (CI cron stays green), and the
+#    old key cannot sign new tags from your machine anyway because
+#    `git config user.signingkey` now points at the new key. The old
+#    key remaining in the trust root is not a security regression: a
+#    public key cannot sign anything without its corresponding private
+#    key, which only you control.
+```
+
+**Revocation (compromise) — invalidate historical signatures.** The
+old key is suspected or known compromised. We accept that the weekly
+cron will fail-loud on every past tag signed by the revoked key, and
+that's the *intended* alarm — those tags are no longer trusted.
+
+```bash
+# 1. Edit .github/allowed_signers — delete the line containing the
+#    compromised key's body (whole line, including principal).
+
+# 2. Commit + push the trust-root update.
+git add .github/allowed_signers
+git commit -m 'chore(v1.17/welle-b): revoke <principal> key (compromise)'
+git push origin master
+
+# 3. From this commit forward:
+#    - any new v* tag push by the revoked key fails
+#      wasm-publish.yml's first-step verification, blocking publish.
+#    - the weekly verify-tag-signatures.yml cron starts failing on
+#      every PAST v* tag signed by the revoked key. This is the
+#      intended alarm — those tags are now untrusted by design. Do
+#      NOT silence the cron; investigate and re-publish from a new
+#      tag signed by a non-compromised key.
+
+# 4. To hard-invalidate a specific known-bad past tag (e.g. one the
+#    attacker pushed during the compromise window):
+#    - Force-push-delete the bad tag (requires admin access + tag-
+#      protection-rule override; see SECURITY-NOTES.md scope-e).
+#    - Re-publish from a new tag signed by a non-compromised key.
+#    - Document the rotation in the team's release log.
+```
+
+### Failure modes
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `git tag -m '…' v1.17.0` succeeds but `verify-tag-signatures.sh v1.17.0` says FAIL | Local key configured but its public counterpart not in `.github/allowed_signers` | `bash tools/setup-tag-signing.sh add <principal> <pubkey>` then commit + push |
+| `git tag` errors with `gpg.format = ssh, but no user.signingkey set` | One-time setup not done | `bash tools/setup-tag-signing.sh init` |
+| CI `wasm-publish.yml` step "Verify tag signature" fails red | Tag was pushed without local signing config OR signing key not in trust root | Confirm `tools/setup-tag-signing.sh status` matches CI's `.github/allowed_signers`; re-cut + force-push the tag (or push a corrected new patch tag, e.g. `v1.17.1`) |
+| Weekly cron `verify-tag-signatures.yml` fails on a previously-green tag | Trust root was edited (key removed) AFTER the tag was signed | Re-add the key OR (for a deliberate revocation) accept the cron failure — historical tag is now untrusted by design |
+
+### Why SSH (not GPG, not Sigstore/gitsign)
+
+See [SECURITY-NOTES.md scope-l](SECURITY-NOTES.md). One-line summary:
+SSH keys are already in maintainers' GitHub accounts, git 2.34+ has
+first-class SSH signing support without plugins, and the trust root
+is in-repo (auditable) rather than pinned to an external OIDC
+issuer's certificate transparency log. Sigstore/gitsign is a
+plausible additive enhancement (V1.18 candidate) — not a replacement.
