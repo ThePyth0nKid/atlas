@@ -86,9 +86,14 @@ bucket_name = "atlas-csp-reports"
 name = "RATE_LIMIT_DO"
 class_name = "GlobalRateLimitDO"
 
+# `new_sqlite_classes` (NOT `new_classes`) — Cloudflare's free plan only
+# supports SQLite-backed Durable Objects. The Worker code is in-memory-only
+# (Map<>) and never calls the storage API, so SQLite-backed DO is transparent
+# for our use case (window-based rate-limit counters reset on DO eviction
+# anyway — no persistence wanted).
 [[migrations]]
 tag = "v1"
-new_classes = ["GlobalRateLimitDO"]
+new_sqlite_classes = ["GlobalRateLimitDO"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Cron Trigger — daily AE → R2 archive @ 03:00 UTC
@@ -124,6 +129,39 @@ routes = [
 [env.production.vars]
 EXPECTED_ORIGIN = "https://playground.atlas-trust.dev"
 ENVIRONMENT = "production"
+
+# Named environments do NOT inherit top-level bindings — each env block needs
+# its own copy. Same dataset / bucket / DO class pointed-to from production
+# for one operational view of the data.
+[env.production.assets]
+directory = "."
+binding = "ASSETS"
+not_found_handling = "none"
+html_handling = "auto-trailing-slash"
+run_worker_first = true
+
+[[env.production.analytics_engine_datasets]]
+binding = "CSP_REPORTS_AE"
+dataset = "atlas_csp_reports"
+
+[[env.production.r2_buckets]]
+binding = "CSP_REPORTS_R2"
+bucket_name = "atlas-csp-reports"
+
+[[env.production.durable_objects.bindings]]
+name = "RATE_LIMIT_DO"
+class_name = "GlobalRateLimitDO"
+
+[[env.production.migrations]]
+tag = "v1"
+new_sqlite_classes = ["GlobalRateLimitDO"]
+
+[env.production.triggers]
+crons = ["0 3 * * *"]
+
+[env.production.observability]
+enabled = true
+head_sampling_rate = 1.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Observability
