@@ -16,7 +16,7 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**V1.16 Welle A + Welle B shipped — browser-runtime hardening for `apps/wasm-playground/`: strict CSP via `<meta http-equiv>` (`default-src 'none'`, `script-src 'self' 'wasm-unsafe-eval'` — no `'unsafe-inline'`, no `'unsafe-eval'`), Subresource Integrity (sha384) on the application JS, Trusted Types enforcement (`require-trusted-types-for 'script'; trusted-types 'none'` against a sink-free `app.js`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, AND (Welle B) `report-uri /csp-report` so deployed playgrounds surface every blocked CSP violation as a same-origin JSON POST instead of failing silently. Anti-drift pin in `tools/playground-csp-check.sh` (pure-bash CI validator) covers both Wellen. V1.15 CLOSED previously (Welle A const-time KID-equality invariant, Welle B dual-channel WASM distribution via GitHub Releases — see [OPERATOR-RUNBOOK §12](docs/OPERATOR-RUNBOOK.md), Welle C consumer-side reproducibility runbook — see [CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md)). V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm + browser playground.**
+**V1.16 Welle A + Welle B + Welle C shipped — browser-runtime hardening for `apps/wasm-playground/`: strict CSP via `<meta http-equiv>` (`default-src 'none'`, `script-src 'self' 'wasm-unsafe-eval'` — no `'unsafe-inline'`, no `'unsafe-eval'`), Subresource Integrity (sha384) on the application JS, Trusted Types enforcement (`require-trusted-types-for 'script'; trusted-types 'none'` against a sink-free `app.js`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, AND (Welle B) `report-uri /csp-report` so deployed playgrounds surface every blocked CSP violation as a same-origin JSON POST instead of failing silently, AND (Welle C) a Cloudflare Workers + Static Assets host that emits the full security-header set as HTTP headers on every response (HSTS preload, COOP `same-origin`, COEP `require-corp`, the same CSP as a header so `frame-ancestors` finally takes effect, `report-to` + `Reporting-Endpoints` for forward-compat, per-path Cache-Control), runs an executable receiver at `/csp-report` (silent-204 + categorised internal logs + Origin-anchored CSRF + per-IP `/64` + global rate-limit via Durable Object + JSON-bomb defence + ANSI-strip + field allow-list + Workers Analytics Engine `writeDataPoint` persistence), and writes a daily AE → R2 archive heartbeat. Anti-drift pin in `tools/playground-csp-check.sh` (pure-bash CI validator + `--live-check <url>` for post-deploy Worker validation) covers all three Wellen, plus a repo-tracked `tools/git-hooks/pre-commit` activated by `bash tools/install-git-hooks.sh`. V1.15 CLOSED previously (Welle A const-time KID-equality invariant, Welle B dual-channel WASM distribution via GitHub Releases — see [OPERATOR-RUNBOOK §12](docs/OPERATOR-RUNBOOK.md), Welle C consumer-side reproducibility runbook — see [CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md)). V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm + browser playground.**
 
 Trust-core crate + Rekor anchoring + per-tenant key derivation + HSM-backed signing + independent
 witness attestor (V1.5 mock-issuer, V1.6 live Sigstore Rekor v1, V1.7 anchor-chain + shard
@@ -139,13 +139,26 @@ CSP violations were silent in production by adding `report-uri
 /csp-report` to the meta-tag CSP — a deployed playground that runs a
 minimal receiver at the same-origin path (receiver-shape spec in
 [SECURITY-NOTES §scope-d](docs/SECURITY-NOTES.md)) now sees every
-blocked violation as a JSON POST. `report-uri` is the meta-tag-
-compatible mechanism; the modern Reporting API (`report-to` +
-`Reporting-Endpoints` HTTP header) requires header-mode CSP and is
-the operator's responsibility at hosting time. A pure-bash anti-drift
-validator (`tools/playground-csp-check.sh`) re-asserts the CSP
-directives + SRI hash + `report-uri` declaration on every CI run.
-Graph-database integration and policy-engine follow in V2.
+blocked violation as a JSON POST. V1.16 Welle C is the deployment-
+side closure: a Cloudflare Workers + Static Assets host
+(`apps/wasm-playground/wrangler.toml` + `apps/wasm-playground/
+worker/`) emits the full security-header set on every response
+(HSTS preload, COOP `same-origin`, COEP `require-corp`, the same
+CSP as an HTTP header so `frame-ancestors` finally takes effect,
+plus `report-to` + `Reporting-Endpoints` for forward-compat with
+the Reporting API, plus per-path Cache-Control), runs an executable
+receiver at `/csp-report` (silent-204 + categorised internal logs +
+Origin-anchored CSRF + per-IP `/64` + global rate-limit via Durable
+Object + JSON-bomb defence + ANSI-strip + field allow-list + AE
+`writeDataPoint` persistence), and writes a daily AE → R2 archive
+heartbeat. The pure-bash anti-drift validator
+(`tools/playground-csp-check.sh`) re-asserts the CSP directives +
+SRI hash + `report-uri` declaration on every CI run; with
+`--live-check <url>` it asserts every Worker-emitted hardening
+invariant against the deployed URL post-deploy. A repo-tracked
+`tools/git-hooks/pre-commit` activated by `bash tools/install-git-
+hooks.sh` runs the validator at commit time. Graph-database
+integration and policy-engine follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
   trust property, write/export flows, V1 → V1.16 → V2 boundaries.

@@ -1,4 +1,4 @@
-# Atlas WASM playground (V1.14 Scope E + V1.16 Welle A + Welle B)
+# Atlas WASM playground (V1.14 Scope E + V1.16 Welle A + Welle B + Welle C)
 
 Tiny static page that loads the Atlas verifier WASM module in your browser
 and verifies a trace bundle locally — no network call to any Atlas server.
@@ -122,6 +122,83 @@ to reject report-spoofing) lives in
 The validator (`tools/playground-csp-check.sh`) asserts the
 `report-uri` declaration is present AND same-origin (cross-origin
 endpoints get a WARN, not a hard fail).
+
+## Production hosting (V1.16 Welle C)
+
+The playground deploys to a single Cloudflare Worker that hosts
+the static-asset bundle, runs the receiver, and writes a daily
+archive heartbeat. See `wrangler.toml` and `worker/src/`. Every
+response — static asset 2xx, asset-binding 404, receiver 204 —
+passes through `applySecurityHeaders` and carries:
+
+- **CSP as an HTTP header** (same eight directives as the meta-tag
+  CSP, plus `report-uri /csp-report` and `report-to reports` plus
+  the matching `Reporting-Endpoints: reports="/csp-report"`
+  companion). `frame-ancestors 'none'` finally takes effect because
+  it is now header-delivered.
+- **HSTS preload** (`max-age=31536000; includeSubDomains; preload`).
+- **Cross-Origin-Opener-Policy: same-origin** + **Cross-Origin-
+  Embedder-Policy: require-corp** — Spectre / cross-window leak
+  defence.
+- **X-Content-Type-Options: nosniff** + **Referrer-Policy:
+  no-referrer** as HTTP headers (also kept as meta-tags for
+  page-bytes-only fallback paths).
+- **Per-path Cache-Control** — `no-cache, must-revalidate` on `/`
+  and `/index.html`; `public, max-age=31536000, immutable` on
+  `/app.js` (SRI-pinned) and `/pkg/*` (content-hashed); `no-store`
+  on `/csp-report`.
+
+The receiver (`worker/src/csp-receiver.ts`) is the executable form
+of the receiver-shape spec from Welle B: silent-204 on every
+validation failure, categorised internal logs only, Origin-anchored
+CSRF defence, body cap + JSON-bomb defence (depth-4 / 24-key
+per-receiver tight limits), per-IP `/64` + global rate-limit via a
+Durable Object (`worker/src/rate-limit.ts`), ANSI-strip + field
+allow-list, AE `writeDataPoint` persistence. AE → R2 daily
+heartbeat at `0 3 * * *` UTC (one PUT/day, defends against per-
+report financial-DoS amplification on R2 Class-A ops).
+
+The `experimental_serve_directly = false` + `run_worker_first =
+true` flags in `wrangler.toml` `[assets]` force Worker invocation
+BEFORE the asset match — without these, Cloudflare's edge would
+serve assets directly and bypass the security-header layering.
+Both flags are set for forward-compat across wrangler 3.x ↔ 4.x.
+
+**Local dev:**
+
+```bash
+cd apps/wasm-playground
+npx wrangler dev    # serves on http://localhost:8787 with miniflare bindings
+```
+
+**Tests + typecheck (run before any deploy):**
+
+```bash
+cd apps/wasm-playground/worker
+npm install
+npx vitest run        # 91 tests
+npx tsc --noEmit      # type-check clean
+```
+
+**Live-check after deploy:**
+
+```bash
+bash tools/playground-csp-check.sh --live-check https://playground.atlas-trust.dev
+# Asserts every Worker-emitted hardening invariant against the
+# deployed URL via curl: HTTP-header CSP consistency with meta-tag,
+# HSTS preload eligibility, COOP/COEP exact values, per-path
+# Cache-Control, POST /csp-report → 204.
+```
+
+**Repo-tracked git hook (one-time per clone):**
+
+```bash
+bash tools/install-git-hooks.sh
+# Activates tools/git-hooks/pre-commit, which runs
+# tools/playground-csp-check.sh on every commit that touches
+# app.js / index.html / the wasm-bindgen glue. Catches SRI-pinning
+# drift before it lands in git.
+```
 
 ### Maintenance — after editing `app.js`
 

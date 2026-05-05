@@ -1,0 +1,32 @@
+# Atlas Playground — Workers Static Assets exclude list (V1.16 Welle C)
+#
+# `[assets] directory = "."` in wrangler.toml means the static-asset binding
+# scans this whole folder. The .assetsignore file excludes paths we do NOT
+# want served as static assets (Worker source, dependencies, dev artefacts,
+# repository docs).
+#
+# Syntax: gitignore-like (one pattern per line, # for comments, leading !
+# for negation).
+
+# Worker source tree (served via Worker code, not as static asset)
+worker/
+
+# Node dependencies (only present when developing locally)
+node_modules/
+
+# Repository / dev artefacts that must never be public
+.gitignore
+.assetsignore
+README.md
+wrangler.toml
+package.json
+package-lock.json
+tsconfig.json
+*.test.ts
+*.test.js
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

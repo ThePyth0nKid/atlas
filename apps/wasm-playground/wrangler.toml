@@ -1,0 +1,133 @@
+# Atlas Playground — V1.16 Welle C
+#
+# Workers + Static Assets deployment. One Worker hosts:
+#   - GET /, /index.html, /app.js, /pkg/* → static asset binding (page bytes)
+#   - POST /csp-report                    → CSP violation receiver
+#   - cron @ 03:00 UTC                    → AE → R2 daily archive
+#
+# All security headers are emitted by the Worker on every response (see
+# worker/src/security-headers.ts) — there is intentionally NO _headers file,
+# because Workers + Static Assets uses Worker-emitted headers as the
+# audit-fähig + testable canonical source.
+#
+# Anti-drift: tools/playground-csp-check.sh validates that the page-bytes
+# meta-tag CSP and the Worker-emitted CSP stay consistent.
+
+name = "atlas-playground"
+main = "worker/src/index.ts"
+compatibility_date = "2026-05-04"
+# `nodejs_compat` is required by @cloudflare/vitest-pool-workers; it is
+# inert at runtime unless code imports `node:*` modules, which this Worker
+# deliberately does not. Keeping it on in production matches dev/test parity.
+# `global_fetch_strictly_public` blocks fetch() to the same Worker (anti-loop).
+compatibility_flags = ["global_fetch_strictly_public", "nodejs_compat"]
+
+# Account ID — confirmed via `wrangler whoami` (nelson@ultranova.io).
+# Pinning this here makes deploys deterministic across machines / CI runners
+# (without it, wrangler picks the first account from the logged-in user, which
+# is fine for a single-account login but fragile for multi-account scenarios).
+account_id = "56c04de4ed4b979f6ba21386e4680dee"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Static Assets binding — serves index.html, app.js, pkg/*.wasm + .js etc.
+# ─────────────────────────────────────────────────────────────────────────────
+[assets]
+directory = "."
+binding = "ASSETS"
+# `not_found_handling = "none"` means: if a static-asset path isn't found,
+# Worker code runs (which lets POST /csp-report take precedence over a static
+# 404). We rely on Worker code for routing, not on Pages-style SPA fallback.
+not_found_handling = "none"
+# Serve compressed assets when client supports it (gzip/brotli auto-handled).
+html_handling = "auto-trailing-slash"
+# CRITICAL — V1.16 Welle C: invoke the Worker BEFORE matching the asset.
+# Without this, the Cloudflare edge serves matching static assets directly
+# (bypassing the Worker entirely), which would skip applySecurityHeaders and
+# strip CSP / HSTS / COOP / COEP off every static-asset response — defeating
+# the entire Welle-C hardening goal. The Worker invariant is: every response
+# carries Worker-emitted security headers, and BOTH flags below enforce it.
+#
+# Flag-name evolution — we set BOTH for forward-compat:
+#   - wrangler 3.x:  `experimental_serve_directly = false`  (in use locally)
+#   - wrangler ≥4.x: `run_worker_first = true`              (deploy / CI)
+# Setting both is harmless: each wrangler generation reads the flag it knows
+# and ignores the other (at most a deprecation warning). Without the newer-
+# style flag, a future wrangler bump in CI/operator-machines would silently
+# stop invoking the Worker ahead of assets and strip the security headers.
+experimental_serve_directly = false
+run_worker_first = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Workers Analytics Engine — hot path for CSP report ingestion
+# ─────────────────────────────────────────────────────────────────────────────
+# AE writeDataPoint is ~free per-call (billed per-datapoint, not per-Class-A-op)
+# and the dataset is queryable via SQL from the dashboard. Default retention is
+# 90 days; we use 30-day operational analysis + 365-day R2 archive (see below).
+[[analytics_engine_datasets]]
+binding = "CSP_REPORTS_AE"
+dataset = "atlas_csp_reports"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# R2 — daily aggregated archive (1 PutObject/day via cron, NOT per-report)
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-request R2 writes are a financial DoS vector (Class-A op amplification).
+# Instead, the cron-archive handler queries AE once per day and writes a single
+# JSONL object to R2. R2 lifecycle rule (set in dashboard or via API after
+# bucket creation) deletes objects > 365 days old.
+[[r2_buckets]]
+binding = "CSP_REPORTS_R2"
+bucket_name = "atlas-csp-reports"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Durable Object — global rate-limit counter (defends against per-IP rate-limit
+# bypass via IPv6 /64 rotation, security review M6 + H3)
+# ─────────────────────────────────────────────────────────────────────────────
+[[durable_objects.bindings]]
+name = "RATE_LIMIT_DO"
+class_name = "GlobalRateLimitDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["GlobalRateLimitDO"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cron Trigger — daily AE → R2 archive @ 03:00 UTC
+# ─────────────────────────────────────────────────────────────────────────────
+[triggers]
+crons = ["0 3 * * *"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Environment-specific overrides
+# ─────────────────────────────────────────────────────────────────────────────
+# Default deploys to *.workers.dev (preview / dev). Production uses a custom
+# domain configured below; production-only env vars (e.g. EXPECTED_ORIGIN)
+# pin the receiver's CSRF anchor to the actual public hostname.
+
+[vars]
+# Default for `wrangler dev` and preview deploys. Production overrides below.
+EXPECTED_ORIGIN = "http://localhost:8787"
+ENVIRONMENT = "development"
+
+[env.preview]
+name = "atlas-playground-preview"
+[env.preview.vars]
+EXPECTED_ORIGIN = "https://atlas-playground-preview.workers.dev"
+ENVIRONMENT = "preview"
+
+[env.production]
+name = "atlas-playground"
+# Custom domain — configured via `wrangler deploy --env production` after
+# the route is registered in the dashboard or via `wrangler` route commands.
+routes = [
+  { pattern = "playground.atlas-trust.dev", custom_domain = true }
+]
+[env.production.vars]
+EXPECTED_ORIGIN = "https://playground.atlas-trust.dev"
+ENVIRONMENT = "production"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Observability
+# ─────────────────────────────────────────────────────────────────────────────
+[observability]
+enabled = true
+head_sampling_rate = 1.0

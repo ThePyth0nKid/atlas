@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#
+# tools/git-hooks/pre-commit
+#
+# V1.16 Welle C — pre-commit anti-drift guard for the wasm-playground.
+#
+# Triggers playground-csp-check.sh whenever the staged commit touches
+# apps/wasm-playground/app.js or apps/wasm-playground/index.html. The most
+# common drift is editing app.js without refreshing the SRI hash in
+# index.html — this hook catches that BEFORE the commit lands, so the
+# fix-up doesn't pollute git history with a separate "SRI hash" commit.
+#
+# Activation (one-time, per clone):
+#   bash tools/install-git-hooks.sh
+#
+# Bypass (use sparingly, for genuine emergencies only):
+#   git commit --no-verify
+#
+# What this hook does NOT do:
+#   - It does not auto-update the SRI hash. That would be a hidden-side-
+#     effect at commit time and could mask a malicious app.js change. The
+#     operator must explicitly run `--update-sri`, see the diff, then commit.
+#   - It does not run the live-check (--live-check) — that requires a
+#     deployed Worker URL and is post-deploy, not pre-commit.
+#   - It does not run the worker test suite (vitest run). The hook stays
+#     fast (sub-second) so that day-to-day commits aren't slowed down. Run
+#     `cd apps/wasm-playground/worker && npx vitest run` before pushing.
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+VALIDATOR="${REPO_ROOT}/tools/playground-csp-check.sh"
+
+# Files we care about — drift triggers on any of these.
+WATCHED_PATHS=(
+  "apps/wasm-playground/app.js"
+  "apps/wasm-playground/index.html"
+  "apps/wasm-playground/pkg/atlas_verify_wasm.js"
+)
+
+# Get the list of staged files. `--cached` filters to staged only;
+# `--diff-filter=ACMRT` excludes deletions (which we don't need to validate).
+STAGED=$(git diff --cached --name-only --diff-filter=ACMRT 2>/dev/null || true)
+
+NEEDS_CHECK=0
+for path in "${WATCHED_PATHS[@]}"; do
+  if printf '%s\n' "$STAGED" | grep -Fxq "$path"; then
+    NEEDS_CHECK=1
+    break
+  fi
+done
+
+if [ "$NEEDS_CHECK" -eq 0 ]; then
+  exit 0
+fi
+
+if [ ! -f "$VALIDATOR" ]; then
+  echo "pre-commit: WARN — playground-csp-check.sh not found at ${VALIDATOR}; skipping" >&2
+  exit 0
+fi
+
+echo "pre-commit: wasm-playground CSP/SRI anti-drift check..."
+if ! bash "$VALIDATOR"; then
+  echo "" >&2
+  echo "pre-commit: FAIL — wasm-playground hardening drift detected." >&2
+  echo "" >&2
+  echo "  If app.js was edited, refresh the SRI hash:" >&2
+  echo "    bash tools/playground-csp-check.sh --update-sri" >&2
+  echo "    git add apps/wasm-playground/index.html" >&2
+  echo "" >&2
+  echo "  If you intentionally need to bypass this check (rare):" >&2
+  echo "    git commit --no-verify" >&2
+  exit 1
+fi
+
+exit 0

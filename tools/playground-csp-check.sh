@@ -2,7 +2,7 @@
 #
 # tools/playground-csp-check.sh
 #
-# V1.16 Welle A + Welle B — anti-drift validator for the wasm-playground
+# V1.16 Welle A + B + C — anti-drift validator for the wasm-playground
 # browser hardening posture.
 #
 # What this script enforces (CI mode, default):
@@ -21,12 +21,29 @@
 #      it just downgrades report fidelity (browsers send opaque-response
 #      reports cross-origin) and creates a new vendor dependency. We WARN.
 #
+# Live-check mode (V1.16 Welle C, opt-in: `--live-check <base-url>`):
+#   6. The deployed Worker emits Content-Security-Policy AS AN HTTP HEADER
+#      (not just meta-tag) — this is what makes frame-ancestors actually
+#      enforce, and what closes the meta-tag's silent-ignore gap.
+#   7. The HTTP-header CSP and the meta-tag CSP are consistent (no drift
+#      between Worker-emitted policy and page-bytes policy).
+#   8. Strict-Transport-Security is preload-eligible (max-age >= 31536000,
+#      includeSubDomains, preload).
+#   9. Cross-Origin-Opener-Policy: same-origin AND
+#      Cross-Origin-Embedder-Policy: require-corp (Spectre defense).
+#  10. X-Content-Type-Options: nosniff AND Referrer-Policy: no-referrer.
+#  11. Cache-Control class is correct per path (root → no-cache,
+#      must-revalidate; /pkg/*.wasm + /app.js → immutable).
+#  12. POST /csp-report returns 204 with no body (silent-204 invariant).
+#
 # Operator workflow:
 #   - After editing app.js, run with --update-sri to refresh the hash.
-#   - In CI, run without flags; non-zero exit means drift.
+#   - In CI, run without flags; non-zero exit means page-bytes drift.
+#   - Post-deploy, run with `--live-check https://<host>` to verify the
+#     Worker-emitted hardening matches the source-of-truth in the repo.
 #
-# Cross-platform: bash + openssl + sed + grep + base64 (Git Bash on
-# Windows works; macOS/Linux native works).
+# Cross-platform: bash + openssl + sed + grep + base64 (+ curl for
+# --live-check). Git Bash on Windows works; macOS/Linux native works.
 
 set -euo pipefail
 
@@ -35,20 +52,63 @@ INDEX_HTML="${REPO_ROOT}/apps/wasm-playground/index.html"
 APP_JS="${REPO_ROOT}/apps/wasm-playground/app.js"
 
 UPDATE_SRI=0
-for arg in "$@"; do
-  case "$arg" in
-    --update-sri) UPDATE_SRI=1 ;;
+LIVE_BASE_URL=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --update-sri)
+      UPDATE_SRI=1
+      shift
+      ;;
+    --live-check)
+      if [ $# -lt 2 ] || [ -z "${2:-}" ]; then
+        echo "FAIL: --live-check requires a URL argument (e.g., https://playground.atlas-trust.dev)" >&2
+        exit 2
+      fi
+      LIVE_BASE_URL="$2"
+      shift 2
+      ;;
+    --live-check=*)
+      LIVE_BASE_URL="${1#*=}"
+      if [ -z "$LIVE_BASE_URL" ]; then
+        echo "FAIL: --live-check= requires a URL value" >&2
+        exit 2
+      fi
+      shift
+      ;;
     -h|--help)
-      sed -n '3,30p' "$0"
+      sed -n '3,46p' "$0"
       exit 0
       ;;
     *)
-      echo "unknown flag: $arg" >&2
-      echo "usage: $0 [--update-sri]" >&2
+      echo "unknown flag: $1" >&2
+      echo "usage: $0 [--update-sri] [--live-check <base-url>]" >&2
       exit 2
       ;;
   esac
 done
+
+# --live-check requires curl. Pre-flight before any heavy lifting so the
+# operator gets a clear error instead of mid-run "command not found".
+if [ -n "$LIVE_BASE_URL" ]; then
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "FAIL: --live-check requires curl, but curl is not on PATH" >&2
+    exit 2
+  fi
+  # Strip trailing slash so we can build paths like "${LIVE_BASE_URL}/pkg/..."
+  # without doubling slashes.
+  LIVE_BASE_URL="${LIVE_BASE_URL%/}"
+  # Reject anything that isn't an absolute https:// URL — http:// would defeat
+  # the HSTS/COOP/COEP guarantees we're trying to verify, and a bare hostname
+  # would silently default to https on curl but make the error message
+  # confusing if it failed.
+  case "$LIVE_BASE_URL" in
+    https://*) : ;;
+    *)
+      echo "FAIL: --live-check URL must start with https:// (got: $LIVE_BASE_URL)" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 # Sanity: required files exist.
 for f in "$INDEX_HTML" "$APP_JS"; do
@@ -303,6 +363,152 @@ if csp_has "frame-ancestors 'none'"; then
   echo "        the hosting provider to ALSO send Content-Security-Policy as an HTTP header."
 fi
 
+# --- live-check mode (V1.16 Welle C) ----------------------------------
+# Verifies the deployed Worker actually emits the headers we promised.
+# This is the post-deploy, end-to-end hardening assertion that complements
+# the page-bytes-only checks above.
+if [ -n "$LIVE_BASE_URL" ]; then
+  echo ""
+  echo "  live-check: ${LIVE_BASE_URL}"
+
+  # Fetch headers for `/` — the index.html path. We use --max-time 15 so a
+  # hung connection fails the check loudly instead of stalling CI. -sS
+  # suppresses progress but preserves error output. -L follows redirects
+  # (cf custom domains may 301 to canonical https).
+  ROOT_HEADERS=$(curl -sSL -D - -o /dev/null --max-time 15 "${LIVE_BASE_URL}/" 2>&1) || {
+    fail "live-check: GET ${LIVE_BASE_URL}/ failed (curl exit $?)"
+    ROOT_HEADERS=""
+  }
+
+  if [ -n "$ROOT_HEADERS" ]; then
+    # Extract a single header value, case-insensitively. cf headers may
+    # vary case; the HTTP spec treats them as case-insensitive. We also
+    # strip a trailing CR (curl preserves the HTTP \r\n line endings).
+    extract_header() {
+      local name="$1"
+      printf '%s\n' "$ROOT_HEADERS" \
+        | grep -iE "^${name}:" \
+        | head -n 1 \
+        | sed -E 's/^[^:]+:[[:space:]]*//' \
+        | tr -d '\r'
+    }
+
+    HDR_CSP=$(extract_header 'Content-Security-Policy')
+    HDR_HSTS=$(extract_header 'Strict-Transport-Security')
+    HDR_COOP=$(extract_header 'Cross-Origin-Opener-Policy')
+    HDR_COEP=$(extract_header 'Cross-Origin-Embedder-Policy')
+    HDR_XCTO=$(extract_header 'X-Content-Type-Options')
+    HDR_REFERRER=$(extract_header 'Referrer-Policy')
+    HDR_CACHE_CONTROL=$(extract_header 'Cache-Control')
+
+    # 6. CSP HTTP header present (this is what makes frame-ancestors enforce).
+    if [ -z "$HDR_CSP" ]; then
+      fail "live-check: Content-Security-Policy HTTP header missing on /"
+    fi
+
+    # 7. HTTP-header CSP and meta-tag CSP must be consistent. Strict equality
+    # would be too brittle (whitespace, ordering); instead we assert that the
+    # set of directives covered by the meta-tag is also covered by the header.
+    # Practical check: every required directive from the meta-tag must appear
+    # in the header text too. (The header may add MORE directives — that's
+    # fine, it's strictly tighter, not a regression.)
+    if [ -n "$HDR_CSP" ] && [ -n "$CSP" ]; then
+      for required in \
+        "default-src 'none'" \
+        "script-src 'self' 'wasm-unsafe-eval'" \
+        "connect-src 'self'" \
+        "form-action 'none'" \
+        "frame-ancestors 'none'" \
+        "base-uri 'none'" \
+        "require-trusted-types-for 'script'" \
+        "trusted-types 'none'"; do
+        if ! printf '%s\n' "$HDR_CSP" | grep -qE "(^|[ ;])${required}([ ;]|$)"; then
+          fail "live-check: HTTP-header CSP missing required directive: \`${required}\`"
+        fi
+      done
+    fi
+
+    # 8. HSTS preload-eligible. The HSTS preload list requires:
+    #   max-age >= 31536000 (1 year), includeSubDomains, preload.
+    # We assert all three present in the header value.
+    if [ -z "$HDR_HSTS" ]; then
+      fail "live-check: Strict-Transport-Security HTTP header missing on /"
+    else
+      if ! printf '%s\n' "$HDR_HSTS" | grep -qiE 'max-age=[0-9]+'; then
+        fail "live-check: HSTS missing max-age directive ($HDR_HSTS)"
+      else
+        HSTS_MAX_AGE=$(printf '%s\n' "$HDR_HSTS" | grep -oiE 'max-age=[0-9]+' | head -n1 | sed 's/[Mm][Aa][Xx]-[Aa][Gg][Ee]=//')
+        if [ "$HSTS_MAX_AGE" -lt 31536000 ]; then
+          fail "live-check: HSTS max-age=$HSTS_MAX_AGE is below preload minimum (31536000)"
+        fi
+      fi
+      if ! printf '%s\n' "$HDR_HSTS" | grep -qi 'includeSubDomains'; then
+        fail "live-check: HSTS missing \`includeSubDomains\` ($HDR_HSTS)"
+      fi
+      if ! printf '%s\n' "$HDR_HSTS" | grep -qi 'preload'; then
+        fail "live-check: HSTS missing \`preload\` ($HDR_HSTS)"
+      fi
+    fi
+
+    # 9. COOP/COEP — Spectre defense (must be exact values, not subsets).
+    if [ "$HDR_COOP" != "same-origin" ]; then
+      fail "live-check: Cross-Origin-Opener-Policy must be \`same-origin\` (got: $HDR_COOP)"
+    fi
+    if [ "$HDR_COEP" != "require-corp" ]; then
+      fail "live-check: Cross-Origin-Embedder-Policy must be \`require-corp\` (got: $HDR_COEP)"
+    fi
+
+    # 10. nosniff + no-referrer.
+    if [ "$HDR_XCTO" != "nosniff" ]; then
+      fail "live-check: X-Content-Type-Options must be \`nosniff\` (got: $HDR_XCTO)"
+    fi
+    if [ "$HDR_REFERRER" != "no-referrer" ]; then
+      fail "live-check: Referrer-Policy must be \`no-referrer\` (got: $HDR_REFERRER)"
+    fi
+
+    # 11a. Cache-Control on / must be `no-cache, must-revalidate` (html class).
+    EXPECTED_HTML_CC="no-cache, must-revalidate"
+    if [ "$HDR_CACHE_CONTROL" != "$EXPECTED_HTML_CC" ]; then
+      fail "live-check: Cache-Control on / must be \`${EXPECTED_HTML_CC}\` (got: $HDR_CACHE_CONTROL)"
+    fi
+  fi
+
+  # 11b. Cache-Control on /app.js must be `public, max-age=31536000, immutable`.
+  APP_JS_HEADERS=$(curl -sSL -D - -o /dev/null --max-time 15 "${LIVE_BASE_URL}/app.js" 2>&1) || {
+    fail "live-check: GET ${LIVE_BASE_URL}/app.js failed (curl exit $?)"
+    APP_JS_HEADERS=""
+  }
+  if [ -n "$APP_JS_HEADERS" ]; then
+    APP_JS_CC=$(printf '%s\n' "$APP_JS_HEADERS" | grep -iE '^Cache-Control:' | head -n1 | sed -E 's/^[^:]+:[[:space:]]*//' | tr -d '\r')
+    EXPECTED_IMMUTABLE_CC="public, max-age=31536000, immutable"
+    if [ "$APP_JS_CC" != "$EXPECTED_IMMUTABLE_CC" ]; then
+      fail "live-check: Cache-Control on /app.js must be \`${EXPECTED_IMMUTABLE_CC}\` (got: $APP_JS_CC)"
+    fi
+    # Also verify CSP layered onto immutable assets (every response carries it).
+    if ! printf '%s\n' "$APP_JS_HEADERS" | grep -qiE '^Content-Security-Policy:'; then
+      fail "live-check: Content-Security-Policy header missing on /app.js (Worker should layer it onto every response)"
+    fi
+  fi
+
+  # 12. POST /csp-report returns 204 (silent-204 invariant). We use a
+  # well-formed minimal CSP report body so a bug in the receiver that 200s
+  # on valid + 204s on invalid would surface here. -w '%{http_code}' is the
+  # canonical curl trick to capture status code without parsing the headers.
+  RECEIVER_BODY='{"csp-report":{"violated-directive":"script-src","blocked-uri":"https://example/x.js","document-uri":"'"${LIVE_BASE_URL}/"'"}}'
+  RECEIVER_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 \
+    -X POST \
+    -H "Content-Type: application/csp-report" \
+    -H "Origin: ${LIVE_BASE_URL}" \
+    --data-raw "$RECEIVER_BODY" \
+    "${LIVE_BASE_URL}/csp-report" 2>&1) || {
+    fail "live-check: POST ${LIVE_BASE_URL}/csp-report failed (curl exit $?)"
+    RECEIVER_STATUS=""
+  }
+  if [ -n "$RECEIVER_STATUS" ] && [ "$RECEIVER_STATUS" != "204" ]; then
+    fail "live-check: POST /csp-report must return 204 (silent-204 invariant); got HTTP $RECEIVER_STATUS"
+  fi
+fi
+
 if [ "$FAIL" -ne 0 ]; then
   echo ""
   echo "playground-csp-check.sh: FAIL — see errors above" >&2
@@ -317,4 +523,7 @@ if [ -f "$PKG_GLUE" ]; then
 fi
 if [ -n "$REPORT_URI_FIRST" ]; then
   echo "  report-uri: $REPORT_URI_FIRST"
+fi
+if [ -n "$LIVE_BASE_URL" ]; then
+  echo "  live-check: Worker-emitted headers verified at ${LIVE_BASE_URL}"
 fi

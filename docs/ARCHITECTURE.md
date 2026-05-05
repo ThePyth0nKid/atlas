@@ -1471,7 +1471,7 @@ Headline:
   verify CI action for downstream consumers) are documented in
   `.handoff/v1.15-handoff.md` for the next session.
 
-### V1.16 — Browser-runtime hardening of the WASM playground (shipped: Welle A + Welle B)
+### V1.16 — Browser-runtime hardening of the WASM playground (shipped: Welle A + Welle B + Welle C)
 
 - **Strict CSP + SRI + Trusted Types on `apps/wasm-playground/` (Welle A).**
   The V1.14 Scope E playground page is hardened against UI-side
@@ -1502,34 +1502,65 @@ Headline:
   deployment SHOULD declare BOTH for forward-compat. Receiver-shape
   spec + minimal-collector example are in
   [docs/SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-d covers-bullet 6.
+- **Workers + Static Assets host with Worker-emitted security
+  headers, executable receiver, and AE → R2 archive (Welle C).** The
+  playground deploys to a single Cloudflare Worker
+  (`apps/wasm-playground/wrangler.toml`,
+  `apps/wasm-playground/worker/`) that hosts the static-asset bundle,
+  runs the receiver, and writes a daily archive heartbeat. Every
+  response — static asset, asset-binding 404, receiver 204 — passes
+  through `applySecurityHeaders` and carries CSP (now also as an HTTP
+  header so `frame-ancestors` finally takes effect, plus `report-to`
+  + `Reporting-Endpoints` for forward-compat with the Reporting API),
+  HSTS preload, COOP `same-origin`, COEP `require-corp`, plus
+  per-path Cache-Control. The `experimental_serve_directly = false` +
+  `run_worker_first = true` flags force Worker invocation BEFORE the
+  asset match, so asset bytes never reach the client without the
+  hardening layered on. The receiver
+  (`worker/src/csp-receiver.ts`) is the executable form of the
+  receiver-shape spec from Welle B: silent-204 on every validation
+  failure, categorised internal logs only, Origin-anchored CSRF
+  defence, body cap + JSON-bomb defence (depth-4 / 24-key
+  per-receiver tight limits), per-IP `/64` + global rate-limit via a
+  Durable Object, ANSI-strip + field allow-list, AE
+  `writeDataPoint` persistence (one normalised struct per accepted
+  report), AE → R2 daily-heartbeat archive (1 PUT/day, defends
+  against per-report financial-DoS amplification on R2 Class-A ops).
 - **Anti-drift validator `tools/playground-csp-check.sh`.** Pure-bash
   validator (no Node/Python dependency) re-asserts the CSP directives,
   the SRI hash on `app.js`, the absence of `'unsafe-inline'` /
   `'unsafe-eval'` on `script-src`, the wasm-bindgen-glue TT-compat
-  audit, AND (Welle B) the `report-uri` declaration + same-origin
-  shape on every run. `--update-sri` flag re-pins the hash after a
-  legitimate `app.js` edit.
-- **Trust property unchanged.** V1.16 (both Wellen) is delivery-side
-  hardening — the verifier's correctness, byte-determinism pins,
-  signature integrity, hash-chain integrity, and anchor verification
-  are unchanged from V1.15. Welle A buys *resistance to UI-side
-  injection*; Welle B is *receiver-ready post-block visibility* —
-  the page declares `report-uri /csp-report`, but actual visibility
-  requires the operator to also stand up a receiver at that path
-  matching the documented receiver-shape spec. Without a receiver,
-  reports POST into a 404 (violation still blocked, report lost).
-  Welle B closes F-3 at the page-bytes layer; the deployment-side
-  closure is operator responsibility.
-- **What V1.16 Welle A + B is NOT yet:** WASM-binary SRI (the
+  audit, the `report-uri` declaration + same-origin shape (Welle B),
+  and (with `--live-check <url>`, Welle C) every Worker-emitted
+  hardening invariant against the deployed URL via `curl`: HTTP-
+  header CSP consistency with the meta-tag, HSTS preload eligibility,
+  COOP/COEP exact match, per-path Cache-Control, `POST /csp-report
+  → 204`. `tools/git-hooks/pre-commit` (activated one-time per clone
+  by `bash tools/install-git-hooks.sh`) runs the validator on every
+  commit that touches the playground page-bytes, replacing the
+  manual `.git/hooks/pre-commit` snippet from Welle A.
+- **Trust property unchanged.** V1.16 (all three Wellen) is
+  delivery-side hardening — the verifier's correctness, byte-
+  determinism pins, signature integrity, hash-chain integrity, and
+  anchor verification are unchanged from V1.15. Welle A buys
+  *resistance to UI-side injection*; Welle B closes F-3 at the
+  page-bytes layer; Welle C closes F-3 at the deployment layer —
+  HTTP-layer hardening (HSTS / COOP / COEP / header-mode CSP) plus
+  an executable receiver that turns Welle B's plumbing into actual
+  incident-detection. The DNS-side closure (CAA, Null-MX, DMARC,
+  SPF, DNSSEC) and the actual `wrangler deploy` step remain operator
+  steps — not code, not page-bytes; documented in
+  `docs/V1.16-WELLE-C-PLAN.md` Phase 4.2 + 4.3.
+- **What V1.16 is NOT yet:** WASM-binary SRI (the
   `wasm-pack`-emitted loader uses `WebAssembly.instantiateStreaming`,
   which has no declarative SRI hook — the `WebAssembly.compile`
   integrity-check spec is proposal stage); service-worker pinning;
   JS-side input-size cap (the Rust verifier already caps allocation
-  via `MAX_ITEMS_PER_LEVEL`); receiver implementation at
-  `/csp-report` (operator responsibility); HTTP-header-mode `report-to`
-  + `Reporting-Endpoints` (page-bytes can't enforce — operator
-  config); hosting decision and DNS pinning. These are V1.16 Welle C
-  / V1.17+ candidates documented in
+  via `MAX_ITEMS_PER_LEVEL`); the AE → R2 query-and-batch step
+  beyond the heartbeat marker; multi-region active-active receiver
+  (the Durable Object is single-instance — sharding is a Welle D
+  candidate if quota pressure ever becomes real). These are V1.17+
+  candidates documented in
   [docs/SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-d "What scope-d
   does NOT cover".
 

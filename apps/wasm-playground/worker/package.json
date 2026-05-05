@@ -1,0 +1,22 @@
+{
+  "name": "atlas-playground-worker",
+  "version": "1.16.0",
+  "private": true,
+  "description": "Atlas Playground hosting Worker — security headers, CSP receiver, daily archive (V1.16 Welle C)",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
+    "dev": "cd .. && wrangler dev",
+    "deploy:preview": "cd .. && wrangler deploy --env preview",
+    "deploy:production": "cd .. && wrangler deploy --env production"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.5.0",
+    "@cloudflare/workers-types": "^4.20260101.0",
+    "typescript": "^5.6.0",
+    "vitest": "~2.1.0"
+  }
+}

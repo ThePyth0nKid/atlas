@@ -1715,7 +1715,7 @@ verifiable against either channel's bytes (same SHA, same commit SHA).
 
 ---
 
-## scope-d — Browser-runtime hardening of the WASM playground (V1.16 Welle A + Welle B — shipped)
+## scope-d — Browser-runtime hardening of the WASM playground (V1.16 Welle A + Welle B + Welle C — shipped)
 
 The playground at `apps/wasm-playground/` (V1.14 Scope E) is a static
 HTML page that loads the verifier WASM module locally via `wasm-pack`'s
@@ -1729,7 +1729,16 @@ V1.16 Welle B closes the Welle-A residual gap that CSP violations were
 silent in production: the meta-tag CSP now declares `report-uri
 /csp-report` so a deployed playground that runs a minimal receiver at
 the same-origin path will surface every blocked violation as a JSON POST
-(documented receiver-shape spec below).
+(documented receiver-shape spec below). V1.16 Welle C is the
+deployment-side closure: a Cloudflare Workers + Static Assets host
+emits a Worker-layered security-header set (HSTS preload, COOP same-
+origin, COEP require-corp, the same CSP as an HTTP header so
+`frame-ancestors` finally takes effect, plus per-path Cache-Control)
+on every response, runs an executable form of the receiver-shape spec
+at `POST /csp-report` (silent-204 + categorised internal logs +
+Origin-anchored CSRF + per-IP /64 rate limit + global rate limit +
+JSON-bomb defence), and persists accepted reports as Workers Analytics
+Engine datapoints with a daily AE → R2 archive heartbeat.
 
 **Trust property (no new property):** the playground hardening is pure
 defence-in-depth on the *delivery* of the verifier UI, not on the
@@ -1953,33 +1962,143 @@ network egress against an active operator's browser session.
    receiver matching the spec above. Without a receiver, the page
    is "receiver-ready" but reports POST into a 404 (violation still
    blocked, report lost). The F-3 gap from Welle A is closed at the
-   page-bytes layer; the deployment-side closure is operator
-   responsibility.
+   page-bytes layer; **Welle C closes it at the deployment layer
+   too — see bullet 7 below**.
+
+7. **Workers + Static Assets host with Worker-emitted security
+   headers, executable receiver, and AE+R2 archive (V1.16 Welle C).**
+   The playground deploys to a single Cloudflare Worker that hosts
+   the static-asset bundle (`apps/wasm-playground/` → `index.html`,
+   `app.js`, `pkg/*.wasm` + glue), the CSP-report receiver, and a
+   daily archive cron — `apps/wasm-playground/wrangler.toml` and
+   `apps/wasm-playground/worker/src/`. Every response — static asset
+   2xx, asset-binding 404, receiver 204 — passes through
+   `applySecurityHeaders` (`worker/src/security-headers.ts`) and
+   carries:
+
+   - **`Content-Security-Policy` HTTP header** with the same eight
+     directives as the page-bytes meta-tag (`default-src`,
+     `script-src` w/ SRI hash matching `app.js`, `style-src`,
+     `connect-src`, `form-action`, `frame-ancestors 'none'`,
+     `base-uri 'none'`, TT enforcement) PLUS `report-uri /csp-report`
+     and `report-to reports` AND a `Reporting-Endpoints: reports="
+     /csp-report"` companion header — `frame-ancestors` is now
+     header-delivered so meta-tag-only browsers no longer ignore it,
+     and the modern Reporting API has its required header partner
+     for forward-compat.
+   - **`Strict-Transport-Security: max-age=31536000; includeSubDomains;
+     preload`** — HSTS preload-eligible, blocks SSL-stripping, locks
+     the host into HTTPS for at least one year per browser.
+   - **`Cross-Origin-Opener-Policy: same-origin`** + **`Cross-Origin-
+     Embedder-Policy: require-corp`** — Spectre / cross-window leak
+     defence; isolates the page's browsing context group.
+   - **`X-Content-Type-Options: nosniff`** + **`Referrer-Policy:
+     no-referrer`** — also as HTTP headers (the meta-tag versions stay
+     for page-bytes-only fallback paths).
+   - **Per-path Cache-Control:** `no-cache, must-revalidate` on `/`
+     and `/index.html` (small, must reflect the latest CSP); `public,
+     max-age=31536000, immutable` on `/app.js` (SRI-pinned; bytes
+     change ⇔ pin changes ⇔ URL must invalidate); `public, max-age=
+     31536000, immutable` on `/pkg/*.wasm` + `/pkg/*.js` (content-
+     hashed by wasm-bindgen build pipeline); `no-store` on the
+     `/csp-report` 204.
+
+   The `experimental_serve_directly = false` + `run_worker_first =
+   true` flags in `wrangler.toml` (set both for cross-version
+   wrangler compat) force the Worker to run BEFORE the static-asset
+   match — without these, Cloudflare's edge would serve assets
+   directly and bypass `applySecurityHeaders`, defeating the entire
+   layering. The flag invariant is verified post-deploy by the
+   live-check validator (`tools/playground-csp-check.sh
+   --live-check <url>`, see Anti-drift below).
+
+   **Receiver implementation (`worker/src/csp-receiver.ts`).** An
+   executable form of the receiver-shape spec from bullet 6: silent-
+   204 on every validation failure (no oracle for attackers — they
+   cannot distinguish origin-mismatch from rate-limit from schema-
+   fail), categorised internal `console.error` JSON line on every
+   failure (visible to operators via `wrangler tail` / CF Workers
+   logs but never to the caller). Pipeline:
+
+   1. Origin check (CSRF anchor — silent-204 if Origin is absent,
+      `null`, or != `EXPECTED_ORIGIN`).
+   2. Content-Type allow-list (`application/csp-report`,
+      `application/json`, `application/reports+json`; case-
+      insensitive; suffix-tolerant for `; charset=utf-8`).
+   3. Body-size pre-check from `Content-Length` (≤ 64 KB).
+   4. Body-size post-check after read (≤ 64 KB).
+   5. Depth-limited JSON parse (`worker/src/json-safe-parse.ts`) —
+      per-receiver tight limits `{ maxDepth: 4, maxKeysPerObject: 24,
+      maxStringLength: 8192 }` with structural pre-scan that rejects
+      depth-bombs before `JSON.parse` ever sees the input.
+   6. Schema extraction (legacy `{csp-report: {...}}`, modern
+      Reporting API array `[{type, body: {...}}]`, direct top-level
+      shape — all three accepted).
+   7. Rate-limit check (post-validation — only valid reports count
+      against the cost budget): per-IP-prefix `100/min` (IPv6 /64,
+      IPv4 /32) AND global `1000/min`, both via a single Durable
+      Object (`worker/src/rate-limit.ts` `GlobalRateLimitDO`).
+      DO unavailable → fail-closed silent-204.
+   8. Field normalisation: ANSI-strip every string, allow-list
+      fields, truncate to `MAX_FIELD_LENGTH = 1024`
+      (`MAX_ORIGINAL_POLICY_LENGTH = 2048`), URL fields → origin
+      only (drop path/query/fragment), `source-file` → basename
+      only, line/col floored + clamped non-negative.
+   9. `writeDataPoint` to Workers Analytics Engine with
+      `indexes = [violatedDirective]`, 7 blobs, 2 doubles. AE
+      throws → silent-204 (no caller-visible oracle).
+
+   The receiver NEVER stores or echoes the raw report body — only
+   the normalised, allow-listed, ANSI-stripped struct enters AE.
+   Method enforcement is the router's job (`worker/src/index.ts`
+   only routes POST to the receiver); the receiver itself omits a
+   defence-in-depth method-check on purpose because a 405 would
+   break the silent-204 invariant.
+
+   **AE → R2 daily archive (`worker/src/cron-archive.ts`).** A
+   single cron at `0 3 * * *` UTC writes one R2 object per day under
+   `heartbeat/<YYYY-MM-DD>.json`. R2 `Class-A` ops are charged
+   per-PUT, so one PUT/day instead of one PUT/report — defends
+   against an AE-write-spam financial-DoS amplification. Today the
+   handler writes a heartbeat marker; the AE → R2 query-and-batch
+   step is wired in but parameterised so adding the actual datapoint
+   pull later is a one-line change. R2 lifecycle (operator-side, set
+   in CF dashboard or via API) deletes objects > 365 days.
+
+   **Test discipline.** `worker/test/` runs under
+   `@cloudflare/vitest-pool-workers` with miniflare bindings —
+   91 tests covering Origin/CT/body-cap/JSON-bomb/schema/rate-
+   limit/normalisation/AE-write/cron-archive in unit form, plus
+   end-to-end SELF.fetch integration tests for the router and
+   security-header layering invariant. The pool's v0.5.41
+   limitation that strips
+   `assets.routingConfig.invoke_user_worker_ahead_of_assets` is
+   worked around by calling `worker.fetch` directly with a mock
+   ASSETS binding for the static-asset tests; the real flag is
+   verified at deploy time by the live-check validator.
 
 ### What scope-d does NOT cover
 
-- **`report-to` / `Reporting-Endpoints` HTTP header config.** Welle B
-  ships the meta-tag-compatible `report-uri` only. The modern
-  Reporting API (`report-to <group>` referencing a
-  `Reporting-Endpoints` header) requires HTTP-header CSP delivery and
-  is therefore the operator's responsibility at hosting time. A
-  header-mode-CSP deployment SHOULD declare both for forward-compat
-  (browser deprecation timeline for `report-uri` is not yet
-  scheduled but is signalled in CSP3); page-bytes can't enforce this.
-- **Receiver implementation.** scope-d ships the *report-uri
-  declaration*, not the *receiver* at `/csp-report`. Operators must
-  stand up a receiver matching the documented receiver-shape spec
-  (above) before a deployed playground actually surfaces violations.
-  Without a receiver, browsers POST to a 404 — the violation is
-  still BLOCKED (CSP enforcement is local to the browser), only the
-  report is lost.
-- **Report-spoofing protection.** A malicious actor on the same
-  origin (or any origin if the receiver doesn't validate) can POST
-  forged `csp-report` payloads to flood the operator's log sink.
-  Mitigation is at the receiver layer: per-IP rate limit, schema
-  validation (reject reports whose `original-policy` doesn't match
-  the deployed CSP), structured-log sampling. Out of scope for the
-  page bytes; documented as part of the receiver-shape spec.
+- ~~`report-to` / `Reporting-Endpoints` HTTP header config~~ —
+  **CLOSED in Welle C.** The Worker now emits `report-to reports` in
+  the HTTP-header CSP and the matching `Reporting-Endpoints:
+  reports="/csp-report"` companion header. Both delivery modes
+  (`report-uri` from the page-bytes meta-tag AND `report-to` from
+  the Worker-emitted header) point at the same receiver.
+- ~~Receiver implementation~~ — **CLOSED in Welle C.** An
+  executable form of the receiver-shape spec ships at
+  `worker/src/csp-receiver.ts` with all defences from the spec
+  table operationalised (silent-204, Origin anchor, CT allow-list,
+  body cap, JSON-bomb defence, schema extract, rate-limit, ANSI-
+  strip + field allow-list, AE persistence). Out-of-the-box
+  behaviour matches the receiver-shape spec without operator
+  customisation.
+- ~~Report-spoofing protection~~ — **CLOSED in Welle C** at the
+  receiver layer: per-IP `/64` prefix rate-limit (defeats the
+  trivial IPv6 `::1` rotation), global cap (defeats large
+  botnets), Origin anchor (defeats most cross-origin spoofing),
+  schema rejection of unknown shapes (drops malformed payloads
+  before AE write).
 - **CSS data exfiltration via attribute selectors.** With `style-src
   'self' 'unsafe-inline'`, an attacker who manages to inject CSS
   (e.g. through a hypothetical future `<style>` tag injection that
@@ -2020,18 +2139,40 @@ network egress against an active operator's browser session.
   for the playground bytes themselves; a hosting deployment SHOULD
   also send the same policy as a header to honour `frame-ancestors`.
   Documented as an operator responsibility, not a code property.
-- **Hosting decision and DNS pinning.** scope-d is the *page-side*
-  hardening; *deployment-side* (where to host, how to pin DNS, who
-  controls the CDN, what `Cache-Control` headers to send, whether to
-  add CSP-Reporting-Endpoints) remains a downstream choice. Welle B
-  candidate territory.
+- ~~Hosting decision and Cache-Control choice~~ — **CLOSED in
+  Welle C.** Cloudflare Workers + Static Assets is the chosen host;
+  Cache-Control is set per-path by `applySecurityHeaders` (no-cache
+  on HTML, immutable on hashed assets, no-store on the receiver
+  204). The DNS-pinning side (CAA records, Null-MX, DMARC, SPF,
+  DNSSEC chain-of-trust) remains an operator-side step — not code,
+  not page-bytes; documented in `docs/V1.16-WELLE-C-PLAN.md`
+  Phase 4.2.
 
 ### Anti-drift
 
-- `tools/playground-csp-check.sh` (CI mode) re-asserts the CSP
-  directives, the `app.js` SRI hash, the wasm-bindgen-glue TT-compat
-  audit, AND (V1.16 Welle B) the `report-uri` declaration + same-
-  origin shape on every run.
+- `tools/playground-csp-check.sh` (CI mode, no flags) re-asserts the
+  CSP directives, the `app.js` SRI hash, the wasm-bindgen-glue
+  TT-compat audit, the `report-uri` declaration + same-origin shape
+  (V1.16 Welle B), and exits non-zero on any drift.
+- `tools/playground-csp-check.sh --live-check <url>` (V1.16 Welle C)
+  validates the **deployed** Worker against `<url>` post-deploy:
+  HTTP-header CSP (both `report-uri /csp-report` and `report-to
+  reports`) consistent with the meta-tag CSP, `Reporting-Endpoints:
+  reports="/csp-report"` companion present, HSTS preload-eligible
+  (`max-age >= 31536000` + `includeSubDomains` + `preload`), COOP =
+  `same-origin`, COEP = `require-corp`, X-CTO = `nosniff`,
+  Referrer-Policy = `no-referrer`, per-path Cache-Control on `/`
+  vs `/app.js`, and `POST /csp-report` returns 204 — i.e. every
+  Welle C invariant is asserted live against the production Worker
+  with `curl`. Mandatory after every `wrangler deploy`.
+- `tools/git-hooks/pre-commit` + `tools/install-git-hooks.sh`
+  (V1.16 Welle C) — repo-tracked git hook activated by
+  `bash tools/install-git-hooks.sh` (one-time per clone, points
+  `core.hooksPath` at `tools/git-hooks/`). Runs the validator
+  whenever a commit touches `apps/wasm-playground/app.js`,
+  `index.html`, or the wasm-bindgen glue, blocking the commit
+  on drift. Replaces the manual `.git/hooks/pre-commit` snippet
+  recommended in Welle A; auditable and cloned-in.
 - `apps/wasm-playground/app.js:1-19` documents the sink discipline
   (`textContent`, `className`, `style.display` only). A reviewer
   introducing `innerHTML` / `eval` / `new Function` / `setTimeout(str)`
@@ -2039,23 +2180,24 @@ network egress against an active operator's browser session.
 - `apps/wasm-playground/index.html:7-103` documents each CSP directive
   inline (including `report-uri` rationale) so the policy is not a
   magic string.
+- `apps/wasm-playground/worker/src/security-headers.ts` is the
+  audit-fähig single source of truth for Worker-emitted headers; the
+  meta-tag CSP and the HTTP-header CSP must stay byte-consistent on
+  the eight shared directives. The live-check validator enforces
+  this on every deploy.
 - **SRI foot-gun mitigation.** Editing `app.js` without re-running
   `tools/playground-csp-check.sh --update-sri` produces a silent
-  page-load failure on the next browser visit (the new bytes don't
-  match the pinned hash, so the browser refuses to execute the
-  module). This is fail-loud at runtime (page shows the catch-block
-  error, console shows the SRI mismatch), but fail-silent at
-  edit-time. Operators editing the playground directly should add
-  a pre-commit hook running `tools/playground-csp-check.sh` to
-  catch the drift before push:
-  ```bash
-  # .git/hooks/pre-commit fragment
-  if git diff --cached --name-only | grep -q '^apps/wasm-playground/app\.js$'; then
-    bash tools/playground-csp-check.sh || exit 1
-  fi
-  ```
-  Not enforced project-wide because the playground edit path is
-  rare; CI on push is the second backstop.
+  page-load failure on the next browser visit. With the V1.16
+  Welle C pre-commit hook installed, this is now caught at commit
+  time, not at deploy time; operators who skipped the one-time
+  `bash tools/install-git-hooks.sh` install fall back to the Welle A
+  workflow (CI on push as the second backstop).
+- **Worker test discipline.** `apps/wasm-playground/worker/test/`
+  must stay green (`cd apps/wasm-playground/worker && npx vitest
+  run` + `npx tsc --noEmit`) — 91 tests covering every receiver
+  failure mode, the silent-204 invariant, the rate-limit DO, the
+  cron-archive heartbeat, and the security-header layering invariant.
+  Run before any `wrangler deploy`.
 
 ### Trust composition with V1.5 byte-determinism + V1.14 Scope E SLSA L3
 
@@ -2070,13 +2212,16 @@ scope-d is delivery-side hardening. It composes with — does not replace
 | V1.15 Welle C consumer pinning | lockfile integrity hash | local install drift |
 | **V1.16 scope-d (Welle A) CSP + SRI + TT** | **playground `app.js` bytes + browser sink discipline** | **UI-side injection in a hosted deployment** |
 | **V1.16 scope-d (Welle B) `report-uri`** | **post-block visibility into CSP violations** | **silent in-prod CSP failures (XSS attempts, accidental sink introduction, mis-config)** |
+| **V1.16 scope-d (Welle C) Worker-emitted headers + executable receiver + AE→R2 archive** | **HTTP-layer hardening (HSTS preload, COOP, COEP, header-mode CSP so `frame-ancestors` takes effect, per-path Cache-Control) + receiver implementation matching the spec from Welle B** | **CDN/proxy strip of meta-tag-only directives, network-side SSL stripping, cross-window leak via Spectre, naive receiver becoming an attack surface, per-IP rate-limit bypass via IPv6 `/64` rotation, financial-DoS via per-report R2 writes** |
 
 Each layer guards a different boundary; an attacker has to defeat all
-six to land a forged-trace-as-valid result against an operator using
-the playground. Welle B doesn't pin a new attack-surface boundary in
-the verifier; it pins *visibility* — without it, the other layers fire
-silently and operators have no incident-detection signal from the
-browser side.
+seven to land a forged-trace-as-valid result against an operator using
+the playground. Welle B pins *visibility* (without it, the other layers
+fire silently and operators have no incident-detection signal from the
+browser side); Welle C pins the *delivery channel* (HTTP-layer
+hardening that the page-bytes alone cannot enforce) AND ships the
+receiver that turns Welle B's plumbing into an actual incident-
+detection signal.
 
 The verifier crates (`atlas-trust-core`, `atlas-verify-cli`,
 `atlas-verify-wasm`, `atlas-signer`) are licensed Apache-2.0. An auditor
