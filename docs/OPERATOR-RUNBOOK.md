@@ -2207,3 +2207,154 @@ first-class SSH signing support without plugins, and the trust root
 is in-repo (auditable) rather than pinned to an external OIDC
 issuer's certificate transparency log. Sigstore/gitsign is a
 plausible additive enhancement (V1.18 candidate) — not a replacement.
+
+---
+
+## 14. Trust-root mutation defence — branch-protection requirements (V1.17 Welle C)
+
+V1.17 Welle C (scope-m) ships an in-repo cryptographic gate that
+requires any commit modifying a trust-root-protected file to be
+signed by a key in the **prior** trust root (i.e.
+`.github/allowed_signers` as it existed at the PR base). The full
+threat model + design rationale is in
+[SECURITY-NOTES.md scope-m](SECURITY-NOTES.md).
+
+The in-repo gate (`tools/verify-trust-root-mutations.sh` +
+`.github/workflows/verify-trust-root-mutations.yml`) only fires on
+`pull_request` events. Two operator-side configurations are required
+for the defence to actually bind:
+
+  1. **No direct push to `master`** (including admins).
+  2. **Required status check** on `master` for
+     `verify-trust-root-mutations / Verify trust-root-modifying commits`.
+  3. **Required CODEOWNERS review** on `master`.
+  4. **Required signed commits** on `master` (defence-in-depth).
+
+If branch protection allows direct pushes to `master`, an attacker
+with `contents: write` PAT can push a commit modifying
+`.github/allowed_signers` directly — bypassing the PR-only gate.
+This is **not** a defect in the workflow; it's a structural limit
+that operator-side branch protection has to close. This section
+documents the configuration.
+
+### Required GitHub branch-protection settings
+
+Settings → Branches → Branch protection rules → `master` (or
+`main`). Apply these exact toggles:
+
+```
+Branch name pattern: master
+
+[x] Require a pull request before merging
+    [x] Require approvals → 1
+    [x] Dismiss stale pull request approvals when new commits are pushed
+    [x] Require review from Code Owners
+
+[x] Require status checks to pass before merging
+    [x] Require branches to be up to date before merging
+    Required status checks (search + add):
+      - verify-trust-root-mutations / Verify trust-root-modifying commits
+      - verify-tag-signatures / Verify all v* tags
+      - (optional) wasm-publish / verify-tag (only present on tag pushes)
+
+[x] Require conversation resolution before merging
+
+[x] Require signed commits
+
+[x] Do not allow bypassing the above settings
+    (the "Include administrators" toggle on classic rules,
+     OR the "Restrict who can dismiss / bypass" config on rulesets)
+
+[ ] Allow force pushes        ← MUST stay UNCHECKED (incl. admins)
+[ ] Allow deletions           ← MUST stay UNCHECKED
+```
+
+The "Do not allow bypassing the above settings" / "Include
+administrators" toggle is **load-bearing**. Without it, an admin-
+role compromise can bypass every rule above, and scope-m's in-repo
+gate is not reachable on a direct push.
+
+### Why each setting matters
+
+| Setting | What it closes | What's left if missing |
+|---|---|---|
+| Require pull request before merging | Direct push to master bypasses verify-trust-root-mutations.yml entirely | Attacker with PAT + `contents: write` modifies trust root via direct push. scope-m never runs. |
+| Require review from Code Owners | A single compromised PAT can self-approve | Single-credential takeover lets the same identity that authored the malicious change merge it. |
+| Required status check: verify-trust-root-mutations | Workflow can be skipped or paused without merge being blocked | Workflow runs but fails open — green merge with a failing or absent verification job. |
+| Required status check: verify-tag-signatures | Tag-signing enforcement on PRs touching trust-root surfaces is not gating | scope-l's PR-mode signal becomes documentary rather than enforcing. |
+| Require signed commits | Unsigned commits land on master, breaking scope-m's "merge-base trust root" semantic for downstream PRs | scope-m bootstraps from a polluted base. |
+| No force pushes (incl. admins) | An admin force-push can rewrite `.github/allowed_signers` history | Anti-rewrite guard in the verifier catches this *if* it ever runs, but a force-push bypassing PR review never triggers the workflow. |
+| No deletions | Deleting + recreating master defeats branch protection | Full bypass of every rule above. |
+
+### Verifying the configuration is correctly applied
+
+```bash
+# Requires admin scope on the repo. Run from any clone.
+gh api -H "Accept: application/vnd.github+json" \
+  /repos/ThePyth0nKid/atlas/branches/master/protection | \
+  jq '{
+    required_pull_request_reviews,
+    required_status_checks: .required_status_checks.contexts,
+    required_signatures,
+    enforce_admins: .enforce_admins.enabled,
+    allow_force_pushes: .allow_force_pushes.enabled,
+    allow_deletions: .allow_deletions.enabled
+  }'
+```
+
+Expected fields:
+
+- `required_pull_request_reviews.required_approving_review_count` ≥ 1
+- `required_pull_request_reviews.require_code_owner_reviews` = `true`
+- `required_status_checks` contains
+  `"verify-trust-root-mutations / Verify trust-root-modifying commits"`
+- `required_signatures.enabled` = `true`
+- `enforce_admins.enabled` = `true`
+- `allow_force_pushes.enabled` = `false`
+- `allow_deletions.enabled` = `false`
+
+If any of these drift from expected, scope-m's defence is partially
+or fully bypassable. Restore the configuration via the Settings UI
+or `gh api PATCH`.
+
+### Adding a new file to the protected surface
+
+The PROTECTED_SURFACE list in `tools/verify-trust-root-mutations.sh`
+and the entries in `.github/CODEOWNERS` are kept in sync by the
+anti-drift harness (`tools/test-trust-root-mutations.sh` test 7).
+
+To add a new file:
+
+```bash
+# 1. Add to PROTECTED_SURFACE in the verifier script.
+#    Edit tools/verify-trust-root-mutations.sh around the
+#    "PROTECTED_SURFACE=(" block.
+
+# 2. Add to .github/CODEOWNERS with @ThePyth0nKid as the owner
+#    (or whichever team is the trust-root authority).
+
+# 3. Confirm parity holds.
+bash tools/test-trust-root-mutations.sh
+# Expected: PASS: 17 / 17 (or N+1 with the new test if you added one).
+
+# 4. Commit + PR. The PR itself will be gated by scope-m because
+#    you're modifying tools/verify-trust-root-mutations.sh
+#    (already in PROTECTED_SURFACE). The PR commits must be signed
+#    by a key in the prior trust root.
+git add tools/verify-trust-root-mutations.sh .github/CODEOWNERS
+git commit -m 'chore(v1.17/welle-c): add <path> to protected surface'
+```
+
+If test 7 (PROTECTED_SURFACE / CODEOWNERS parity) fails after
+your edit, one of the two lists drifts from the other. Fix the
+drift before pushing.
+
+### Failure modes
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| PR modifying `.github/allowed_signers` merges without `verify-trust-root-mutations` running | Workflow not configured as required status check | Add it to branch protection (see above). |
+| `verify-trust-root-mutations` reports `FAIL: bootstrap mode triggered` | `.github/allowed_signers` was deleted from master in a force-push | Investigate. Anti-rewrite guard correctly fired. Likely a takeover scenario or accidental admin action. |
+| `verify-trust-root-mutations` reports `FAIL: commit not signed by a trusted key` | PR commit signed by a key not in the prior trust root | Re-sign with a trusted key, or first add the new key in a prior PR signed by an existing trusted key. |
+| Test 7 (`PROTECTED_SURFACE / CODEOWNERS parity`) fails locally | Drift between the two lists | Sync them per the "Adding a new file" recipe above. |
+| Admin pushes directly to master and bypasses everything | "Include administrators" toggle disabled | Re-enable it; review what landed during the bypass window. |

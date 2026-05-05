@@ -175,8 +175,34 @@ unit tests + a 4-job self-test workflow including a weekly cron
 that performs a live `npm install --save-exact @atlas-trust/
 verify-wasm@latest` + real `npm audit signatures` round-trip
 catch publisher-side or Sigstore-side regressions before they
-reach downstream consumers. Graph-database integration and
-policy-engine follow in V2.
+reach downstream consumers. V1.17 Welle B locks the publish-lane
+authentication path with SSH-based tag signing: `.github/
+allowed_signers` is the in-repo trust root, `tools/verify-tag-
+signatures.sh` runs `git verify-tag` against it inside
+`wasm-publish.yml`'s first step (fail-closed BEFORE any
+`npm publish`), and a standalone `verify-tag-signatures.yml`
+workflow re-asserts the same invariant on every tag push, weekly
+cron (Mon 06:37 UTC), and PR touching tag-signing surfaces.
+V1.17 Welle C pins the integrity of that trust root: any commit
+modifying a trust-root-protected surface file
+(`.github/allowed_signers`, the verifier scripts, the publish +
+verify workflows, CODEOWNERS, the anti-drift harnesses, the
+`.github/actions/verify-wasm-pin-check/` subtree) must itself be
+signed by a key in the *prior* trust root (i.e. allowed_signers
+*as it existed at the PR base*). The
+`verify-trust-root-mutations.yml` workflow runs from the base
+branch (`pull_request`, not `pull_request_target`) so an attacker
+modifying the workflow inside their PR cannot disable
+verification, and an anti-rewrite guard rejects bootstrap-mode
+PRs whose merge-base appears clean only because an admin
+force-pushed history that previously contained the file.
+CODEOWNERS adds a second-maintainer review requirement on the
+same surface — single-PAT compromise no longer mints trust in a
+single commit. Branch protection on `master` (no direct push, no
+force-push including admins, required CODEOWNERS review,
+required `verify-trust-root-mutations` status check) is the
+operator-side complement; see `docs/OPERATOR-RUNBOOK.md §14`.
+Graph-database integration and policy-engine follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
   trust property, write/export flows, V1 → V1.16 → V2 boundaries.

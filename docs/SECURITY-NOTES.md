@@ -2829,6 +2829,183 @@ workflow run that fires the publish.
 
 ---
 
+## scope-m — Trust-Root Mutation Defence (V1.17 Welle C — shipped)
+
+V1.17 Welle B (scope-l) ships SSH-based tag-signing enforcement: every
+`v*` tag must be signed by a key listed in `.github/allowed_signers`,
+and the trust root is verified at three points (publish-lane first
+step, dedicated workflow on push/PR/cron, anti-drift harness).
+
+scope-m closes the structural gap that scope-l explicitly does not
+cover: **the trust-root file itself is mutable, and a compromised
+maintainer PAT can amend it in the same change that exploits the
+amendment**. Without scope-m, the bootstrap-attack chain reads:
+
+  1. attacker holds maintainer PAT (`contents: write`),
+  2. pushes commit modifying `.github/allowed_signers` (adds attacker key),
+  3. creates `v*` tag signed with the attacker key,
+  4. `verify-tag-signatures.yml` reads the *new* (mutated) trust root → green,
+  5. `wasm-publish.yml` first-step gate also reads the new trust root → green,
+  6. publish fires; smuggled bytes ship to npm.
+
+scope-m breaks this chain at step (1) by requiring any commit modifying
+a trust-root-protected surface file to itself be signed by a key in
+the **old** (pre-mutation) trust root — i.e. `.github/allowed_signers`
+*as it existed at the PR base*. The "old" semantic is the entire
+defence: it closes the bootstrap-attack vector where the malicious
+commit adds the attacker key in the same commit that relies on it.
+
+### Threat model addressed
+
+- **F-5b (trust-root mutation in unsigned-tag world).** scope-l's
+  exclusion noted this as an out-of-scope but adjacent risk: "tag
+  signing keeps the trust root in the repo, which is auditable but
+  *mutable* by anyone with `contents: write`." scope-m closes it.
+
+- **PAT compromise → bootstrap attack.** Without scope-m, a single
+  PAT compromise grants the attacker the ability to mint trust:
+  add a key, sign a tag, fire the publish, all from one credential.
+  With scope-m, the attacker needs a commit signed by an *already-
+  trusted* key — i.e. the prior credential they don't have.
+
+- **Force-push manufacturing fresh bootstrap window.** A naive
+  implementation that bootstraps when `.github/allowed_signers` is
+  absent at the merge-base would let an admin force-push a parent
+  commit with the file removed, then PR a "fresh" trust root on top.
+  scope-m closes this with an anti-rewrite cross-check: even in
+  apparent bootstrap mode, if the file *has ever existed on master*
+  (regardless of whether the merge-base sees it), reject the PR with
+  a hard-fail diagnostic. The attacker has to also rewrite the
+  reflog of every clone, which they can't.
+
+### What landed in V1.17 Welle C
+
+1. **`tools/verify-trust-root-mutations.sh`** — pure-bash verifier
+   (~310 lines). For every commit in the PR range, enumerates
+   changed files via `git diff-tree --no-commit-id -r --name-only -m`
+   (the `-m` flag is the merge-commit fix — without it, `git show`
+   returns empty for merge commits and a malicious merge could
+   smuggle a trust-root change unnoticed). If any changed file
+   matches the PROTECTED_SURFACE list (exact match) or
+   PROTECTED_PREFIXES list (subtree match), runs `git verify-commit`
+   against the **PR base's** `.github/allowed_signers` snapshot.
+   Containment guards: rejects `ATLAS_TRUST_ROOT_*` env vars when
+   `$GITHUB_ACTIONS=true`; requires `--base` and `--head` SHAs.
+
+2. **`.github/workflows/verify-trust-root-mutations.yml`** — pull-
+   request triggered workflow. Critical choice: `pull_request`
+   (NOT `pull_request_target`). `pull_request` runs the workflow
+   file *from the base branch* — an attacker modifying this
+   workflow inside their PR cannot change which logic runs against
+   their PR. SHA-pinned `actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683`,
+   `fetch-depth: 0` (needed for merge-base + commit walk),
+   `ref: ${{ github.event.pull_request.head.sha }}` (PR head, not
+   the synthetic merge ref).
+
+3. **`.github/CODEOWNERS`** — defence-in-depth review requirement.
+   Lists every file in PROTECTED_SURFACE + the
+   `.github/actions/verify-wasm-pin-check/` prefix as
+   `@ThePyth0nKid`-owned. The cryptographic gate proves "did a
+   maintainer sign this?"; CODEOWNERS adds "did a *second*
+   maintainer audit this?" Two-maintainer review forces a PAT
+   attacker to compromise two independent identities to merge a
+   trust-root change. CODEOWNERS only enforces when branch
+   protection enables "Require review from Code Owners" — see
+   OPERATOR-RUNBOOK §14 for the operator-side configuration.
+
+4. **`tools/test-trust-root-mutations.sh`** — anti-drift harness
+   (17 cases, runs in ~5 seconds). Manufactures temp-repo
+   scenarios for: bash strict-mode boilerplate, env-var smuggling
+   (CI containment), CLI-arg sanity, bootstrap mode, empty trust
+   root at base, no surface-modifying commits + zero-commit range,
+   unsigned commit on surface, merge-commit detection, prefix-match
+   subtree, anti-rewrite bootstrap defence, and PROTECTED_SURFACE
+   ↔ CODEOWNERS parity (script and review gates must enumerate
+   identical paths).
+
+### Trigger choice rationale
+
+- **`pull_request` (chosen).** Runs the workflow file from the base
+  branch. PR-side modifications to the workflow itself cannot
+  affect verification.
+
+- **`pull_request_target` (rejected).** Same base-branch behaviour
+  but with write-permission tokens. We don't need writes;
+  `pull_request_target` is the famous "pwn request" footgun that
+  has caused real CVEs in other projects. Avoided.
+
+- **`push` to master (NOT covered here).** A push event would load
+  the workflow file *from the pushed commit itself* — a malicious
+  push modifying the workflow could disable verification on the
+  same push. The defence at the push layer must be operator-side
+  branch protection (see OPERATOR-RUNBOOK §14) requiring all
+  commits to land via PR. scope-m documents the operator
+  dependency rather than try to defend a push from inside a
+  workflow whose own definition is loaded from the pushed commit.
+
+### What scope-m does NOT cover (V1.18+ candidates)
+
+- **Direct push to master.** Closed only via operator-side branch
+  protection (no direct push to master, including admins). See
+  OPERATOR-RUNBOOK §14 for the configuration.
+
+- **Repository takeover (admin role, full force-push, branch-
+  protection bypass).** A full repo takeover lets an attacker
+  reconfigure branch protection itself. The anti-rewrite guard
+  detects rewriting `.github/allowed_signers` history, but a
+  takeover that *also* rewrites this defence's source code is out
+  of scope. The defence-in-depth answer is the V1.15 Welle B
+  GH-Releases backup channel + the V1.16 receiver layer (out-of-
+  band telemetry). Documented as a known structural limit.
+
+- **Allowed-signers tooling integrity.** The `setup-tag-signing.sh`
+  helper — covered by scope-l — could be modified to weaken
+  key-type allow-list checks in a future commit. scope-m closes
+  the gap by listing it in PROTECTED_SURFACE.
+
+### Trust composition with scope-l
+
+scope-m is a meta-defence: it pins the integrity of scope-l's
+trust root. It composes by *making the scope-l trust root harder
+to forge*, not by adding an independent trust property.
+
+| Layer | What it pins | Failure mode addressed |
+|---|---|---|
+| V1.5 `signing_input_byte_determinism_pin` | CBOR signing-input bytes | issuer-side encoding drift |
+| V1.14 Scope E SLSA L3 OIDC provenance | npm tarball bytes ↔ GitHub Actions run | npm-registry compromise |
+| V1.15 Welle B GH-Releases backup | second tarball channel | npm-registry outage |
+| V1.15 Welle C consumer pinning runbook | install-time ceremony for npm / pnpm / Bun | cold-start mis-install |
+| V1.16 scope-d (Wellen A+B+C) | playground delivery hardening | UI-side injection in hosted deployments |
+| V1.17 scope-k (Welle A) `verify-wasm-pin-check@v1` | CI-time re-assertion of all three §1 layers on every consumer build | consumer-side cadence drift |
+| V1.17 scope-l (Welle B) Tag-Signing Enforcement | `v*` tag → maintainer SSH signature | publish-lane authentication |
+| **V1.17 scope-m (Welle C) Trust-Root Mutation Defence** | **trust-root surface commits → signed by *prior* trust root + CODEOWNERS audit** | **bootstrap attack: PAT compromise mints trust in single commit** |
+
+### Anti-drift
+
+- **`tools/test-trust-root-mutations.sh` harness** — 17 cases,
+  runs in ~5 seconds. Includes a script ↔ CODEOWNERS parity
+  assertion (drift between cryptographic gate and human review
+  gate is a defence-in-depth regression).
+
+- **PROTECTED_SURFACE / PROTECTED_PREFIXES is the surface contract.**
+  Any new file that, if mutated, could weaken the trust posture
+  must be added to BOTH the script arrays AND CODEOWNERS in the
+  same commit. The harness fails the test on drift.
+
+- **`verify-trust-root-mutations.yml` is itself in PROTECTED_SURFACE.**
+  Modifying the workflow file requires a signed commit by the
+  prior trust root (scope-m gates its own definition).
+
+- **CODEOWNERS is itself in PROTECTED_SURFACE.** Removing review
+  requirements requires a signed commit by the prior trust root.
+
+- **Trust composition table row** in this document, in
+  ARCHITECTURE.md (V1.17 Welle C boundary block), and in
+  OPERATOR-RUNBOOK §14 — a future scope that intends to deprecate
+  scope-m must update all three docs and the row above.
+
+---
+
 ## Reporting issues
 
 Verifier vulnerabilities — bypasses, signature-acceptance bugs,

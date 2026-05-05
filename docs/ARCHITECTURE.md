@@ -1564,7 +1564,7 @@ Headline:
   [docs/SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-d "What scope-d
   does NOT cover".
 
-### V1.17 — Consumer-side auto-verify CI Action + Tag-Signing Enforcement (shipped: Welle A + Welle B)
+### V1.17 — Consumer-side auto-verify CI Action + Tag-Signing Enforcement + Trust-Root Mutation Defence (shipped: Welle A + Welle B + Welle C)
 
 - **`verify-wasm-pin-check@v1` composite GitHub Action.** A
   reusable, pure-bash composite action at
@@ -1725,15 +1725,100 @@ Headline:
   already binds npm publish trust to Sigstore Rekor, so dual-
   rail (SSH OR Sigstore) signing is the philosophy-coherent next
   step; deferred because Sigstore-on-Windows tooling is rough.
-  CODEOWNERS-protected `.github/allowed_signers` (require
-  commit-signing on trust-root mutations). Hardware-token
-  enforcement (reject software keys, require
+  Hardware-token enforcement (reject software keys, require
   `sk-ssh-ed25519@openssh.com` FIDO2-backed types only).
   Retroactive tag-signature timestamping (verify a past tag
   against allowed_signers as it was at the tag's commit, not
   current). These are V1.18+ candidates documented in
   [docs/SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-l "What
   scope-l does NOT cover".
+
+  *Note: CODEOWNERS-protected `.github/allowed_signers` was
+  promoted from "V1.18 candidate" to **shipped** in V1.17
+  Welle C — see below.*
+
+#### V1.17 Welle C — Trust-Root Mutation Defence (shipped)
+
+- **In-repo cryptographic gate on trust-root surface mutations.**
+  V1.17 Welle B's trust root (`.github/allowed_signers`) is an
+  in-repo file, which makes it auditable but also mutable by
+  anyone with `contents: write`. Welle C closes the bootstrap
+  attack: a compromised maintainer PAT could otherwise push a
+  commit modifying `.github/allowed_signers` (adds attacker key)
+  and a `v*` tag signed by the new key in one PR — the publish
+  workflow would read the *mutated* trust root and pass the
+  signature check. Welle C ships
+  `tools/verify-trust-root-mutations.sh` +
+  `.github/workflows/verify-trust-root-mutations.yml`, which
+  require any commit modifying a trust-root-protected surface
+  file to itself be signed by a key in the **prior** trust root
+  (i.e. `.github/allowed_signers` *as it existed at the PR
+  base*). The "old trust root" semantic is the entire defence:
+  it closes the bootstrap-attack vector where the malicious
+  commit adds the attacker key in the same commit that relies on it.
+- **PROTECTED_SURFACE + PROTECTED_PREFIXES.** The gate covers
+  the trust-root file itself, the tag-signing verifier and
+  helper scripts (modifying them could weaken signature checks),
+  the publish workflow (could neuter the first-step verify
+  gate), the trust-root verifier and workflow themselves
+  (self-protection — must be signed by prior trust root to
+  modify), CODEOWNERS (could remove review requirements), the
+  anti-drift harnesses (silent disablement would leak future
+  regressions), and the entire
+  `.github/actions/verify-wasm-pin-check/` subtree (V1.17 Welle A
+  composite action — tampering would silently revoke Layer-3
+  trust for every downstream consumer running the action).
+- **`pull_request` trigger (NOT `pull_request_target`).** Critical
+  choice: `pull_request` runs the workflow file *from the base
+  branch*, so an attacker modifying this workflow inside their
+  PR cannot change which logic runs against their PR.
+  `pull_request_target` would have the same base-branch behaviour
+  but with write-permission tokens — the famous "pwn request"
+  footgun. Avoided.
+- **Anti-rewrite bootstrap defence.** A naive "bootstrap when
+  `.github/allowed_signers` is absent at the merge-base"
+  implementation would let an admin force-push a parent commit
+  with the file removed, then PR a "fresh" trust root on top.
+  The verifier closes this by checking, even in apparent
+  bootstrap mode, whether the file has *ever existed on master*
+  (`git log --diff-filter=A --all`). If so, hard-fail with an
+  "anomalous bootstrap window" diagnostic.
+- **CODEOWNERS as defence-in-depth review requirement.** Every
+  PROTECTED_SURFACE file is `@ThePyth0nKid`-owned in
+  `.github/CODEOWNERS`. The cryptographic gate proves "did a
+  maintainer sign this?"; CODEOWNERS adds "did a *second*
+  maintainer audit this?" Two-maintainer review forces a PAT
+  attacker to compromise two independent identities. Enforcement
+  requires branch-protection "Require review from Code Owners"
+  + required-status-check on `verify-trust-root-mutations` —
+  see [docs/OPERATOR-RUNBOOK.md §14](OPERATOR-RUNBOOK.md).
+- **Anti-drift harness.** `tools/test-trust-root-mutations.sh`
+  covers 17 cases: bash strict-mode boilerplate, env-var
+  smuggling (CI containment), CLI-arg sanity, bootstrap mode,
+  empty trust root at base, no surface-modifying commits +
+  zero-commit range, unsigned commit on surface, merge-commit
+  detection, prefix-match subtree, anti-rewrite bootstrap
+  defence, and PROTECTED_SURFACE ↔ CODEOWNERS parity (the
+  cryptographic gate and the human review gate must enumerate
+  identical paths). Runs in ~5 seconds. Run before any change
+  to `tools/verify-trust-root-mutations.sh` or
+  `.github/CODEOWNERS`.
+- **Trust property closed: F-5b — trust-root authenticity.**
+  Before Welle C, the V1.17 Welle B trust root was an in-repo
+  file mutable by any commit with `contents: write`. After
+  Welle C, mutations require a signature by the *prior* trust
+  root + a CODEOWNERS reviewer. Welle C is meta-defence: it
+  doesn't add a new trust property, it pins the integrity of
+  Welle B's trust property.
+- **What V1.17 Welle C is NOT (operator-side dependencies):**
+  Direct push to master remains a structural bypass — closed
+  only by branch protection (no direct push to master,
+  including admins). Repository takeover (admin role with the
+  ability to reconfigure branch protection) is also out of
+  scope; the defence-in-depth answer is the V1.15 Welle B
+  GH-Releases backup channel + V1.16 receiver telemetry.
+  Documented in [docs/OPERATOR-RUNBOOK.md §14](OPERATOR-RUNBOOK.md)
+  and [docs/SECURITY-NOTES.md scope-m](SECURITY-NOTES.md).
 
 ### V2 — full COSE + policy + SPIFFE
 
