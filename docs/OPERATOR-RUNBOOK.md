@@ -2254,8 +2254,16 @@ Branch name pattern: master
     [x] Require branches to be up to date before merging
     Required status checks (search + add):
       - verify-trust-root-mutations / Verify trust-root-modifying commits
-      - verify-tag-signatures / Verify all v* tags
-      - (optional) wasm-publish / verify-tag (only present on tag pushes)
+
+    NOTE: do NOT require `verify-tag-signatures / Verify all v* tags`
+    on every PR. That workflow uses `pull_request: paths:` filtering
+    (fires only on PRs touching tag-signing surfaces). If pinned as
+    a required check on every PR, doc-only / unrelated-code PRs will
+    be blocked-forever because the check never reports. Welle-B-
+    defence comes from `wasm-publish.yml`'s first-step gate on tag
+    push and the standalone `verify-tag-signatures.yml` workflow on
+    tag push + weekly cron + dispatch + paths-PR — none requires
+    PR-gating to function.
 
 [x] Require conversation resolution before merging
 
@@ -2308,6 +2316,7 @@ Expected fields:
 - `required_pull_request_reviews.require_code_owner_reviews` = `true`
 - `required_status_checks` contains
   `"verify-trust-root-mutations / Verify trust-root-modifying commits"`
+  (and ONLY that — see note above re `verify-tag-signatures`)
 - `required_signatures.enabled` = `true`
 - `enforce_admins.enabled` = `true`
 - `allow_force_pushes.enabled` = `false`
