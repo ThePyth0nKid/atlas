@@ -72,6 +72,7 @@ Reads `package.json` and rejects any of:
 - `"^1.15.0"` (caret — silent minor/patch upgrades on next install)
 - `"~1.15.0"` (tilde — silent patch upgrades on next install)
 - `">=1.15.0"`, `"<2.0.0"`, `"||"`, `"*"`, `"x"`, `"latest"`, `"next"`
+- `"1.0.0 - 2.0.0"` (npm hyphen-range — `>=1.0.0 <=2.0.0`)
 - `"workspace:..."`, `"file:..."`, `"link:..."`, `"git+..."`,
   `"github:..."`, `"http:..."`, `"https:..."`
 - Anything that isn't a bare semver shape (`1.15.0` /

@@ -1,0 +1,8 @@
+{
+  "name": "fixture-npm-hyphen-range-bad",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "@atlas-trust/verify-wasm": "1.14.0 - 1.15.0"
+  }
+}

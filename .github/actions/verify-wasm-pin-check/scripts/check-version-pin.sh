@@ -118,9 +118,16 @@ ANY_FAIL=0
 while IFS=$'\x1f' read -r BUCKET VERSION; do
   atlas_info "$BUCKET[$PACKAGE] = '$VERSION'"
 
+  # The `*" - "*` arm rejects npm hyphen-range syntax `"1.0.0 - 2.0.0"`
+  # (space-hyphen-space — `>=1.0.0 <=2.0.0` per npm semver). Without
+  # this arm, the trailing `*` of the bare-semver glob below would
+  # match the whole `"1.0.0 - 2.0.0"` string and silently pass it
+  # as an exact pin — defence-in-depth gap (Layer 2 + Layer 3 still
+  # close the door, but Layer 1 should reject the range syntax up
+  # front so the diagnostic points the user at the real problem).
   case "$VERSION" in
-    \^*|\~*|\>*|\<*|\=*|\**|*\|\|*|x|X|*\.x|*\.X|latest|next|*workspace*|*"file:"*|*"link:"*|*"git+"*|*"github:"*|*"http:"*|*"https:"*)
-      atlas_fail "$BUCKET[$PACKAGE] = '$VERSION' is not an exact-version pin. Use 'npm install --save-exact $PACKAGE@<version>' (or 'pnpm add --save-exact …' / 'bun add …') to write a bare-semver value (e.g. '1.15.0' — no '^', '~', '>=', '||', 'x', 'latest', 'next', 'workspace:', 'file:', 'link:', 'git+…', 'github:', 'http:', or 'https:')."
+    \^*|\~*|\>*|\<*|\=*|\**|*\|\|*|*" - "*|x|X|*\.x|*\.X|latest|next|*workspace*|*"file:"*|*"link:"*|*"git+"*|*"github:"*|*"http:"*|*"https:"*)
+      atlas_fail "$BUCKET[$PACKAGE] = '$VERSION' is not an exact-version pin. Use 'npm install --save-exact $PACKAGE@<version>' (or 'pnpm add --save-exact …' / 'bun add …') to write a bare-semver value (e.g. '1.15.0' — no '^', '~', '>=', '||', 'x', 'latest', 'next', '<a> - <b>' hyphen-range, 'workspace:', 'file:', 'link:', 'git+…', 'github:', 'http:', or 'https:')."
       ANY_FAIL=1
       continue
       ;;

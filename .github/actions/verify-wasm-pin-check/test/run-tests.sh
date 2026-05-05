@@ -150,6 +150,7 @@ run_case "L1: expected-version match (1.15.0)" \
 # Failure paths
 run_case "L1: caret pin rejected"            "npm-caret-bad"              "check-version-pin.sh" 1
 run_case "L1: tilde pin rejected"            "npm-tilde-bad"              "check-version-pin.sh" 1
+run_case "L1: hyphen-range rejected"         "npm-hyphen-range-bad"       "check-version-pin.sh" 1
 run_case "L1: package not declared"          "npm-not-installed"          "check-version-pin.sh" 1
 run_case "L1: expected-version mismatch (1.14.0 vs 1.15.0)" \
   "npm-mismatched-version" "check-version-pin.sh" 1 \
@@ -157,6 +158,9 @@ run_case "L1: expected-version mismatch (1.14.0 vs 1.15.0)" \
 # Mismatched-version WITHOUT expected-version should pass (1.14.0 is a valid bare semver pin).
 run_case "L1: mismatched fixture without expected-version passes" \
   "npm-mismatched-version" "check-version-pin.sh" 0
+# Empty-hash-payload fixture: package.json side is well-formed (1.15.0 exact pin).
+# Layer 1 should pass; Layer 2 (below) is where the empty hash gets caught.
+run_case "L1: npm-empty-hash-payload (Layer1 only)" "npm-empty-hash-payload" "check-version-pin.sh" 0
 
 # ------------------------------------------------------------------
 # Layer 2 — check-lockfile-integrity.sh (router + per-PM dispatch)
@@ -185,6 +189,14 @@ run_case "L2: npm-local-file (FAIL with fail-on-local-file=true)" \
 # Failure paths
 run_case "L2: npm missing integrity"         "npm-no-integrity"           "check-lockfile-integrity.sh" 1
 run_case "L2: npm weak hash (sha1)"          "npm-weak-hash"              "check-lockfile-integrity.sh" 1
+# Empty-hash-payload — `"integrity": "sha512-"` (7 chars; valid prefix,
+# zero base64 payload). Without the per-algo length check, the bash
+# glob `sha512-*` would match this and silently pass Layer 2.
+run_case "L2: npm empty-hash payload rejected" "npm-empty-hash-payload"   "check-lockfile-integrity.sh" 1
+# Package not in lockfile — exercises the __NOT_FOUND__ exit path
+# in the npm Layer-2 helper. Realistic when a consumer removes the
+# package but forgets to update the lockfile.
+run_case "L2: npm package not in lockfile"   "npm-not-installed"          "check-lockfile-integrity.sh" 1
 run_case "L2: pnpm missing integrity"        "pnpm-no-integrity-bad"      "check-lockfile-integrity.sh" 1
 run_case "L2: bun-text missing integrity"    "bun-text-no-integrity-bad"  "check-lockfile-integrity.sh" 1
 

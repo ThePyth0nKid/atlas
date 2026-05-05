@@ -69,9 +69,15 @@ fi
 # `npm ls` exits 1 with `MISSING` for unmet/missing deps even when
 # the package IS declared in package.json, so we treat any non-zero
 # exit as "package not present at install time" and bail.
-NPM_LS_OUTPUT="$(cd "$WORKDIR" && npm ls "$PACKAGE" --depth=0 2>&1 || true)"
+# Single npm ls invocation captures both output AND exit code via a
+# `set +e` bracket. The earlier two-invocation pattern was correct but
+# doubled the npm ls subprocess cost (2-4 s on a large tree) and risked
+# the two invocations diverging if `node_modules` mutated between them.
 NPM_LS_RC=0
-( cd "$WORKDIR" && npm ls "$PACKAGE" --depth=0 >/dev/null 2>&1 ) || NPM_LS_RC=$?
+set +e
+NPM_LS_OUTPUT="$(cd "$WORKDIR" && npm ls "$PACKAGE" --depth=0 2>&1)"
+NPM_LS_RC=$?
+set -e
 if [ "$NPM_LS_RC" -ne 0 ]; then
   atlas_fail "'npm ls $PACKAGE' reports the package is NOT in the resolved install tree at $WORKDIR. Run 'npm ci' (or 'npm install') BEFORE this action so Layer 3 has something to attest. Without this guard, a tree where another package is signed would pass Layer 3 even if '$PACKAGE' itself were absent. Output:"
   printf '%s\n' "$NPM_LS_OUTPUT" >&2

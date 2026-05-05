@@ -131,6 +131,12 @@ RESULT="$(
           // Block comment: skip to */.
           i += 2;
           while (i < n && !(input[i] === "*" && input[i + 1] === "/")) i += 1;
+          if (i >= n) {
+            // Unterminated block comment — surface a specific
+            // diagnostic instead of letting the truncated `out`
+            // produce a generic JSON parse error two levels up.
+            throw new Error("unterminated /* … */ block comment in bun.lock at offset " + i);
+          }
           i += 2; // skip past */
           continue;
         }
@@ -198,9 +204,30 @@ while IFS=$'\x1f' read -r KEY VERSION RESOLVED INTEGRITY; do
     continue
   fi
 
+  # Per-algo minimum-length check — see check-lockfile-integrity-npm.sh
+  # for full rationale. Defends against `"integrity": "sha512-"` (empty
+  # payload) silently passing the prefix glob.
   case "$INTEGRITY" in
-    sha512-*|sha384-*|sha256-*)
-      : # OK
+    sha512-*)
+      if [ "${#INTEGRITY}" -lt 95 ]; then
+        atlas_fail "[bun:$KEY] integrity prefix is 'sha512-' but payload is too short (${#INTEGRITY} chars; minimum is 95). Likely an attacker-controlled or corrupted lockfile. Value: '${INTEGRITY}'"
+        ANY_FAIL=1
+        continue
+      fi
+      ;;
+    sha384-*)
+      if [ "${#INTEGRITY}" -lt 71 ]; then
+        atlas_fail "[bun:$KEY] integrity prefix is 'sha384-' but payload is too short (${#INTEGRITY} chars; minimum is 71). Likely an attacker-controlled or corrupted lockfile. Value: '${INTEGRITY}'"
+        ANY_FAIL=1
+        continue
+      fi
+      ;;
+    sha256-*)
+      if [ "${#INTEGRITY}" -lt 51 ]; then
+        atlas_fail "[bun:$KEY] integrity prefix is 'sha256-' but payload is too short (${#INTEGRITY} chars; minimum is 51). Likely an attacker-controlled or corrupted lockfile. Value: '${INTEGRITY}'"
+        ANY_FAIL=1
+        continue
+      fi
       ;;
     sha1-*|md5-*)
       atlas_fail "[bun:$KEY] integrity uses weak hash: '${INTEGRITY%%-*}'"

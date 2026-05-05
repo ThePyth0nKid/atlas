@@ -41,6 +41,25 @@ RESULT="$(
     const fs = require("fs");
     const lockPath = process.env.ATLAS_NODE_LOCKFILE;
     const pkg = process.env.ATLAS_NODE_PKG;
+    // Hard cap on lockfile size before reading. Mirrors the 10 MB cap
+    // on `bun pm ls --json` output (check-lockfile-integrity-bun.sh).
+    // An adversarial package-lock.json with deeply-nested
+    // `dependencies` v1 trees would either exhaust the V8 heap during
+    // JSON.parse OR crash the recursive walker further down. Capping
+    // at the read step closes both off in one place. Real Atlas
+    // consumer trees never approach this — the verifier package has
+    // zero runtime deps.
+    let stat;
+    try {
+      stat = fs.statSync(lockPath);
+    } catch (e) {
+      console.error("ERROR: cannot stat " + lockPath + ": " + e.message);
+      process.exit(2);
+    }
+    if (stat.size > 10485760) {
+      console.error("ERROR: " + lockPath + " is " + stat.size + " bytes — exceeds the 10 MB safety cap. Investigate the lockfile for adversarial nesting.");
+      process.exit(2);
+    }
     let raw;
     try {
       raw = fs.readFileSync(lockPath, "utf8");
@@ -74,18 +93,32 @@ RESULT="$(
     }
 
     // Lockfile v1: `dependencies` recursive tree.
+    // Iterative queue + WeakSet visited-set instead of recursion —
+    // mirrors the bun.lockb walker. Defends against a
+    // `lockfileVersion: 1` header attached to an adversarially-deep
+    // tree that would crash a recursive walker with `RangeError:
+    // Maximum call stack size exceeded` (V8 default ~10k frames).
+    // The cycle defence (WeakSet) is belt-and-suspenders — npm v1
+    // shape is a strict tree, not a graph, so cycles should not occur,
+    // but a malformed lockfile could construct one and we should not
+    // loop forever.
     if (lock.dependencies && typeof lock.dependencies === "object") {
-      function walk(deps, prefix) {
+      const queue = [{ deps: lock.dependencies, prefix: "" }];
+      const visited = new WeakSet();
+      while (queue.length > 0) {
+        const { deps, prefix } = queue.shift();
+        if (!deps || typeof deps !== "object") continue;
+        if (visited.has(deps)) continue;
+        visited.add(deps);
         for (const [name, entry] of Object.entries(deps)) {
           if (name === pkg) {
             matches.push({ source: "dependencies:" + prefix + name, entry });
           }
           if (entry && entry.dependencies) {
-            walk(entry.dependencies, prefix + name + "/");
+            queue.push({ deps: entry.dependencies, prefix: prefix + name + "/" });
           }
         }
       }
-      walk(lock.dependencies, "");
     }
 
     if (matches.length === 0) {
@@ -138,9 +171,38 @@ while IFS=$'\x1f' read -r SOURCE VERSION RESOLVED INTEGRITY; do
     continue
   fi
 
+  # Per-algo minimum-length check defends against an attacker-
+  # controlled lockfile that writes a valid prefix with an empty (or
+  # truncated) base64 payload — e.g. `"integrity": "sha512-"` (7
+  # chars). Without this guard, the bash glob `sha512-*` matches
+  # `sha512-` (zero chars after the dash, since `*` matches zero or
+  # more), and Layer 2 silently passes a hash that carries no
+  # cryptographic information. Minimum total string lengths are
+  # derived from base64 of the raw digest (with padding):
+  #   sha512: 7 + 88 = 95 chars
+  #   sha384: 7 + 64 = 71 chars
+  #   sha256: 7 + 44 = 51 chars
   case "$INTEGRITY" in
-    sha512-*|sha384-*|sha256-*)
-      : # OK — strong hash
+    sha512-*)
+      if [ "${#INTEGRITY}" -lt 95 ]; then
+        atlas_fail "[$SOURCE] integrity prefix is 'sha512-' but payload is too short (${#INTEGRITY} chars; minimum is 95). Likely an attacker-controlled or corrupted lockfile. Value: '${INTEGRITY}'"
+        ANY_FAIL=1
+        continue
+      fi
+      ;;
+    sha384-*)
+      if [ "${#INTEGRITY}" -lt 71 ]; then
+        atlas_fail "[$SOURCE] integrity prefix is 'sha384-' but payload is too short (${#INTEGRITY} chars; minimum is 71). Likely an attacker-controlled or corrupted lockfile. Value: '${INTEGRITY}'"
+        ANY_FAIL=1
+        continue
+      fi
+      ;;
+    sha256-*)
+      if [ "${#INTEGRITY}" -lt 51 ]; then
+        atlas_fail "[$SOURCE] integrity prefix is 'sha256-' but payload is too short (${#INTEGRITY} chars; minimum is 51). Likely an attacker-controlled or corrupted lockfile. Value: '${INTEGRITY}'"
+        ANY_FAIL=1
+        continue
+      fi
       ;;
     sha1-*|md5-*)
       atlas_fail "[$SOURCE] integrity uses weak hash: '${INTEGRITY%%-*}' — sha1/md5 collisions are practical and do not defend against registry-side replacement. Re-run 'npm install --save-exact $PACKAGE@$VERSION' to upgrade."

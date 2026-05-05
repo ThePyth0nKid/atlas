@@ -2469,6 +2469,104 @@ the action's own input plumbing):
   test exercises the genuine "missing integrity" code path with
   the correct diagnostic.
 
+Post-review hardening pass (second iteration, 2026-05-05 — the
+shipped V1.17 Welle A code was re-reviewed in parallel by
+`code-reviewer` + `security-reviewer` after first ship; the
+following defences close residual gaps that survived the first
+pass):
+
+- **Per-algo minimum-payload-length check on every lockfile
+  integrity hash.** The first-pass implementation accepted any
+  string with the prefix `sha512-` / `sha384-` / `sha256-`. Bash
+  glob `sha512-*` matches `sha512-` itself (zero chars after the
+  dash). An attacker with lockfile-write access (compromised
+  branch, fork-PR, malicious dependency-bot rewrite) could write
+  `"integrity": "sha512-"` and Layer 2 would silently pass — `npm
+  install` is permissive about empty integrity values in some
+  edge cases, so the subsequent install would not necessarily
+  block. Now every Layer-2 helper enforces the *base64-of-SHA*
+  minimum payload length: sha256 needs ≥51 base64 chars (32 raw
+  bytes), sha384 needs ≥71 (48 raw), sha512 needs ≥95 (64 raw).
+  Any shorter payload HARD-FAILs with `weak-hash` diagnostic.
+  Applied identically in `check-lockfile-integrity-npm.sh`,
+  `check-lockfile-integrity-pnpm.sh`, `check-lockfile-integrity-bun.sh`,
+  `check-lockfile-integrity-bun-text.sh`. New fixture
+  `npm-empty-hash-payload/` exercises the bypass attempt; harness
+  asserts Layer 1 passes (fixture has a clean `1.15.0` exact pin)
+  AND Layer 2 hard-fails.
+- **npm hyphen-range Layer-1 rejection** (`check-version-pin.sh`).
+  npm semver supports a hyphen-range syntax `"1.0.0 - 2.0.0"`
+  meaning `>=1.0.0 <=2.0.0`. The first-pass range-rejection case
+  statement matched `*"||"*`/`*">"*`/`*"<"*`/`*"="*` plus the
+  star-arm `*\**`/`*x*` and the no-pin keywords `latest`/`next`,
+  but had no arm for the literal pattern `"x.y.z - x.y.z"`. The
+  spec contains spaces and a hyphen, neither of which trip any
+  of the existing arms — so it would fall through to the bare-
+  semver-shape glob (also negative, since `1.0.0 - 2.0.0` is not
+  a single bare semver) and only THEN fail. Defence-in-depth: the
+  hyphen-range form is now caught by an explicit `*" - "*` arm
+  with a hyphen-range-specific diagnostic (vs. the generic
+  "not a bare semver" message), so a future refactor of the
+  semver-shape glob can't accidentally re-open the bypass.
+  Diagnostic message updated to enumerate hyphen-range alongside
+  caret/tilde/`||` for consumer clarity. New fixture
+  `npm-hyphen-range-bad/` exercises the rejection.
+- **Iterative npm v1 lockfile walk + 10 MB file-size cap**
+  (`check-lockfile-integrity-npm.sh`). The first-pass implementation
+  was iterative for the v7+ `packages` map but recursive for the
+  v6 `dependencies` tree (load-bearing for `lockfileVersion: 1`
+  consumers — npm v6 tooling still emits this shape, and v7+ npm
+  preserves it for backward-compat alongside `packages`). A
+  maliciously-crafted v1 lockfile with adversarially-deep nested
+  `dependencies.X.dependencies.Y.dependencies...` could trigger
+  V8 stack overflow in the recursive walker. Now uses the same
+  queue-based + `WeakSet` cycle-detection pattern as the v7+
+  walker (parity across both lockfile shapes). Plus a 10 MB file-
+  size cap before `fs.readFileSync` (defends against runner OOM
+  on a multi-gigabyte lockfile, matches the existing cap on
+  bun-helper output).
+- **Single `npm ls` invocation in Layer 3** (`check-provenance.sh`).
+  First-pass code invoked `npm ls "$PACKAGE" --depth=0` twice —
+  once for the precondition exit-code check, once for the
+  diagnostic output capture on failure. A package install state
+  could in principle change between the two calls (concurrent
+  process, filesystem race), and at minimum it doubled the
+  per-step latency. Refactored to a single invocation captured
+  via `set +e` / `RC=$?` / `set -e` block. Atomic snapshot,
+  half the latency.
+- **JSONC unterminated-block-comment diagnostic in bun-text
+  helper** (`check-lockfile-integrity-bun-text.sh`). The first-
+  pass tokenizer would silently fall off the end of input on a
+  truncated `/* ... ` block comment (no terminating `*/`),
+  producing a bogus parse error elsewhere in the pipeline. Now
+  throws with `unterminated /* … */ block comment in bun.lock at
+  offset N` so a consumer debugging a corrupt lockfile gets the
+  exact byte offset.
+- **Layer-3 self-test workspace containment fix**
+  (`.github/workflows/verify-wasm-pin-check-self-test.yml`,
+  `live-install-layer-3` job). The first-pass workflow installed
+  the live test consumer into `/tmp/atlas-pin-check-live` and
+  passed an absolute `working-directory` to the action. The
+  shared `lib/canonicalize-workdir.sh` (added in the first review
+  pass) enforces `$GITHUB_WORKSPACE` containment — `/tmp/...` is
+  outside the workspace, so the action exited at the setup step
+  on the containment check, never reaching Layer 3. **Result: the
+  self-test's only Layer-3 coverage was non-functional from
+  first ship until this fix.** Fixed by relocating the install
+  directory to `$GITHUB_WORKSPACE/.atlas-pin-check-live` and
+  passing a relative `working-directory: .atlas-pin-check-live`
+  (resolves inside workspace, passes containment check). Comment
+  added explaining the constraint so a future refactor doesn't
+  re-introduce the regression.
+- **Expanded negative-case workflow matrix.** First-pass
+  `action-negative-cases` job covered 6 negative fixtures. Added
+  3 more — `npm-hyphen-range-bad`, `npm-not-installed`,
+  `npm-empty-hash-payload` — for 9 negative fixtures total, so
+  every distinct exit-path the action can fail on is exercised
+  via `uses:` (action-level invocation), not just by direct
+  script invocation in the harness. New harness cases bring the
+  fixture-test count to **40 / 40**.
+
 What scope-k does NOT cover (V1.18+ candidates):
 
 - **Standalone `atlas-trust/verify-wasm-pin-check` repo with

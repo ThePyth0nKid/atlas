@@ -119,10 +119,16 @@ jobs:
             expectation: 'caret pin is rejected by Layer 1'
           - fixture: npm-tilde-bad
             expectation: 'tilde pin is rejected by Layer 1'
+          - fixture: npm-hyphen-range-bad
+            expectation: 'hyphen-range "1.14.0 - 1.15.0" is rejected by Layer 1'
+          - fixture: npm-not-installed
+            expectation: 'undeclared package is rejected by Layer 1'
           - fixture: npm-no-integrity
             expectation: 'missing integrity is rejected by Layer 2'
           - fixture: npm-weak-hash
             expectation: 'sha1 hash is rejected by Layer 2'
+          - fixture: npm-empty-hash-payload
+            expectation: 'empty sha512- payload is rejected by Layer 2'
           - fixture: pnpm-no-integrity-bad
             expectation: 'pnpm missing integrity is rejected by Layer 2'
           - fixture: bun-text-no-integrity-bad
@@ -192,8 +198,17 @@ jobs:
 
       - name: Create throwaway consumer project
         run: |
-          mkdir -p /tmp/atlas-pin-check-live
-          cd /tmp/atlas-pin-check-live
+          # MUST live INSIDE $GITHUB_WORKSPACE — the action's
+          # canonicalize-workdir.sh enforces that the resolved working
+          # directory is contained within $GITHUB_WORKSPACE (defends
+          # against symlink path-traversal). A `/tmp/...` working
+          # directory would trip that guard and fail the action at the
+          # setup step, never reaching Layer 3. Using a hidden
+          # `.atlas-pin-check-live/` subdir keeps the directory clearly
+          # tooling-owned and out of any git-glob.
+          LIVE_DIR="$GITHUB_WORKSPACE/.atlas-pin-check-live"
+          mkdir -p "$LIVE_DIR"
+          cd "$LIVE_DIR"
           # Minimal package.json. We let `npm install --save-exact`
           # populate the dependency entry — that mirrors the install
           # ceremony a fresh consumer would follow per CONSUMER-RUNBOOK §1.
@@ -209,7 +224,9 @@ jobs:
       - name: Run verify-wasm-pin-check (full — Layer 1, 2, 3)
         uses: ./.github/actions/verify-wasm-pin-check
         with:
-          working-directory: /tmp/atlas-pin-check-live
+          # Relative path resolves inside $GITHUB_WORKSPACE — passes
+          # canonicalize-workdir.sh containment check.
+          working-directory: .atlas-pin-check-live
           # No expected-version pin — we just want to verify whatever
           # `latest` was when we installed, and `npm audit signatures`
           # asserts it carries a verified attestation.
