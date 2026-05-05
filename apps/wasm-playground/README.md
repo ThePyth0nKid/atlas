@@ -1,4 +1,4 @@
-# Atlas WASM playground (V1.14 Scope E + V1.16 Welle A)
+# Atlas WASM playground (V1.14 Scope E + V1.16 Welle A + Welle B)
 
 Tiny static page that loads the Atlas verifier WASM module in your browser
 and verifies a trace bundle locally — no network call to any Atlas server.
@@ -86,6 +86,43 @@ compromised:
   via `<meta>` — block MIME-sniffing on script content and prevent
   referrer leakage to embedded resources.
 
+## CSP violation reporting (V1.16 Welle B)
+
+The CSP meta-tag also declares `report-uri /csp-report`. On every
+blocked violation (XSS attempt, accidental sink introduction, mis-
+configured cross-origin load) the browser POSTs a JSON report to
+the same-origin path `/csp-report` with `Content-Type:
+application/csp-report` (Chrome/Edge/Safari) or `application/json`
+(Firefox historically) — receivers MUST accept both. The CSP
+enforcement is unchanged — the
+violation is still BLOCKED regardless of whether the report POST
+succeeds — but a deployed playground that runs a receiver at that
+path will see every attempt instead of relying on operators to spot
+the page break in DevTools.
+
+**Operator setup options:**
+
+- *Self-hosted minimal collector (~30 lines).* Cloudflare Worker /
+  Lambda / Vercel Edge Function / Netlify Function that accepts POST,
+  parses JSON, appends to a log sink. No vendor dependency beyond
+  the hosting platform.
+- *Third-party reporting service.* `report-uri.com`, Sentry security
+  reports, Datadog RUM. Faster, introduces a vendor; opaque-response
+  cross-origin reports have lower fidelity. If you go this route,
+  override the meta-tag CSP via an HTTP-header CSP at the hosting
+  layer (keeps page bytes deployment-agnostic).
+- *No receiver.* Browsers POST to a 404; violation still blocked,
+  report lost. Acceptable for local-dev only.
+
+The full receiver-shape spec (HTTP method, body schema, recommended
+behaviours: append-only log, per-IP rate-limit, schema validation
+to reject report-spoofing) lives in
+[`docs/SECURITY-NOTES.md` §scope-d covers-bullet 6](../../docs/SECURITY-NOTES.md).
+
+The validator (`tools/playground-csp-check.sh`) asserts the
+`report-uri` declaration is present AND same-origin (cross-origin
+endpoints get a WARN, not a hard fail).
+
 ### Maintenance — after editing `app.js`
 
 The SRI hash on the `<script>` tag in `index.html` must be regenerated
@@ -102,7 +139,9 @@ Without flags the same script runs the CI-style validation:
 ```bash
 tools/playground-csp-check.sh
 # Asserts: CSP directives intact, no 'unsafe-inline'/'unsafe-eval'
-# regression on script-src, SRI hash on app.js matches actual file bytes.
+# regression on script-src, SRI hash on app.js matches actual file
+# bytes, wasm-bindgen-emitted glue is TT-sink-free (when pkg/ exists),
+# and (V1.16 Welle B) report-uri is declared and same-origin.
 # Non-zero exit on drift.
 ```
 

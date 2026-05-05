@@ -16,7 +16,7 @@ Atlas makes that **structurally true** — not a checkbox in a compliance dashbo
 
 ## Status
 
-**V1.16 Welle A shipped — browser-runtime hardening for `apps/wasm-playground/`: strict CSP via `<meta http-equiv>` (`default-src 'none'`, `script-src 'self' 'wasm-unsafe-eval'` — no `'unsafe-inline'`, no `'unsafe-eval'`), Subresource Integrity (sha384) on the application JS, Trusted Types enforcement (`require-trusted-types-for 'script'; trusted-types 'none'` against a sink-free `app.js`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. Anti-drift pin in `tools/playground-csp-check.sh` (pure-bash CI validator). V1.15 CLOSED previously (Welle A const-time KID-equality invariant, Welle B dual-channel WASM distribution via GitHub Releases — see [OPERATOR-RUNBOOK §12](docs/OPERATOR-RUNBOOK.md), Welle C consumer-side reproducibility runbook — see [CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md)). V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm + browser playground.**
+**V1.16 Welle A + Welle B shipped — browser-runtime hardening for `apps/wasm-playground/`: strict CSP via `<meta http-equiv>` (`default-src 'none'`, `script-src 'self' 'wasm-unsafe-eval'` — no `'unsafe-inline'`, no `'unsafe-eval'`), Subresource Integrity (sha384) on the application JS, Trusted Types enforcement (`require-trusted-types-for 'script'; trusted-types 'none'` against a sink-free `app.js`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, AND (Welle B) `report-uri /csp-report` so deployed playgrounds surface every blocked CSP violation as a same-origin JSON POST instead of failing silently. Anti-drift pin in `tools/playground-csp-check.sh` (pure-bash CI validator) covers both Wellen. V1.15 CLOSED previously (Welle A const-time KID-equality invariant, Welle B dual-channel WASM distribution via GitHub Releases — see [OPERATOR-RUNBOOK §12](docs/OPERATOR-RUNBOOK.md), Welle C consumer-side reproducibility runbook — see [CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md)). V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm + browser playground.**
 
 Trust-core crate + Rekor anchoring + per-tenant key derivation + HSM-backed signing + independent
 witness attestor (V1.5 mock-issuer, V1.6 live Sigstore Rekor v1, V1.7 anchor-chain + shard
@@ -134,10 +134,18 @@ local-dev: application code is extracted from inline `<script>` into
 the loading `<script>` tag and Trusted Types enforced (sink-free
 `app.js` discipline; any future regression that introduces `innerHTML`
 / `eval` / `setTimeout(string)` / `*.src = userInput` fails at the
-browser boundary). A pure-bash anti-drift validator
-(`tools/playground-csp-check.sh`) re-asserts the CSP directives + SRI
-hash on every CI run. Graph-database integration and policy-engine
-follow in V2.
+browser boundary). V1.16 Welle B closes the Welle-A residual gap that
+CSP violations were silent in production by adding `report-uri
+/csp-report` to the meta-tag CSP — a deployed playground that runs a
+minimal receiver at the same-origin path (receiver-shape spec in
+[SECURITY-NOTES §scope-d](docs/SECURITY-NOTES.md)) now sees every
+blocked violation as a JSON POST. `report-uri` is the meta-tag-
+compatible mechanism; the modern Reporting API (`report-to` +
+`Reporting-Endpoints` HTTP header) requires header-mode CSP and is
+the operator's responsibility at hosting time. A pure-bash anti-drift
+validator (`tools/playground-csp-check.sh`) re-asserts the CSP
+directives + SRI hash + `report-uri` declaration on every CI run.
+Graph-database integration and policy-engine follow in V2.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
   trust property, write/export flows, V1 → V1.16 → V2 boundaries.

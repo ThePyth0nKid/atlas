@@ -6,6 +6,7 @@
 
   <!--
     V1.16 Welle A — browser-runtime hardening.
+    V1.16 Welle B — CSP violation reporting (report-uri).
 
     Strict CSP shipped via <meta http-equiv> so the policy travels with
     the page and does NOT depend on a hosting provider sending the right
@@ -62,12 +63,49 @@
                                           innerHTML / document.write / eval
                                           / setTimeout(string) / etc. will
                                           throw TypeError immediately.
+      report-uri /csp-report            — V1.16 Welle B. Browsers POST a
+                                          JSON report (Content-Type:
+                                          application/csp-report) to this
+                                          same-origin path on every CSP
+                                          violation. Same-origin avoids
+                                          cross-origin opaque-response loss,
+                                          and keeps the page-bytes deployable
+                                          on any plain static host without
+                                          a vendor URL hardcoded in.
+
+                                          Why report-uri (deprecated in CSP3)
+                                          and not report-to / Reporting-
+                                          Endpoints (modern Reporting API)?
+                                          report-to references an endpoint
+                                          group declared via the
+                                          `Reporting-Endpoints` HTTP header,
+                                          which CANNOT be delivered via
+                                          <meta http-equiv>. report-uri works
+                                          in meta-tag delivery and is
+                                          supported by every current browser
+                                          (Chrome, Firefox, Safari, Edge).
+                                          A header-mode-CSP deployment SHOULD
+                                          ALSO declare report-to + Reporting-
+                                          Endpoints for forward-compat —
+                                          documented as an operator
+                                          responsibility in
+                                          docs/SECURITY-NOTES.md scope-d.
+
+                                          If the operator has NOT stood up a
+                                          /csp-report receiver, browsers POST
+                                          to a 404 — the violation is still
+                                          BLOCKED (CSP enforcement is local
+                                          to the browser); only the report
+                                          is lost. Receiver-shape spec and
+                                          minimal example collectors:
+                                          docs/SECURITY-NOTES.md scope-d
+                                          "CSP violation reporting" subsection.
 
     Anti-drift: tools/playground-csp-check.sh re-asserts these invariants
     in a single `bash` step suitable for CI. If a future edit relaxes the
     policy, the script fails loud.
   -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; require-trusted-types-for 'script'; trusted-types 'none'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; require-trusted-types-for 'script'; trusted-types 'none'; report-uri /csp-report" />
   <meta http-equiv="X-Content-Type-Options" content="nosniff" />
   <meta name="referrer" content="no-referrer" />
 

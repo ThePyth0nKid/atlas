@@ -1471,18 +1471,18 @@ Headline:
   verify CI action for downstream consumers) are documented in
   `.handoff/v1.15-handoff.md` for the next session.
 
-### V1.16 — Browser-runtime hardening of the WASM playground (shipped: Welle A)
+### V1.16 — Browser-runtime hardening of the WASM playground (shipped: Welle A + Welle B)
 
-- **Strict CSP + SRI + Trusted Types on `apps/wasm-playground/`.** The
-  V1.14 Scope E playground page is hardened against UI-side injection
-  for any deployment beyond pure local-dev. The application code is
-  extracted from inline `<script type="module">` into a sibling
+- **Strict CSP + SRI + Trusted Types on `apps/wasm-playground/` (Welle A).**
+  The V1.14 Scope E playground page is hardened against UI-side
+  injection for any deployment beyond pure local-dev. The application
+  code is extracted from inline `<script type="module">` into a sibling
   `app.js`, allowing a strict CSP without `'unsafe-inline'` on
   `script-src` and a `sha384` Subresource Integrity hash on the
   loading `<script>` tag. CSP is shipped via `<meta http-equiv>` so
   the policy travels with the page bytes (no dependency on the hosting
   provider sending a `Content-Security-Policy` HTTP header).
-- **Sink-free application discipline.** `app.js` uses only
+- **Sink-free application discipline (Welle A).** `app.js` uses only
   `textContent`, `className`, and `style.display` — no `innerHTML`, no
   `eval`, no `new Function`, no `setTimeout(string)`, no `*.src` from
   user input. The CSP enforces this with `require-trusted-types-for
@@ -1490,23 +1490,46 @@ Headline:
   re-introduces a script-related sink fails at the browser boundary,
   not at code-review time. This is the load-bearing TT setting for
   sink-free apps.
+- **CSP violation reporting via `report-uri /csp-report` (Welle B).**
+  The meta-tag CSP now declares a same-origin `report-uri` so that on
+  every blocked violation (XSS attempt, accidental sink introduction,
+  mis-configured cross-origin load) the browser POSTs a JSON report
+  to the deployed receiver. Page-bytes-only — works on any plain
+  static host where an operator stands up a `/csp-report` endpoint.
+  Choice of `report-uri` over `report-to` (Reporting API) is forced
+  by meta-tag delivery: `report-to` references a `Reporting-Endpoints`
+  HTTP header which cannot be sent via `<meta>`. A header-mode-CSP
+  deployment SHOULD declare BOTH for forward-compat. Receiver-shape
+  spec + minimal-collector example are in
+  [docs/SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-d covers-bullet 6.
 - **Anti-drift validator `tools/playground-csp-check.sh`.** Pure-bash
   validator (no Node/Python dependency) re-asserts the CSP directives,
-  the SRI hash on `app.js`, and the absence of `'unsafe-inline'` /
-  `'unsafe-eval'` on `script-src` on every run. `--update-sri` flag
-  re-pins the hash after a legitimate `app.js` edit.
-- **Trust property unchanged.** V1.16 Welle A is delivery-side
+  the SRI hash on `app.js`, the absence of `'unsafe-inline'` /
+  `'unsafe-eval'` on `script-src`, the wasm-bindgen-glue TT-compat
+  audit, AND (Welle B) the `report-uri` declaration + same-origin
+  shape on every run. `--update-sri` flag re-pins the hash after a
+  legitimate `app.js` edit.
+- **Trust property unchanged.** V1.16 (both Wellen) is delivery-side
   hardening — the verifier's correctness, byte-determinism pins,
   signature integrity, hash-chain integrity, and anchor verification
-  are unchanged from V1.15. What V1.16 buys is *resistance to UI-side
-  injection* in a hosted playground deployment.
-- **What V1.16 Welle A is NOT yet:** WASM-binary SRI (the
+  are unchanged from V1.15. Welle A buys *resistance to UI-side
+  injection*; Welle B is *receiver-ready post-block visibility* —
+  the page declares `report-uri /csp-report`, but actual visibility
+  requires the operator to also stand up a receiver at that path
+  matching the documented receiver-shape spec. Without a receiver,
+  reports POST into a 404 (violation still blocked, report lost).
+  Welle B closes F-3 at the page-bytes layer; the deployment-side
+  closure is operator responsibility.
+- **What V1.16 Welle A + B is NOT yet:** WASM-binary SRI (the
   `wasm-pack`-emitted loader uses `WebAssembly.instantiateStreaming`,
   which has no declarative SRI hook — the `WebAssembly.compile`
   integrity-check spec is proposal stage); service-worker pinning;
   JS-side input-size cap (the Rust verifier already caps allocation
-  via `MAX_ITEMS_PER_LEVEL`); hosting decision and DNS pinning. These
-  are V1.16 Welle B / V1.17+ candidates documented in
+  via `MAX_ITEMS_PER_LEVEL`); receiver implementation at
+  `/csp-report` (operator responsibility); HTTP-header-mode `report-to`
+  + `Reporting-Endpoints` (page-bytes can't enforce — operator
+  config); hosting decision and DNS pinning. These are V1.16 Welle C
+  / V1.17+ candidates documented in
   [docs/SECURITY-NOTES.md](SECURITY-NOTES.md) §scope-d "What scope-d
   does NOT cover".
 

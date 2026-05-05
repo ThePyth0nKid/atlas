@@ -1715,7 +1715,7 @@ verifiable against either channel's bytes (same SHA, same commit SHA).
 
 ---
 
-## scope-d — Browser-runtime hardening of the WASM playground (V1.16 Welle A — shipped)
+## scope-d — Browser-runtime hardening of the WASM playground (V1.16 Welle A + Welle B — shipped)
 
 The playground at `apps/wasm-playground/` (V1.14 Scope E) is a static
 HTML page that loads the verifier WASM module locally via `wasm-pack`'s
@@ -1725,6 +1725,11 @@ checkout. V1.16 Welle A hardens it for any deployment beyond pure
 local-dev — a hosted playground (e.g. `playground.atlas-trust.dev`) can
 now resist injection attacks even when the surrounding network/CDN/proxy
 is partially compromised, without requiring server-side header config.
+V1.16 Welle B closes the Welle-A residual gap that CSP violations were
+silent in production: the meta-tag CSP now declares `report-uri
+/csp-report` so a deployed playground that runs a minimal receiver at
+the same-origin path will surface every blocked violation as a JSON POST
+(documented receiver-shape spec below).
 
 **Trust property (no new property):** the playground hardening is pure
 defence-in-depth on the *delivery* of the verifier UI, not on the
@@ -1829,17 +1834,128 @@ network egress against an active operator's browser session.
    the validator to confirm continued TT-compat; the validator's
    `pkg/` audit is the load-bearing pin.
 
+6. **CSP violation reporting via `report-uri /csp-report` (V1.16
+   Welle B).** The meta-tag CSP now declares `report-uri /csp-report`.
+   On every CSP violation (blocked inline script, blocked external
+   script, blocked TT sink, etc.) the browser POSTs a JSON report to
+   `/csp-report` (same-origin) with `Content-Type: application/csp-report`.
+   The CSP enforcement is unchanged — the violation is still BLOCKED
+   regardless of whether the report POST succeeds — but a deployed
+   playground that runs a receiver at that path will see every attempt
+   instead of relying on operators to spot the page break in DevTools.
+
+   **Receiver-shape spec (what to implement at `/csp-report`):**
+
+   - **Method:** `POST`
+   - **Content-Type:** `application/csp-report` (some browsers also
+     send `application/json`; accept both)
+   - **Body:** JSON object with a single `csp-report` key:
+     ```json
+     {
+       "csp-report": {
+         "document-uri":       "https://playground.example/",
+         "referrer":           "",
+         "violated-directive": "script-src 'self' 'wasm-unsafe-eval'",
+         "effective-directive":"script-src",
+         "original-policy":    "default-src 'none'; script-src 'self' …",
+         "blocked-uri":        "https://attacker.example/evil.js",
+         "status-code":        0,
+         "script-sample":      ""
+       }
+     }
+     ```
+   - **Response:** `204 No Content` (browsers ignore the body; status
+     code only matters for server-side log noise reduction).
+   - **Recommended receiver behaviour:**
+
+     | Requirement | Rationale |
+     |---|---|
+     | Accept ONLY `Content-Type: application/csp-report` or `application/json` | Block CSV/text/etc. payloads from naive forging. |
+     | Enforce a body-size cap (≤ 64 KB before parse) | Browser-sent reports are a few KB; uncapped POSTs are a flood vector. |
+     | Schema-validate `original-policy` against the deployed CSP | Reject reports whose claimed policy doesn't match — the simplest forgery filter. |
+     | Schema-validate `document-uri` origin against the expected playground origin | Closes the "same-origin attacker forges with valid `original-policy`" subcase the policy match alone misses. |
+     | Per-IP rate limit (drop after N reports/sec) | A compromised page or direct POST can spam reports. |
+     | Append-only log, one JSON line per report, server-timestamp prefix | Cheap to operate; analysable with grep/jq. |
+     | NEVER reflect any report field into a response header or body | A reflected `document-uri` / `referrer` becomes a response-header / response-body injection. Receivers should return `204 No Content` with an empty body. |
+     | Treat `blocked-uri` and `script-sample` as ATTACKER-CONTROLLED | An XSS attacker who triggers the violation chooses these values. They MUST be logged as opaque strings — do NOT URL-follow `blocked-uri`, do NOT render `script-sample` as HTML in a monitoring dashboard, do NOT pass either to a templating engine without escaping. Naive log UIs that render `blocked-uri` as a hyperlink are vulnerable to stored XSS in the operator's own monitoring tool. |
+     | `document-uri` may carry query-string params | Strip or hash query strings server-side before persisting if the playground URL is ever expected to carry secrets. (Current playground URL is static — residual risk zero today; documented for future maintainers.) |
+
+   **Operator-deployment options (any of these works):**
+
+   - *Self-hosted minimal collector (~30 lines).* A Cloudflare Worker
+     / AWS Lambda / Vercel Edge Function / Netlify Function that
+     accepts POST, parses JSON, appends to a log sink (Cloudflare
+     R2 / S3 / Datadog / loki). No vendor dependency beyond the
+     hosting platform itself.
+   - *Third-party reporting service.* `report-uri.com`, Sentry's
+     security report endpoint, Datadog RUM, etc. Faster to ship,
+     introduces a vendor — opaque-response cross-origin reports
+     have lower fidelity than same-origin (browsers strip some
+     fields cross-origin); see the validator's cross-origin WARN.
+     If you go this route, override the meta-tag CSP via an
+     HTTP-header-mode CSP at the hosting layer rather than editing
+     the page bytes (keeps page-bytes deployment-agnostic).
+   - *No receiver at all.* Browsers POST to a 404; the violation is
+     still blocked, but the report is lost. Acceptable for
+     local-dev or a soft-launch where DevTools-Network is the
+     monitoring surface; not acceptable for a hosted production
+     playground.
+
+   **Why `report-uri` (deprecated in CSP3) and not `report-to`?** The
+   modern Reporting API uses `report-to <group>` in CSP referencing
+   a `Reporting-Endpoints: <group>="<url>"` HTTP header. The header
+   CANNOT be delivered via `<meta http-equiv>`, so meta-tag-CSP
+   delivery is incompatible with `report-to`. `report-uri` works in
+   meta-tag delivery and is supported by every current browser
+   (Chrome, Firefox, Safari, Edge as of 2026). A header-mode-CSP
+   deployment SHOULD ALSO declare `report-to` + `Reporting-Endpoints`
+   for forward-compat (the Reporting API supports batching, retries,
+   and other report types beyond CSP — network errors, deprecation,
+   intervention) but neither breaks if the other is absent.
+
+   **Graceful degradation if `report-uri` is removed.** `report-uri`
+   has been marked deprecated in CSP3 since 2018; no major browser
+   has removed it (Chrome's removal intent was withdrawn) and all
+   four ship-it as of 2026. If a future browser does remove the
+   directive, the failure mode is silent loss of reports — CSP
+   enforcement is unaffected, violations are still BLOCKED, only the
+   POST disappears. Operators relying on reports for incident
+   detection should monitor browser deprecation timelines and add
+   `report-to` + `Reporting-Endpoints` at the HTTP-header layer
+   before any browser removes `report-uri`.
+
+   **F-3 closure framing.** Welle B installs the *plumbing* for
+   reporting; *visibility* requires the operator to also stand up a
+   receiver matching the spec above. Without a receiver, the page
+   is "receiver-ready" but reports POST into a 404 (violation still
+   blocked, report lost). The F-3 gap from Welle A is closed at the
+   page-bytes layer; the deployment-side closure is operator
+   responsibility.
+
 ### What scope-d does NOT cover
 
-- **CSP violation reporting.** No `report-uri` / `report-to` /
-  `Reporting-Endpoints` is configured. Without a reporting endpoint,
-  CSP violations (XSS attempts, accidental sink introduction, mis-
-  configured cross-origin loads) are silent in production: the
-  browser blocks the violation but no operator sees the report.
-  For a hosted playground this is a meaningful blind spot — recommend
-  adding a `report-to` directive + a minimal collector endpoint as a
-  V1.16 Welle B / V1.17 candidate. Until then, manual smoke-tests
-  in DevTools are the only violation-detection surface.
+- **`report-to` / `Reporting-Endpoints` HTTP header config.** Welle B
+  ships the meta-tag-compatible `report-uri` only. The modern
+  Reporting API (`report-to <group>` referencing a
+  `Reporting-Endpoints` header) requires HTTP-header CSP delivery and
+  is therefore the operator's responsibility at hosting time. A
+  header-mode-CSP deployment SHOULD declare both for forward-compat
+  (browser deprecation timeline for `report-uri` is not yet
+  scheduled but is signalled in CSP3); page-bytes can't enforce this.
+- **Receiver implementation.** scope-d ships the *report-uri
+  declaration*, not the *receiver* at `/csp-report`. Operators must
+  stand up a receiver matching the documented receiver-shape spec
+  (above) before a deployed playground actually surfaces violations.
+  Without a receiver, browsers POST to a 404 — the violation is
+  still BLOCKED (CSP enforcement is local to the browser), only the
+  report is lost.
+- **Report-spoofing protection.** A malicious actor on the same
+  origin (or any origin if the receiver doesn't validate) can POST
+  forged `csp-report` payloads to flood the operator's log sink.
+  Mitigation is at the receiver layer: per-IP rate limit, schema
+  validation (reject reports whose `original-policy` doesn't match
+  the deployed CSP), structured-log sampling. Out of scope for the
+  page bytes; documented as part of the receiver-shape spec.
 - **CSS data exfiltration via attribute selectors.** With `style-src
   'self' 'unsafe-inline'`, an attacker who manages to inject CSS
   (e.g. through a hypothetical future `<style>` tag injection that
@@ -1889,14 +2005,16 @@ network egress against an active operator's browser session.
 ### Anti-drift
 
 - `tools/playground-csp-check.sh` (CI mode) re-asserts the CSP
-  directives, the `app.js` SRI hash, and the wasm-bindgen-glue
-  TT-compat audit on every run.
+  directives, the `app.js` SRI hash, the wasm-bindgen-glue TT-compat
+  audit, AND (V1.16 Welle B) the `report-uri` declaration + same-
+  origin shape on every run.
 - `apps/wasm-playground/app.js:1-19` documents the sink discipline
   (`textContent`, `className`, `style.display` only). A reviewer
   introducing `innerHTML` / `eval` / `new Function` / `setTimeout(str)`
   / `*.src = userInput` should see this file header first.
-- `apps/wasm-playground/index.html:7-69` documents each CSP directive
-  inline so the policy is not a magic string.
+- `apps/wasm-playground/index.html:7-103` documents each CSP directive
+  inline (including `report-uri` rationale) so the policy is not a
+  magic string.
 - **SRI foot-gun mitigation.** Editing `app.js` without re-running
   `tools/playground-csp-check.sh --update-sri` produces a silent
   page-load failure on the next browser visit (the new bytes don't
@@ -1926,11 +2044,15 @@ scope-d is delivery-side hardening. It composes with — does not replace
 | V1.14 Scope E SLSA L3 OIDC provenance | npm tarball bytes ↔ Git commit | npm-registry compromise |
 | V1.15 Welle B GH-Releases backup | second tarball channel | npm-registry outage |
 | V1.15 Welle C consumer pinning | lockfile integrity hash | local install drift |
-| **V1.16 scope-d CSP + SRI + TT** | **playground `app.js` bytes + browser sink discipline** | **UI-side injection in a hosted deployment** |
+| **V1.16 scope-d (Welle A) CSP + SRI + TT** | **playground `app.js` bytes + browser sink discipline** | **UI-side injection in a hosted deployment** |
+| **V1.16 scope-d (Welle B) `report-uri`** | **post-block visibility into CSP violations** | **silent in-prod CSP failures (XSS attempts, accidental sink introduction, mis-config)** |
 
 Each layer guards a different boundary; an attacker has to defeat all
-five to land a forged-trace-as-valid result against an operator using
-the playground.
+six to land a forged-trace-as-valid result against an operator using
+the playground. Welle B doesn't pin a new attack-surface boundary in
+the verifier; it pins *visibility* — without it, the other layers fire
+silently and operators have no incident-detection signal from the
+browser side.
 
 The verifier crates (`atlas-trust-core`, `atlas-verify-cli`,
 `atlas-verify-wasm`, `atlas-signer`) are licensed Apache-2.0. An auditor

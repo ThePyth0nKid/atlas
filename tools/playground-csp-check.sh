@@ -2,8 +2,8 @@
 #
 # tools/playground-csp-check.sh
 #
-# V1.16 Welle A — anti-drift validator for the wasm-playground browser
-# hardening posture.
+# V1.16 Welle A + Welle B — anti-drift validator for the wasm-playground
+# browser hardening posture.
 #
 # What this script enforces (CI mode, default):
 #   1. apps/wasm-playground/index.html ships a Content-Security-Policy
@@ -15,6 +15,11 @@
 #      AND `trusted-types 'none'`).
 #   4. The <script type="module" src="app.js" integrity="sha384-...">
 #      SRI hash matches the actual sha384 of apps/wasm-playground/app.js.
+#   5. (V1.16 Welle B) The CSP declares a `report-uri` for violation
+#      reporting, and that URI is same-origin (a relative path or starts
+#      with /). A cross-origin reporting endpoint is not a hard fail —
+#      it just downgrades report fidelity (browsers send opaque-response
+#      reports cross-origin) and creates a new vendor dependency. We WARN.
 #
 # Operator workflow:
 #   - After editing app.js, run with --update-sri to refresh the hash.
@@ -81,7 +86,14 @@ if [ "$UPDATE_SRI" -eq 1 ]; then
   # the `=` matches padding which only appears at end of base64 strings
   # but the `+` quantifier accepting it mid-string is harmless because
   # invalid base64 won't appear in the input.
-  TMP=$(mktemp)
+  #
+  # mktemp in the SAME directory as INDEX_HTML so the final `mv` is
+  # atomic on the same filesystem (rename(2)). Using $TMPDIR (the default)
+  # could land on a tmpfs / different filesystem, where `mv` falls back to
+  # copy-then-unlink — opens a TOCTOU window where a symlinked attacker
+  # path could replace the destination. Same-dir mktemp closes that.
+  # (security-reviewer L4 fix.)
+  TMP=$(mktemp "${INDEX_HTML}.tmp.XXXXXX")
   awk -v new="$ACTUAL_INTEGRITY" '
     /src="app\.js"/ {
       sub(/integrity="sha(256|384|512)-[A-Za-z0-9+\/=]+"/, "integrity=\"" new "\"")
@@ -215,6 +227,56 @@ else
   echo "  note: pkg/atlas_verify_wasm.js absent — wasm-bindgen TT-compat audit skipped (run \`wasm-pack build\` to populate)"
 fi
 
+# --- report-uri validation (V1.16 Welle B) ----------------------------
+# CSP `report-uri <url>` directs browsers to POST a JSON report (Content-
+# Type: application/csp-report) to <url> on every violation. Without this
+# directive, violations are silent in production: the browser blocks the
+# violation but no operator sees the report. Welle B mandates report-uri.
+#
+# We assert (a) the directive is present, and (b) the URL is same-origin
+# (a relative path or starts with `/`). Cross-origin reporting endpoints
+# are technically allowed by the spec but downgrade report fidelity
+# (opaque-response cross-origin) and introduce a vendor dependency that
+# breaks the page-bytes-portability win — we WARN, not fail.
+REPORT_URI=$(printf '%s\n' "$CSP" | grep -oE "report-uri[[:space:]]+[^;]+" | sed -E 's/^report-uri[[:space:]]+//' | head -n1 || true)
+REPORT_URI_FIRST=""
+if [ -z "$REPORT_URI" ]; then
+  fail "CSP must declare \`report-uri <url>\` (V1.16 Welle B — silent CSP violations are not acceptable in production)"
+else
+  # Strip optional surrounding whitespace, take first token if multiple.
+  REPORT_URI_FIRST=$(printf '%s\n' "$REPORT_URI" | awk '{print $1}')
+  case "$REPORT_URI_FIRST" in
+    //*)
+      # Schemeless protocol-relative URL like //attacker/csp — browsers
+      # treat this as absolute (scheme inherited from page). MUST NOT be
+      # silently accepted as same-origin. (code-reviewer M2 fix.)
+      echo "  WARN: report-uri ($REPORT_URI_FIRST) is a protocol-relative URL — browsers"
+      echo "        treat this as absolute with the page scheme, directing reports to a"
+      echo "        third-party host. Recommend an absolute same-origin path like /csp-report."
+      ;;
+    /*)
+      # Same-origin absolute path — the desired Welle B shape.
+      :
+      ;;
+    http://*|https://*)
+      echo "  WARN: report-uri is cross-origin ($REPORT_URI_FIRST). Two costs:"
+      echo "        (1) browsers send opaque-response reports cross-origin (lower fidelity)"
+      echo "            with several fields stripped to prevent fingerprinting;"
+      echo "        (2) the chosen reporting vendor is now publicly disclosed in the page"
+      echo "            CSP (HTML source is world-readable) — an information disclosure"
+      echo "            about the operator's monitoring infrastructure."
+      echo "        And a third-party endpoint introduces a vendor dependency that breaks the"
+      echo "        page-bytes-portability win of meta-tag-delivered CSP."
+      echo "        Recommend a same-origin /<path> instead."
+      ;;
+    *)
+      echo "  WARN: report-uri ($REPORT_URI_FIRST) is neither an absolute path nor an absolute URL —"
+      echo "        relative paths resolve against the current document URL, which is fragile under"
+      echo "        nested-path serving. Recommend an absolute same-origin path like /csp-report."
+      ;;
+  esac
+fi
+
 # --- frame-ancestors meta-tag warning (security-reviewer F-2) ---------
 # `frame-ancestors` is meta-tag-ignored by every major browser (only
 # enforced when delivered as an HTTP header). The CSP declares it for
@@ -239,4 +301,7 @@ echo "  CSP directives intact (meta-delivered)"
 echo "  SRI matches: $ACTUAL_INTEGRITY"
 if [ -f "$PKG_GLUE" ]; then
   echo "  wasm-bindgen glue: TT-sink-free"
+fi
+if [ -n "$REPORT_URI_FIRST" ]; then
+  echo "  report-uri: $REPORT_URI_FIRST"
 fi
