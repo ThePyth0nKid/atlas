@@ -1,0 +1,109 @@
+# V1.17 Welle C — Trust-Root Mutation Defence workflow.
+#
+# Closes the F-5b threat (Welle B addressed F-5/F-5a): a compromised
+# maintainer GitHub PAT or repo-takeover that *mutates the trust root
+# itself*. Without this gate, an attacker can:
+#   1. push commit modifying .github/allowed_signers (adds attacker key),
+#   2. create a `v*` tag signed with the attacker key,
+#   3. verify-tag-signatures.yml uses the NEW (mutated) trust root,
+#   4. attacker key is "trusted" — verify-tag passes,
+#   5. wasm-publish.yml first-step gate ALSO uses the NEW trust root,
+#   6. publish fires; smuggled bytes ship to npm.
+#
+# This workflow breaks step (1) by requiring any commit modifying a
+# trust-root-protected file to itself be signed by a key in the OLD
+# trust root (i.e. `.github/allowed_signers` AS IT EXISTED AT THE PR
+# BASE). The "old" semantic is the entire defence: it closes the
+# bootstrap-attack vector where the malicious commit adds the attacker
+# key in the same commit that relies on it.
+#
+# Trigger choice: pull_request (NOT pull_request_target).
+#
+#   * pull_request runs the workflow file FROM THE BASE BRANCH (master).
+#     An attacker modifying this workflow inside their PR cannot change
+#     which logic runs against their PR — the master-branch version of
+#     this file is what GitHub Actions executes.
+#   * pull_request_target would also run from base branch but with
+#     write-permission tokens; we don't need writes, and pull_request_target
+#     is the famous "pwn request" footgun. Avoided.
+#   * push (to master) is NOT covered here — that path requires
+#     branch-protection-no-direct-push (operator-side, see
+#     docs/OPERATOR-RUNBOOK.md §14). Document the operator dependency
+#     rather than try to defend a push event from inside a workflow
+#     whose own definition would be loaded from the pushed commit.
+#
+# Trust posture: SHA-pinned `actions/checkout` (not the mutable `@v4`
+# tag). Same rationale as verify-tag-signatures.yml — this workflow
+# enforces supply-chain hygiene; depending on a mutable tag for the
+# workflow that enforces the trust-root would be self-undermining.
+
+name: verify-trust-root-mutations
+
+on:
+  pull_request:
+    branches:
+      - master
+    # Fire on every PR to master, not just PRs that touch the protected
+    # surface. The script no-ops in <1s when there's nothing to verify,
+    # and "always green" is a clearer required-status-check semantic
+    # than "sometimes-skipped". Branch-protection rules can require
+    # this check name unconditionally.
+
+# Minimum permissions. We only read commits + the allowed_signers file
+# at the merge-base; we don't write anywhere. Explicit `contents: read`
+# overrides any repository-level default that might be more permissive.
+permissions:
+  contents: read
+
+jobs:
+  verify-trust-root:
+    name: Verify trust-root-modifying commits
+    runs-on: ubuntu-latest
+    steps:
+      # SHA-pinned. v4.2.2 = `11bd71901bbe5b1630ceea73d27597364c9af683`.
+      # `fetch-depth: 0` is required to compute merge-base + walk the PR
+      # commit range. `ref: ${{ github.event.pull_request.head.sha }}`
+      # checks out the PR head (NOT the GitHub-synthesised merge commit
+      # at refs/pull/N/merge), so verify-commit sees the actual commits
+      # the contributor signed.
+      - name: Checkout (full history at PR head)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      # Diagnostic surface — if a CI run fails, the trust-root state at
+      # the PR base is the first thing an investigator wants to see.
+      # This step produces that snapshot whether or not verification
+      # succeeds, so the diagnostic is preserved even on failure.
+      - name: Show trust-root state at PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -eu
+          echo "=== Trust-root state at PR base ${BASE_SHA:0:12} ==="
+          if git show "${BASE_SHA}:.github/allowed_signers" >/dev/null 2>&1; then
+            COUNT=$(git show "${BASE_SHA}:.github/allowed_signers" | grep -v -c -E '^[[:space:]]*(#|$)' || true)
+            HASH=$(git show "${BASE_SHA}:.github/allowed_signers" | sha256sum | awk '{print $1}')
+            echo "  signer entries at base: ${COUNT}"
+            echo "  file sha256 at base:    ${HASH}"
+          else
+            echo "  <missing — bootstrap mode, all changes accepted>"
+          fi
+          echo ""
+          echo "=== PR commit range ==="
+          echo "  base: ${BASE_SHA:0:12}"
+          echo "  head: ${{ github.event.pull_request.head.sha }}"
+          echo "  commits in range: $(git rev-list --count "${BASE_SHA}..${{ github.event.pull_request.head.sha }}" 2>/dev/null || echo '<error>')"
+
+      # Defence-in-depth even though the script's CI containment guard
+      # would catch a malicious env-var override anyway. Strip the env
+      # before invoking, so a compromised earlier step (in some future
+      # workflow refactor that adds steps before this one) cannot
+      # redirect verification via $GITHUB_ENV.
+      - name: Verify trust-root-modifying commits
+        run: |
+          unset ATLAS_TRUST_ROOT_BASE ATLAS_TRUST_ROOT_HEAD
+          bash tools/verify-trust-root-mutations.sh \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}"

@@ -68,11 +68,23 @@ jobs:
       # `fetch-depth: 0` is required so all tags + their target commits
       # are present locally; the default shallow clone has neither.
       # `fetch-tags: true` is belt-and-suspenders for the same goal.
+      #
+      # On `pull_request` events, default checkout is the PR head — but
+      # the PR head's `.github/allowed_signers` is the PROPOSED (not yet
+      # trusted) version. If a PR adds an attacker key to the trust
+      # root, default-checkout would let the workflow verify v* tags
+      # AGAINST the attacker's proposed trust root, producing a
+      # misleading green signal even though Welle C would block the
+      # merge. Pin the PR-mode verification to the BASE branch's trust
+      # root (master at PR creation time) so this workflow's PR signal
+      # reflects the EXISTING trust root, not the proposed one. (Welle C
+      # is the authority for whether the proposed trust root is valid.)
       - name: Checkout (full history + all tags)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           fetch-depth: 0
           fetch-tags: true
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}
 
       # Sanity-print so a CI log on a quiet day still confirms the
       # verification ran against the expected trust root rather than

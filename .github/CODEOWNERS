@@ -1,0 +1,80 @@
+# V1.17 Welle C — code review requirement on trust-root-protected surfaces.
+#
+# This file works WITH GitHub branch protection rules. CODEOWNERS by
+# itself only auto-requests review; it does not REQUIRE the reviewer's
+# approval for merge unless the branch protection rule "Require review
+# from Code Owners" is enabled on the protected branch (master).
+#
+# Without the branch-protection setting, this file is documentary only
+# (still useful — surfaces the right reviewer in the GitHub UI) but
+# does NOT add an enforced gate. See docs/OPERATOR-RUNBOOK.md §14 for
+# the operator-side branch-protection configuration that promotes this
+# from documentary to enforcing.
+#
+# Why CODEOWNERS in addition to verify-trust-root-mutations.yml:
+#   * Defence-in-depth. The workflow gate proves cryptographically that
+#     a commit modifying the trust root is signed by an allowed key —
+#     i.e. it answers "did a maintainer sign this?". CODEOWNERS adds a
+#     human review requirement: "did a SECOND maintainer audit this?"
+#     A PAT compromise typically gets the attacker exactly one
+#     authenticated identity; two-maintainer review forces them to
+#     compromise two independent identities to merge a malicious change
+#     to the trust root.
+#   * Surfaces the right reviewer in the GitHub UI even without
+#     branch-protection enforcement. A maintainer browsing PRs sees the
+#     trust-root surface flagged.
+#
+# Format: <path-glob> <space> <@user-or-team>
+# GitHub uses last-match-wins semantics: a later line overrides an
+# earlier matching line for the same path. Order matters.
+
+# ----------------------------------------------------------------------
+# Trust-root surfaces (V1.17 Welle B + Welle C).
+#
+# Mirror of PROTECTED_SURFACE in tools/verify-trust-root-mutations.sh.
+# Any change to one list should be reflected in the other; the test
+# harness asserts the lists agree.
+# ----------------------------------------------------------------------
+
+# The trust root itself.
+/.github/allowed_signers @ThePyth0nKid
+
+# This file (mutating CODEOWNERS could remove review requirements).
+/.github/CODEOWNERS @ThePyth0nKid
+
+# Tag-signing enforcement workflow (V1.17 Welle B).
+/.github/workflows/verify-tag-signatures.yml @ThePyth0nKid
+
+# Trust-root mutation defence workflow (V1.17 Welle C — this defence).
+/.github/workflows/verify-trust-root-mutations.yml @ThePyth0nKid
+
+# Publish workflow (has the inline first-step verify-tag gate).
+/.github/workflows/wasm-publish.yml @ThePyth0nKid
+
+# Tag-signing setup helper (could be modified to weaken key-type
+# allow-list checks).
+/tools/setup-tag-signing.sh @ThePyth0nKid
+
+# Anti-drift harnesses — silent disablement would leak future trust-
+# root regressions through CI undetected. Gating modifications keeps
+# the harness signal honest.
+/tools/test-tag-signatures.sh @ThePyth0nKid
+/tools/test-trust-root-mutations.sh @ThePyth0nKid
+
+# Tag-signing verifier (could be modified to skip verification).
+/tools/verify-tag-signatures.sh @ThePyth0nKid
+
+# Trust-root mutation verifier (could be modified to skip verification).
+/tools/verify-trust-root-mutations.sh @ThePyth0nKid
+
+# ----------------------------------------------------------------------
+# Composite action (V1.17 Welle A — verify-wasm-pin-check).
+#
+# Downstream-consumer-facing action: not in the npm publish path, but
+# tampering with its scripts (e.g. neutering `check-provenance.sh` to
+# silently exit 0) would silently revoke the Layer-3 trust guarantee
+# for every consumer running the action in their CI. Gating the
+# subtree closes that gap. Mirror of PROTECTED_PREFIXES in the
+# verifier script.
+# ----------------------------------------------------------------------
+/.github/actions/verify-wasm-pin-check/ @ThePyth0nKid
