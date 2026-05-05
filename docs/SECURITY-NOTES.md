@@ -1866,19 +1866,43 @@ network egress against an active operator's browser session.
      ```
    - **Response:** `204 No Content` (browsers ignore the body; status
      code only matters for server-side log noise reduction).
+   > ⚠️ **READ THIS FIRST — ATTACKER-CONTROLLED FIELDS.** An XSS
+   > attacker who triggers a CSP violation *chooses* the values that end
+   > up in `blocked-uri`, `script-sample`, `document-uri` (query string
+   > / fragment), `referrer`, and even `violated-directive` (when a
+   > `style-src` violation occurs in a context an attacker controls).
+   > The browser does NOT sanitise these — it forwards them verbatim.
+   > A naive receiver that pipes the raw report body into:
+   >
+   > - a monitoring dashboard rendering `blocked-uri` as `<a href>` →
+   >   stored XSS in the operator's own UI.
+   > - a templating engine without per-field escaping → stored XSS
+   >   wherever the template is consumed.
+   > - a terminal-rendered log (`tail -f`, `journalctl`, container log
+   >   viewers) → ANSI-escape injection (`\x1b[…m` sequences from a
+   >   crafted `script-sample` can rewrite the operator's terminal).
+   > - a webhook / Slack / email forwarder → cross-system injection.
+   >
+   > Treat ALL fields below as opaque untrusted strings. Escape per
+   > sink. Strip ANSI control characters before any terminal-rendered
+   > log write. Do NOT URL-follow `blocked-uri`. Do NOT render
+   > `script-sample` as HTML anywhere.
+
    - **Recommended receiver behaviour:**
 
      | Requirement | Rationale |
      |---|---|
+     | Treat ALL report fields as ATTACKER-CONTROLLED (see callout above) | XSS attacker chooses `blocked-uri`/`script-sample`/`document-uri` query string/`referrer`. Stored XSS in operator's monitoring UI is the dominant failure mode. ANSI-escape injection on terminal-rendered logs is the secondary one. |
+     | Validate the `Origin` request header server-side (genuine browser CSP POSTs send `Origin` matching the page origin) | Independent of the report body, gives a receiver-side anchor that doesn't rely on trusting attacker-controlled JSON. Drop POSTs whose `Origin` is absent or mismatched. Closes the cross-origin spoofing case `original-policy` validation alone misses. |
      | Accept ONLY `Content-Type: application/csp-report` or `application/json` | Block CSV/text/etc. payloads from naive forging. |
      | Enforce a body-size cap (≤ 64 KB before parse) | Browser-sent reports are a few KB; uncapped POSTs are a flood vector. |
-     | Schema-validate `original-policy` against the deployed CSP | Reject reports whose claimed policy doesn't match — the simplest forgery filter. |
+     | Schema-validate `original-policy` against the deployed CSP | Reject reports whose claimed policy doesn't match — a second forgery filter behind `Origin`. |
      | Schema-validate `document-uri` origin against the expected playground origin | Closes the "same-origin attacker forges with valid `original-policy`" subcase the policy match alone misses. |
      | Per-IP rate limit (drop after N reports/sec) | A compromised page or direct POST can spam reports. |
-     | Append-only log, one JSON line per report, server-timestamp prefix | Cheap to operate; analysable with grep/jq. |
-     | NEVER reflect any report field into a response header or body | A reflected `document-uri` / `referrer` becomes a response-header / response-body injection. Receivers should return `204 No Content` with an empty body. |
-     | Treat `blocked-uri` and `script-sample` as ATTACKER-CONTROLLED | An XSS attacker who triggers the violation chooses these values. They MUST be logged as opaque strings — do NOT URL-follow `blocked-uri`, do NOT render `script-sample` as HTML in a monitoring dashboard, do NOT pass either to a templating engine without escaping. Naive log UIs that render `blocked-uri` as a hyperlink are vulnerable to stored XSS in the operator's own monitoring tool. |
-     | `document-uri` may carry query-string params | Strip or hash query strings server-side before persisting if the playground URL is ever expected to carry secrets. (Current playground URL is static — residual risk zero today; documented for future maintainers.) |
+     | Append-only log, one JSON line per report, server-timestamp prefix | Cheap to operate; analysable with grep/jq. After ANSI-stripping per the callout. |
+     | Respond with `204 No Content` and EMPTY body, NO custom response headers | Any reflected request data — body OR headers (e.g. echoing `Content-Type`, setting `Location` from a report field) — becomes an injection sink. Emit only `Content-Length: 0`. |
+     | NEVER reflect any report field into a response header, response body, log search facet, or downstream forwarder without per-sink escaping | The "treat as attacker-controlled" rule is per-sink, not per-receiver. |
+     | `document-uri` may carry query-string params and fragments | Strip or hash query strings + fragments server-side before persisting if the playground URL is ever expected to carry secrets. (Current playground URL is static — residual risk zero today; documented for future maintainers.) |
 
    **Operator-deployment options (any of these works):**
 

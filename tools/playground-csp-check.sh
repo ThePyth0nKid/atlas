@@ -245,7 +245,12 @@ if [ -z "$REPORT_URI" ]; then
 else
   # Strip optional surrounding whitespace, take first token if multiple.
   REPORT_URI_FIRST=$(printf '%s\n' "$REPORT_URI" | awk '{print $1}')
-  case "$REPORT_URI_FIRST" in
+  # RFC 3986 §3.1 specifies scheme names as case-insensitive — coerce to
+  # lowercase before the case-arm dispatch so `HTTP://` / `Https://` /
+  # `HTTPS://` hit the cross-origin arm rather than slipping through to
+  # the catch-all relative-path FAIL with a misleading message.
+  REPORT_URI_FIRST_LC=$(printf '%s' "$REPORT_URI_FIRST" | tr '[:upper:]' '[:lower:]')
+  case "$REPORT_URI_FIRST_LC" in
     //*)
       # Schemeless protocol-relative URL like //attacker/csp — browsers
       # treat this as absolute (scheme inherited from page). MUST NOT be
@@ -270,9 +275,17 @@ else
       echo "        Recommend a same-origin /<path> instead."
       ;;
     *)
-      echo "  WARN: report-uri ($REPORT_URI_FIRST) is neither an absolute path nor an absolute URL —"
-      echo "        relative paths resolve against the current document URL, which is fragile under"
-      echo "        nested-path serving. Recommend an absolute same-origin path like /csp-report."
+      # Catch-all: relative bare-word path like `csp-report` (no leading
+      # slash). The header-comment intent for check-5 is "absolute same-
+      # origin path"; relative paths resolve against the current document
+      # URL — under nested-path serving (e.g. `/playground/v2/`) the
+      # browser would POST to `/playground/v2/csp-report`, not to
+      # `/csp-report`. This is a hard FAIL, not a WARN, because the
+      # validator's promise is that a passing CSP correctly directs
+      # reports to a same-origin endpoint. (Final-pass review fix —
+      # closes the WARN-vs-FAIL inconsistency the security-reviewer
+      # flagged.)
+      fail "report-uri ($REPORT_URI_FIRST) is neither an absolute path (/...) nor an absolute URL (http(s)://...). Relative paths resolve against the document URL and are fragile under nested-path serving. Use an absolute same-origin path like /csp-report."
       ;;
   esac
 fi
