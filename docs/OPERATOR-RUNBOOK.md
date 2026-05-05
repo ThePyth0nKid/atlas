@@ -2384,6 +2384,33 @@ configuration uses
      produce SSH-signed commits with a key in the in-repo trust
      root, which they don't have.
 
+`require_last_push_approval` MUST also be `false` for solo-maintainer.
+GitHub interprets `true` as "the last pusher cannot be the same
+person who provides approval"; with a single maintainer that
+condition is never satisfiable, so every PR is blocked-forever
+regardless of `required_approving_review_count`. The Atlas
+configuration uses `pull_request.require_last_push_approval: false`.
+
+**Required-status-check context-name format gotcha.** The string you
+enter as a required status check MUST match the *job name* GitHub
+Actions reports the check-run under — typically just the job name
+(e.g. `Verify trust-root-modifying commits`), NOT the
+`<workflow-name> / <job-name>` form (e.g. `verify-trust-root-
+mutations / Verify trust-root-modifying commits`). The classic
+branch-protection UI sometimes auto-suggests the
+`workflow-name / job-name` form, but the Ruleset behaviour is
+context-name-must-equal-the-reported-check-name. A mismatch leaves
+the required check perpetually "expected" even when it has run
+green, blocking merge. Verify with:
+
+```bash
+gh api repos/ThePyth0nKid/atlas/commits/<sha>/check-runs | \
+  jq -r '.check_runs[].name'
+```
+
+— and use the exact strings that come back as the required-check
+contexts in the Ruleset.
+
 **Side-effect to be aware of:** PROTECTED_SURFACE files (the 10
 entries in `tools/verify-trust-root-mutations.sh`'s
 `PROTECTED_SURFACE` array + the `.github/actions/verify-wasm-pin-
