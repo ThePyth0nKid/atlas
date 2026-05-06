@@ -151,10 +151,42 @@ jobs:
             --pin "${SOFTHSM2_PIN}" \
             --so-pin "${SOFTHSM2_SO_PIN}"
           # Capture the assigned slot id for the test runtime env.
+          # SoftHSM2 pads the Label field with trailing whitespace to a
+          # fixed column width, so the prior `Label:[[:space:]]+...$`
+          # regex stopped matching once the runner image picked up a
+          # SoftHSM2 build that emits the padding (regression observed
+          # on master 2026-05-04). The label is also passed via `awk -v`
+          # rather than shell-interpolated into the awk script, so a
+          # future label string containing awk-special characters
+          # cannot break the parser. Match shape: capture the slot id
+          # from `^Slot N` headers; on any line containing `Label:`,
+          # strip the leading `…Label:<spaces>` prefix + trailing
+          # whitespace, then exact-compare to the configured label.
           SLOT_ID=$(softhsm2-util --show-slots \
-            | awk '/^Slot [0-9]+/{slot=$2} /Label:[[:space:]]+'"${SOFTHSM2_TOKEN_LABEL}"'$/{print slot; exit}')
+            | awk -v label="${SOFTHSM2_TOKEN_LABEL}" '
+                /^Slot [0-9]+/ { slot = $2 }
+                /Label:[[:space:]]+/ {
+                  line = $0
+                  sub(/^[[:space:]]*Label:[[:space:]]+/, "", line)
+                  sub(/[[:space:]]+$/, "", line)
+                  if (line == label) { print slot; exit }
+                }')
           if [ -z "${SLOT_ID}" ]; then
             echo "FATAL: could not resolve slot id for token ${SOFTHSM2_TOKEN_LABEL}"
+            softhsm2-util --show-slots
+            exit 1
+          fi
+          # Defence-in-depth: require SLOT_ID to be a string of decimal
+          # digits before exporting it via $GITHUB_ENV. Without this
+          # check, a tampered `softhsm2-util` binary could emit a Slot
+          # header line containing a literal newline in the second
+          # whitespace-delimited field, which awk's `$2` would faithfully
+          # capture and `>> "$GITHUB_ENV"` would write as two lines —
+          # injecting an arbitrary key=value pair into the step
+          # environment for every subsequent step. Bash `[[ =~ ]]` is
+          # available in GitHub Actions' default shell on Linux runners.
+          if ! [[ "${SLOT_ID}" =~ ^[0-9]+$ ]]; then
+            echo "FATAL: SLOT_ID is not a non-negative integer: '${SLOT_ID}'"
             softhsm2-util --show-slots
             exit 1
           fi
