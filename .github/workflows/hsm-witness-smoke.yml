@@ -178,17 +178,21 @@ jobs:
             softhsm2-util --show-slots
             exit 1
           fi
-          # Defence-in-depth: require SLOT_ID to be a string of decimal
-          # digits before exporting it via $GITHUB_ENV. Without this
-          # check, a tampered `softhsm2-util` binary could emit a Slot
-          # header line containing a literal newline in the second
+          # Defence-in-depth: require SLOT_ID to be a short string of
+          # decimal digits before exporting it via $GITHUB_ENV. Without
+          # this check, a tampered `softhsm2-util` binary could emit a
+          # Slot header line containing a literal newline in the second
           # whitespace-delimited field, which awk's `$2` would faithfully
           # capture and `>> "$GITHUB_ENV"` would write as two lines —
           # injecting an arbitrary key=value pair into the step
-          # environment for every subsequent step. Bash `[[ =~ ]]` is
-          # available in GitHub Actions' default shell on Linux runners.
-          if ! [[ "${SLOT_ID}" =~ ^[0-9]+$ ]]; then
-            echo "FATAL: SLOT_ID is not a non-negative integer: '${SLOT_ID}'"
+          # environment for every subsequent step. The `{1,10}` magnitude
+          # bound rejects pathologically long all-digit strings before
+          # they reach the env file (PKCS#11 slot ids are 32-bit
+          # unsigned per CK_SLOT_ID; max is 4294967295, exactly 10
+          # digits). Bash `[[ =~ ]]` is available in GitHub Actions'
+          # default shell on Linux runners.
+          if ! [[ "${SLOT_ID}" =~ ^[0-9]{1,10}$ ]]; then
+            echo "FATAL: SLOT_ID failed digit/length validation"
             softhsm2-util --show-slots
             exit 1
           fi
@@ -264,10 +268,30 @@ jobs:
           # Extractable=false / Derive=false on EC private keys; the
           # runbook reminds operators to verify these via attribute
           # readback on production HSMs.
+          # The OPERATOR-RUNBOOK §11 commissioning shape originally used
+          # `--pin-source env:USER_PIN` (opensc 0.21+), which keeps the
+          # PIN out of argv. Newer opensc-pkcs11-tool builds (the one in
+          # the ubuntu-latest runner image as of 2026-05-04) dropped
+          # `--pin-source` entirely. We evaluated `--pin-file <path>` as
+          # the natural successor (it is the equivalent of softhsm2-util's
+          # `--pin-file`, used elsewhere in this lane) — but upstream
+          # OpenSC `pkcs11-tool` does NOT expose a `--pin-file` flag at
+          # all (verified against the OpenSC master src/tools/pkcs11-tool.c
+          # 2026-05-06; only `--pin`, `--so-pin`, `--puk`, `--new-pin`
+          # accept arg-line values, with the source warning "if used in
+          # scripts: careful!"). So `--pin "${USER_PIN}"` is the only
+          # available shape. The PIN now appears on argv readable via
+          # /proc/<pid>/cmdline for the lifetime of the one-shot
+          # pkcs11-tool process — same threat-model class as the
+          # `softhsm2-util --init-token --pin` call in the prior step
+          # (single-tenant CI runner, throwaway literal PIN, exposure
+          # ends with the one-shot process exit). `set +x` at the top
+          # of this step is the load-bearing guard against the PIN
+          # landing in the run log.
           export USER_PIN="${SOFTHSM2_PIN}"
           pkcs11-tool --module "${ATLAS_WITNESS_HSM_PKCS11_LIB}" \
                       --slot "${ATLAS_WITNESS_HSM_SLOT}" \
-                      --login --pin-source env:USER_PIN \
+                      --login --pin "${USER_PIN}" \
                       --keypairgen \
                       --key-type EC:edwards25519 \
                       --label "atlas-witness-key-v1:${CLI_SMOKE_WITNESS_KID}" \
@@ -326,16 +350,26 @@ jobs:
           # ephemeral, but a successful cleanup keeps the token
           # state honest if a future edit shares the runner across
           # jobs.
+          # See the keypairgen step above for the rationale on
+          # `--pin "${USER_PIN}"` vs `--pin-source env:USER_PIN`.
+          # Scope-of-`set +x`: this cleanup block lives inside the SAME
+          # `run:` shell as the keypairgen above, so the `set +x` at the
+          # top of this step still suppresses xtrace here. If a future
+          # editor splits this cleanup into its own `- name:` step, the
+          # new step will start with `set -e` only and a fresh xtrace
+          # state — re-add `set +x` as the absolute first line there
+          # before the `--pin` argv would otherwise leak into the run
+          # log under `RUNNER_DEBUG=1`.
           export USER_PIN="${SOFTHSM2_PIN}"
           pkcs11-tool --module "${ATLAS_WITNESS_HSM_PKCS11_LIB}" \
                       --slot "${ATLAS_WITNESS_HSM_SLOT}" \
-                      --login --pin-source env:USER_PIN \
+                      --login --pin "${USER_PIN}" \
                       --delete-object --type privkey \
                       --label "atlas-witness-key-v1:${CLI_SMOKE_WITNESS_KID}" \
                       || echo "warning: privkey cleanup failed (non-fatal on ephemeral runner)"
           pkcs11-tool --module "${ATLAS_WITNESS_HSM_PKCS11_LIB}" \
                       --slot "${ATLAS_WITNESS_HSM_SLOT}" \
-                      --login --pin-source env:USER_PIN \
+                      --login --pin "${USER_PIN}" \
                       --delete-object --type pubkey \
                       --label "atlas-witness-key-v1:${CLI_SMOKE_WITNESS_KID}" \
                       || echo "warning: pubkey cleanup failed (non-fatal on ephemeral runner)"

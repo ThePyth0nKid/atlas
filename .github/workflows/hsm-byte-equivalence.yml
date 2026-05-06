@@ -176,17 +176,21 @@ jobs:
             softhsm2-util --show-slots
             exit 1
           fi
-          # Defence-in-depth: require SLOT_ID to be a string of decimal
-          # digits before exporting it via $GITHUB_ENV. Without this
-          # check, a tampered `softhsm2-util` binary could emit a Slot
-          # header line containing a literal newline in the second
+          # Defence-in-depth: require SLOT_ID to be a short string of
+          # decimal digits before exporting it via $GITHUB_ENV. Without
+          # this check, a tampered `softhsm2-util` binary could emit a
+          # Slot header line containing a literal newline in the second
           # whitespace-delimited field, which awk's `$2` would faithfully
           # capture and `>> "$GITHUB_ENV"` would write as two lines —
           # injecting an arbitrary key=value pair into the step
-          # environment for every subsequent step. Bash `[[ =~ ]]` is
-          # available in GitHub Actions' default shell on Linux runners.
-          if ! [[ "${SLOT_ID}" =~ ^[0-9]+$ ]]; then
-            echo "FATAL: SLOT_ID is not a non-negative integer: '${SLOT_ID}'"
+          # environment for every subsequent step. The `{1,10}` magnitude
+          # bound rejects pathologically long all-digit strings before
+          # they reach the env file (PKCS#11 slot ids are 32-bit
+          # unsigned per CK_SLOT_ID; max is 4294967295, exactly 10
+          # digits). Bash `[[ =~ ]]` is available in GitHub Actions'
+          # default shell on Linux runners.
+          if ! [[ "${SLOT_ID}" =~ ^[0-9]{1,10}$ ]]; then
+            echo "FATAL: SLOT_ID failed digit/length validation"
             softhsm2-util --show-slots
             exit 1
           fi
