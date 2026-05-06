@@ -965,18 +965,20 @@ and forget. The closure is a checkpoint:
    update with the new pin before resuming normal anchor verification.
    Pin-updates land in the active-shard fields
    `SIGSTORE_REKOR_V1.pem` / `SIGSTORE_REKOR_V1.tree_id_roster` per ADR-006
-   §5.2; the operator-side update protocol *will* live in
-   OPERATOR-RUNBOOK §15 once it is written (currently TBD per
-   ADR-006 §5.2 follow-on; OPERATOR-RUNBOOK ends at §14 today).
-   **Until §15 ships**, the closure condition for a pubkey-rotation /
+   §5.2; the operator-side update protocol lives in
+   [OPERATOR-RUNBOOK §15](OPERATOR-RUNBOOK.md) (shipped V1.18 Welle B (4)),
+   which prescribes the PR review requirements, golden-fixture
+   regeneration, and cross-version-anchor compatibility test for the
+   Atlas-side rotation. The closure condition for a pubkey-rotation /
    integrity-breach incident is: (a) the Sigstore Foundation has
    issued a post-mortem with concrete consumer-side actions, AND
    (b) Atlas has shipped a tagged release whose
    `SIGSTORE_REKOR_V1.pem` / `SIGSTORE_REKOR_V1.tree_id_roster` fields
-   match the values the Foundation post-mortem prescribes. Either
-   signal alone is insufficient. Verify (b) by reading the active
-   constants in `crates/atlas-trust-core/src/anchor.rs` at the
-   tagged-release commit and cross-referencing the post-mortem.
+   match the values the Foundation post-mortem prescribes (§15 step
+   8 PR is merged + tagged). Either signal alone is insufficient.
+   Verify (b) by reading the active constants in
+   `crates/atlas-trust-core/src/anchor.rs` at the tagged-release commit
+   and cross-referencing the post-mortem.
 
 ### 10.7 What §10 does NOT do
 

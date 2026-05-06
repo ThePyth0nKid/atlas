@@ -2636,6 +2636,55 @@ the audit ceremony — and the action's own pure-bash composite shape
 means the verifier itself does not become a supply-chain risk worth
 auditing (no opaque `dist/index.js` bundle, no transitive npm deps).
 
+### What scope-k does NOT close — single-issuer Sigstore dependency (forward-link to ADR-006)
+
+scope-k re-asserts the three §1 layers on every build, but it does
+not address the *upstream* single-point-of-failure that all three
+layers' Layer-3 leg shares: `npm audit signatures` traces every
+attestation back to `rekor.sigstore.dev` (the Sigstore Public Good
+Rekor v1 deployment), and there is no second issuer in the npm-
+published trust root to fall back on. A Rekor-side incident
+(integrity breach, planned root ceremony, extended outage) degrades
+Layer 3 of every scope-k invocation simultaneously — including the
+weekly `Mon 06:17 UTC` self-test cron.
+
+This residual exposure is **deliberately accepted** by
+[ADR-Atlas-006](ADR/ADR-Atlas-006-multi-issuer-sigstore-tracking.md)
+("Multi-issuer Sigstore — tracking, not adopting") on the basis that:
+
+  1. **Welle B SSH-signed tags are the primary release trust root**
+     — a consumer who only trusts Welle B (verifies the tag signature
+     with the keys in `.github/allowed_signers`) is unaffected by any
+     Sigstore incident. CONSUMER-RUNBOOK §6 documents the
+     reproduce-from-source fallback.
+  2. **Welle C trust-root mutation defence + operator-side Repository
+     Ruleset** ensures Welle B's SSH trust root cannot be silently
+     swapped, so the Welle B fallback is itself defended.
+  3. **Atlas anchor verification pins the Rekor v1 pubkey + tree-ID
+     directly in compiled code** — a Rekor-side rotation breaks
+     verification (defence-in-depth: false negatives are safer than
+     false positives); operator response is the inline-pin-update
+     protocol in [OPERATOR-RUNBOOK §15](OPERATOR-RUNBOOK.md), shipped
+     V1.18 Welle B (4) to close ADR-006 §5.2's TBD.
+  4. **A degraded-mode flag for Layer 3** (`SIGSTORE_DEGRADED_OK`)
+     was considered but deferred: see ADR-006 §5.3 for the open
+     threat-model problem (the naive "fresh liveness probe" defence
+     is defeatable by the same network-positioned adversary class
+     the feature would be meant to exclude). Until that ADR-Atlas-00X
+     follow-on lands, **Layer 3 is fail-closed under upstream Sigstore
+     unavailability** — operators face a binary choice between
+     skipping (CONSUMER-RUNBOOK §10 alt-path) or blocking the build.
+
+When ADR-006 §4 trigger conditions fire (Sigstore Foundation publishes
+a deployed second issuer; npm trust root gains the second issuer; or a
+Trigger-C incident occurs), scope-k will need to be extended to assert
+*both* issuers' attestations. That extension lands as a follow-on
+scope under whichever Atlas Vx.y wave adopts ADR-006 §6 multi-issuer
+support; the registry-shaped trust root in
+`crates/atlas-trust-core/src/anchor.rs` (`REKOR_ISSUERS = &[…]`,
+shipped V1.18 Welle B (2) per ADR-006 §5.1) makes the consumer-side
+extension a configuration change, not a structural rewrite.
+
 ### Anti-drift
 
 - **Self-test workflow** (`.github/workflows/verify-wasm-pin-check-self-test.yml`)
