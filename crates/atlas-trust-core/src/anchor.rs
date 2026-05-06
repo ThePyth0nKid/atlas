@@ -65,108 +65,149 @@ fn mock_log_pubkey_raw() -> [u8; 32] {
     out
 }
 
-/// PEM-encoded ECDSA P-256 SPKI public key for the public Sigstore Rekor
-/// v1 log (production deployment at `rekor.sigstore.dev`).
+/// A single Rekor issuer pinned in source: trust-root parameters for one
+/// distinct Rekor deployment that signs checkpoints with one key.
 ///
-/// Pinned in source because the entire Sigstore-anchoring trust property
-/// depends on this key. Provenance: the bytes were retrieved from
-/// `https://rekor.sigstore.dev/api/v1/log/publicKey` on 2026-04-28; an
-/// auditor can re-fetch and `diff` to confirm. The value is never
-/// modified at runtime.
+/// Why a struct instead of flat top-level constants (V1.18 Welle B (2)):
+/// the entire trust property is "this key + this origin + this tree-ID
+/// roster all belong together"; splitting them across loose constants
+/// invites a future edit that updates one and forgets another. ADR-006
+/// §5.1 also calls out that future Rekor v2 adoption (Trigger B) becomes
+/// a roster addition (`REKOR_ISSUERS = &[&SIGSTORE_REKOR_V1, &SIGSTORE_REKOR_V2]`)
+/// instead of a per-call branch through the verifier — so issuer-keyed
+/// dispatch is the right shape from the start.
 ///
-/// V1.7 trusts the active production log plus the two known historical
-/// Sigstore Rekor v1 shards (treeIDs `3904496407287907110` and
-/// `2605736670972794746`). All three shards sign with this same key —
-/// the only per-shard difference is the tree-ID embedded in the signed
-/// origin line — so adding shards is a roster widening, not a key
-/// rotation. See `SIGSTORE_REKOR_V1_TREE_IDS` for the enforced roster.
-pub const SIGSTORE_REKOR_V1_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwr\nkBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw==\n-----END PUBLIC KEY-----\n";
+/// All fields are `'static` so the type is auto-`Sync` and instances
+/// can live in `pub static` without a `LazyLock` wrapper. Derived caches
+/// (parsed key, log_id hash, key_id prefix) live in separate per-issuer
+/// `LazyLock`s alongside the issuer instance — keeping derivation logic
+/// out of the trust-root data avoids any chance of a const-eval rule
+/// change silently changing what the cached values resolve to.
+#[derive(Debug)]
+pub struct RekorIssuer {
+    /// Human-readable identifier used in error messages and tests.
+    /// Must be unique across `REKOR_ISSUERS` (a future test could pin
+    /// uniqueness; with a single issuer today it's structurally impossible
+    /// to violate).
+    pub name: &'static str,
 
-/// Active Trillian tree-ID for the Sigstore Rekor v1 production log.
-///
-/// Issuer-side constant: `atlas-signer anchor --rekor-url …` always
-/// posts to the active shard (Rekor's public API only accepts new
-/// entries on the active shard), so the value the issuer embeds in
-/// fresh `AnchorEntry.tree_id` rows is always this one.
-///
-/// Verifier-side acceptance is broader: see
-/// `SIGSTORE_REKOR_V1_TREE_IDS` for the roster of tree-IDs accepted by
-/// `verify_sigstore_rekor_v1`. Historical shards are accepted because
-/// their checkpoints — pre-existing on-disk anchors that an auditor
-/// may have captured years ago — were signed by this same key, just
-/// with a different `tree_id` baked into the C2SP origin line.
-pub const SIGSTORE_REKOR_V1_ACTIVE_TREE_ID: i64 = 1_193_050_959_916_656_506;
+    /// PEM-encoded SPKI public key. Atlas currently pins ECDSA P-256
+    /// across all known Sigstore Rekor v1 shards.
+    ///
+    /// Pinned in source because the entire Sigstore-anchoring trust
+    /// property for this issuer depends on this key. Provenance for
+    /// the V1 production deployment: bytes retrieved from
+    /// `https://rekor.sigstore.dev/api/v1/log/publicKey` on 2026-04-28;
+    /// an auditor can re-fetch and `diff` to confirm. Never modified
+    /// at runtime.
+    pub pem: &'static str,
 
-/// Roster of Sigstore Rekor v1 Trillian tree-IDs accepted by the
-/// verifier.
-///
-/// Index 0 is load-bearing: it must remain `SIGSTORE_REKOR_V1_ACTIVE_TREE_ID`
-/// so the issuer (which posts to the active shard) and the verifier (which
-/// accepts the active shard plus historical reads) cannot drift apart
-/// silently. The remaining indices are unordered membership entries —
-/// `is_known_sigstore_rekor_v1_tree_id` does linear scan, and the
-/// `sigstore_tree_id_roster_is_pinned` test enforces both the index-0
-/// invariant and the exact set.
-///
-/// Members:
-///   * `1_193_050_959_916_656_506` — active production shard (post-2024).
-///   * `3_904_496_407_287_907_110` — historical shard.
-///   * `2_605_736_670_972_794_746` — earliest historical shard.
-///
-/// Provenance for the historical IDs: Sigstore's public shard rotation
-/// history is published in the `sigstore/root-signing` repository (the
-/// TUF trust root, GitHub: <https://github.com/sigstore/root-signing>)
-/// and announced in Sigstore release blog posts. An auditor can confirm
-/// the values by inspecting that repository's published `targets`
-/// metadata for Rekor public-log shards. The Atlas crate pins them in
-/// source so a silent registry change cannot retroactively widen what
-/// this verifier trusts.
-///
-/// All three shards sign with `SIGSTORE_REKOR_V1_PEM`. The tree-ID is
-/// part of the C2SP signed-note origin line
-/// `"rekor.sigstore.dev - {tree_id}\n"`, so a checkpoint signed for
-/// shard A will not verify under origin B even with the right key —
-/// the verifier therefore must know which tree-IDs are legitimately
-/// part of the Sigstore Rekor v1 deployment to decide which origin to
-/// reconstruct. This roster encodes that knowledge.
-///
-/// Adding a new shard is intentionally a source change requiring a
-/// crate-version bump. Silent acceptance of unknown tree-IDs is
-/// exactly what the trust property forbids — an attacker who could
-/// stand up a same-key shard with a tree-ID we trust by default would
-/// have a forgery primitive against pre-existing anchors.
-pub const SIGSTORE_REKOR_V1_TREE_IDS: &[i64] = &[
-    SIGSTORE_REKOR_V1_ACTIVE_TREE_ID,
-    3_904_496_407_287_907_110,
-    2_605_736_670_972_794_746,
-];
+    /// Origin label embedded in the C2SP signed-note origin line —
+    /// e.g. `"rekor.sigstore.dev - {tree_id}\n"`. Identifies the
+    /// logical issuer the checkpoint belongs to (a checkpoint signed
+    /// with this key but a different origin label would still fail
+    /// verification because the reconstructed signed-bytes differ).
+    pub origin: &'static str,
 
-/// Membership test for the Sigstore Rekor v1 tree-ID roster.
-///
-/// `pub(crate)` because the canonical public surface is the constant
-/// `SIGSTORE_REKOR_V1_TREE_IDS` itself; external callers either inspect
-/// the slice directly or do their own membership check. Keeping this
-/// helper crate-private avoids cementing an internal sugar function in
-/// the public API.
-///
-/// Constant-time is not required here: the roster is a public list and
-/// timing leaks reveal nothing the attacker does not already know.
-/// Linear scan over 3 elements is faster than any hash-set lookup at
-/// this size and keeps the binary smaller.
-pub(crate) fn is_known_sigstore_rekor_v1_tree_id(tree_id: i64) -> bool {
-    SIGSTORE_REKOR_V1_TREE_IDS.contains(&tree_id)
+    /// Active Trillian tree-ID this issuer currently posts new entries
+    /// to. Issuer-side constant: `atlas-signer anchor --rekor-url …`
+    /// always posts to the active shard (Rekor's public API only accepts
+    /// new entries on the active shard), so the value the issuer embeds
+    /// in fresh `AnchorEntry.tree_id` rows is always this one.
+    ///
+    /// Verifier-side acceptance is broader: see `tree_id_roster` for
+    /// the full set of tree-IDs accepted. Historical shards are accepted
+    /// because their checkpoints — pre-existing on-disk anchors an auditor
+    /// may have captured years ago — were signed by the same `pem`,
+    /// just with a different `tree_id` baked into the C2SP origin line.
+    pub active_tree_id: i64,
+
+    /// Full roster of tree-IDs accepted under this issuer's `pem`.
+    ///
+    /// Index 0 is load-bearing: it MUST equal `active_tree_id` so the
+    /// issuer (which posts to the active shard) and the verifier (which
+    /// accepts the active shard plus historical reads) cannot drift apart
+    /// silently. The remaining indices are unordered membership entries —
+    /// `is_known_tree_id` does linear scan, and the per-issuer
+    /// `roster_is_pinned` test enforces both the index-0 invariant and
+    /// the exact set.
+    ///
+    /// V1 production members:
+    ///   * `1_193_050_959_916_656_506` — active production shard (post-2024).
+    ///   * `3_904_496_407_287_907_110` — historical shard.
+    ///   * `2_605_736_670_972_794_746` — earliest historical shard.
+    ///
+    /// Provenance for the historical IDs: Sigstore's public shard rotation
+    /// history is published in the `sigstore/root-signing` repository (the
+    /// TUF trust root, GitHub: <https://github.com/sigstore/root-signing>)
+    /// and announced in Sigstore release blog posts. An auditor can confirm
+    /// the values by inspecting that repository's published `targets`
+    /// metadata for Rekor public-log shards. The Atlas crate pins them in
+    /// source so a silent registry change cannot retroactively widen what
+    /// this verifier trusts.
+    ///
+    /// All shards in the roster sign with `pem`. The tree-ID is part of
+    /// the C2SP signed-note origin line `"<origin> - {tree_id}\n"`, so a
+    /// checkpoint signed for shard A will not verify under origin B even
+    /// with the right key — the verifier therefore must know which
+    /// tree-IDs are legitimately part of this issuer's deployment to
+    /// decide which origin to reconstruct.
+    ///
+    /// Adding a new shard is intentionally a source change requiring a
+    /// crate-version bump. Silent acceptance of unknown tree-IDs is
+    /// exactly what the trust property forbids — an attacker who could
+    /// stand up a same-key shard with a tree-ID we trust by default would
+    /// have a forgery primitive against pre-existing anchors.
+    pub tree_id_roster: &'static [i64],
 }
 
-/// Origin label used in the active Sigstore Rekor v1 log's checkpoints.
-pub const SIGSTORE_REKOR_V1_ORIGIN: &str = "rekor.sigstore.dev";
+impl RekorIssuer {
+    /// Membership test for this issuer's `tree_id_roster`.
+    ///
+    /// Constant-time is not required: the roster is public and timing
+    /// leaks reveal nothing the attacker doesn't already know. Linear
+    /// scan over 3 elements is faster than any hash-set lookup at this
+    /// size.
+    pub fn is_known_tree_id(&self, tree_id: i64) -> bool {
+        self.tree_id_roster.contains(&tree_id)
+    }
+}
 
-/// Cached `p256::ecdsa::VerifyingKey` parsed from `SIGSTORE_REKOR_V1_PEM`.
+/// The Sigstore Rekor v1 production issuer (`rekor.sigstore.dev`).
+///
+/// V1.7 trusts the active production shard plus the two known historical
+/// shards. All three shards sign with the same `pem` — the only per-shard
+/// difference is the tree-ID embedded in the signed origin line — so adding
+/// shards is a roster widening, not a key rotation.
+pub static SIGSTORE_REKOR_V1: RekorIssuer = RekorIssuer {
+    name: "sigstore-rekor-v1",
+    pem: "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwr\nkBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw==\n-----END PUBLIC KEY-----\n",
+    origin: "rekor.sigstore.dev",
+    active_tree_id: 1_193_050_959_916_656_506,
+    tree_id_roster: &[
+        1_193_050_959_916_656_506,
+        3_904_496_407_287_907_110,
+        2_605_736_670_972_794_746,
+    ],
+};
+
+/// Registry of all Rekor issuers Atlas trusts in this build.
+///
+/// V1.18 has exactly one entry. Adding a second issuer (e.g. when an
+/// ADR-006 trigger fires for Rekor v2 — Trigger B) is a slice extension,
+/// not a per-call-site change through the verifier. The dispatch logic
+/// in `verify_sigstore_rekor_v1` and atlas-signer's anchor submission
+/// path uses `SIGSTORE_REKOR_V1` directly today; if a second issuer ships,
+/// those call sites become a registry lookup keyed on `name` or `log_id`.
+pub const REKOR_ISSUERS: &[&RekorIssuer] = &[&SIGSTORE_REKOR_V1];
+
+/// Cached `p256::ecdsa::VerifyingKey` parsed from `SIGSTORE_REKOR_V1.pem`.
 /// Parsing once at first access; subsequent verifications reuse the key.
 pub static SIGSTORE_REKOR_V1_VERIFYING_KEY: LazyLock<p256::ecdsa::VerifyingKey> =
     LazyLock::new(|| {
         use p256::pkcs8::DecodePublicKey;
-        p256::ecdsa::VerifyingKey::from_public_key_pem(SIGSTORE_REKOR_V1_PEM)
-            .expect("SIGSTORE_REKOR_V1_PEM must be a valid P-256 SPKI public key")
+        p256::ecdsa::VerifyingKey::from_public_key_pem(SIGSTORE_REKOR_V1.pem)
+            .expect("SIGSTORE_REKOR_V1.pem must be a valid P-256 SPKI public key")
     });
 
 /// Cached DER bytes of the Sigstore Rekor v1 SPKI public key. The log_id
@@ -707,10 +748,10 @@ fn verify_sigstore_rekor_v1(
     // the auditor sees a precise reason (rather than a generic
     // "ECDSA P-256 verify" failure later in the path) when somebody
     // tries to substitute a same-key but unrecognised-shard checkpoint.
-    if !is_known_sigstore_rekor_v1_tree_id(tree_id) {
+    if !SIGSTORE_REKOR_V1.is_known_tree_id(tree_id) {
         return mk(format!(
             "anchor tree_id {tree_id} is not in the Sigstore Rekor v1 trusted-shard roster ({:?})",
-            SIGSTORE_REKOR_V1_TREE_IDS,
+            SIGSTORE_REKOR_V1.tree_id_roster,
         ));
     }
 
@@ -740,7 +781,7 @@ fn verify_sigstore_rekor_v1(
 
     if let Err(e) = verify_checkpoint_sig_sigstore(
         p256_key,
-        SIGSTORE_REKOR_V1_ORIGIN,
+        SIGSTORE_REKOR_V1.origin,
         tree_id,
         &entry.inclusion_proof,
         Some(&*SIGSTORE_REKOR_V1_KEY_ID),
@@ -1388,10 +1429,10 @@ pub fn parse_sigstore_checkpoint_tree_id(checkpoint: &str) -> Result<i64, String
     let (origin, tree_id_str) = first_line
         .rsplit_once(" - ")
         .ok_or_else(|| format!("checkpoint first line missing ' - ' separator: {first_line:?}"))?;
-    if origin != SIGSTORE_REKOR_V1_ORIGIN {
+    if origin != SIGSTORE_REKOR_V1.origin {
         return Err(format!(
             "checkpoint first-line origin {origin:?} does not match the pinned Sigstore origin {:?}",
-            SIGSTORE_REKOR_V1_ORIGIN,
+            SIGSTORE_REKOR_V1.origin,
         ));
     }
     tree_id_str
@@ -1800,7 +1841,7 @@ mod tests {
         assert_eq!(der[26], 0x04);
         // log_id is 64 hex chars (= 32 SHA-256 bytes), and equals the
         // public log identity Rekor returns in `entry.logID`. Pinning
-        // the value catches accidental edits to SIGSTORE_REKOR_V1_PEM.
+        // the value catches accidental edits to SIGSTORE_REKOR_V1.pem.
         let log_id = &*SIGSTORE_REKOR_V1_LOG_ID;
         assert_eq!(
             log_id,
@@ -2191,51 +2232,129 @@ mod tests {
         assert!(matches!(ss.pubkey, LogPubkey::EcdsaP256(_)));
     }
 
-    /// Roster pin: V1.7 trusts exactly the active shard plus the two
-    /// known historical shards. Any change to this set is a deliberate
-    /// trust-property change and must be a source edit, not silent
-    /// drift; this test forces the change to surface in code review.
+    /// Roster pin (V1.18 Welle B (2): per-issuer): each entry in
+    /// `REKOR_ISSUERS` has its `tree_id_roster` exact-set checked plus
+    /// the index-0-equals-`active_tree_id` invariant. Any change is a
+    /// deliberate trust-property change and must be a source edit, not
+    /// silent drift; this test forces the change to surface in code review.
+    ///
+    /// Currently `REKOR_ISSUERS` has exactly one entry; when a second
+    /// issuer ships (ADR-006 Trigger B), add its expected roster to the
+    /// `match issuer.name` arm and bump `expected_count` accordingly —
+    /// the same lined-up source edit is the audit point.
     #[test]
-    fn sigstore_tree_id_roster_is_pinned() {
+    fn rekor_issuer_rosters_are_pinned() {
+        let expected_count = 1;
         assert_eq!(
-            SIGSTORE_REKOR_V1_TREE_IDS,
-            &[
-                1_193_050_959_916_656_506_i64,
-                3_904_496_407_287_907_110_i64,
-                2_605_736_670_972_794_746_i64,
-            ],
-            "SIGSTORE_REKOR_V1_TREE_IDS roster changed — review the trust property",
+            REKOR_ISSUERS.len(),
+            expected_count,
+            "REKOR_ISSUERS count changed — review the trust property",
         );
-        // The active-shard constant must be the first roster member: the
-        // issuer always submits to the active shard, so verifier roster
-        // and issuer choice cannot diverge silently.
-        assert_eq!(
-            SIGSTORE_REKOR_V1_TREE_IDS[0], SIGSTORE_REKOR_V1_ACTIVE_TREE_ID,
-            "active tree-ID must lead the roster — issuer/verifier alignment invariant",
-        );
-    }
 
-    /// `is_known_sigstore_rekor_v1_tree_id` accepts every roster member
-    /// and rejects a value adjacent to a real shard (catches an
-    /// off-by-one in the membership scan) and an obviously-bogus value.
-    #[test]
-    fn known_sigstore_tree_id_membership() {
-        for &t in SIGSTORE_REKOR_V1_TREE_IDS {
-            assert!(
-                is_known_sigstore_rekor_v1_tree_id(t),
-                "roster member {t} must be accepted",
+        for issuer in REKOR_ISSUERS {
+            // Per-issuer expected-pin block. Every load-bearing field
+            // (pem, origin, active_tree_id, roster) gets a direct literal
+            // pin so an auditor can read the trust root in one place
+            // without chasing derived assertions in other tests.
+            //
+            // Add a match arm here when a new issuer is added to
+            // REKOR_ISSUERS — the unknown-issuer panic arm forces this.
+            let (expected_pem, expected_origin, expected_active_tree_id, expected_roster): (
+                &str,
+                &str,
+                i64,
+                &[i64],
+            ) = match issuer.name {
+                "sigstore-rekor-v1" => (
+                    "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwr\nkBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw==\n-----END PUBLIC KEY-----\n",
+                    "rekor.sigstore.dev",
+                    1_193_050_959_916_656_506_i64,
+                    &[
+                        1_193_050_959_916_656_506_i64,
+                        3_904_496_407_287_907_110_i64,
+                        2_605_736_670_972_794_746_i64,
+                    ],
+                ),
+                other => panic!(
+                    "REKOR_ISSUERS contains unknown issuer {other:?} — \
+                     add an expected-pin arm to rekor_issuer_rosters_are_pinned \
+                     covering pem, origin, active_tree_id, and tree_id_roster",
+                ),
+            };
+            assert_eq!(
+                issuer.pem, expected_pem,
+                "issuer {} pem changed — review the trust property",
+                issuer.name,
+            );
+            assert_eq!(
+                issuer.origin, expected_origin,
+                "issuer {} origin changed — review the trust property \
+                 (the C2SP signed-note origin line is reconstructed from this)",
+                issuer.name,
+            );
+            assert_eq!(
+                issuer.active_tree_id, expected_active_tree_id,
+                "issuer {} active_tree_id changed — review the trust property",
+                issuer.name,
+            );
+            assert_eq!(
+                issuer.tree_id_roster, expected_roster,
+                "issuer {} tree_id_roster changed — review the trust property",
+                issuer.name,
+            );
+            // Index-0 invariant: the active shard must lead the roster.
+            // The issuer always submits to the active shard, so verifier
+            // roster and issuer choice cannot diverge silently.
+            assert_eq!(
+                issuer.tree_id_roster[0], issuer.active_tree_id,
+                "issuer {} active_tree_id must lead its roster — \
+                 issuer/verifier alignment invariant",
+                issuer.name,
             );
         }
-        // One off from the active shard — must reject.
-        assert!(!is_known_sigstore_rekor_v1_tree_id(
-            SIGSTORE_REKOR_V1_ACTIVE_TREE_ID + 1
-        ));
-        // Negative — must reject.
-        assert!(!is_known_sigstore_rekor_v1_tree_id(-1));
-        // Zero — must reject.
-        assert!(!is_known_sigstore_rekor_v1_tree_id(0));
-        // A small unrelated value — must reject.
-        assert!(!is_known_sigstore_rekor_v1_tree_id(1_234_567_890));
+    }
+
+    /// `RekorIssuer::is_known_tree_id` accepts every roster member
+    /// and rejects a value adjacent to a real shard (catches an
+    /// off-by-one in the membership scan) and an obviously-bogus value.
+    /// Run per-issuer across `REKOR_ISSUERS` so a future issuer
+    /// addition is automatically covered.
+    #[test]
+    fn rekor_issuer_tree_id_membership() {
+        for issuer in REKOR_ISSUERS {
+            for &t in issuer.tree_id_roster {
+                assert!(
+                    issuer.is_known_tree_id(t),
+                    "issuer {} roster member {t} must be accepted",
+                    issuer.name,
+                );
+            }
+            // One off from the active shard — must reject. Defends
+            // against an off-by-one in the membership scan.
+            assert!(
+                !issuer.is_known_tree_id(issuer.active_tree_id + 1),
+                "issuer {} must reject active_tree_id + 1",
+                issuer.name,
+            );
+            // Negative — must reject.
+            assert!(
+                !issuer.is_known_tree_id(-1),
+                "issuer {} must reject -1",
+                issuer.name,
+            );
+            // Zero — must reject.
+            assert!(
+                !issuer.is_known_tree_id(0),
+                "issuer {} must reject 0",
+                issuer.name,
+            );
+            // A small unrelated value — must reject.
+            assert!(
+                !issuer.is_known_tree_id(1_234_567_890),
+                "issuer {} must reject 1_234_567_890",
+                issuer.name,
+            );
+        }
     }
 
     // ────────────────────────────────────────────────────────────────────

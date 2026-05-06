@@ -19,7 +19,7 @@ Atlas has three structurally distinct dependencies on Sigstore's single-issuer i
 ### 1.1 The three touchpoints
 
 **A. Rekor v1 anchor verification (Atlas trust-core).**
-`crates/atlas-trust-core/src/anchor.rs` pins the Rekor v1 production signing pubkey (`SIGSTORE_REKOR_V1_PEM`, P-256 SPKI) and the **roster** of accepted Trillian tree-IDs (`SIGSTORE_REKOR_V1_TREE_IDS`, currently a three-entry slice: the active production shard `1_193_050_959_916_656_506`, plus two historical shards `3_904_496_407_287_907_110` and `2_605_736_670_972_794_746`). The `SIGSTORE_REKOR_V1_ACTIVE_TREE_ID` constant is the *issuer-side* anchor (atlas-signer always posts to the active shard); the *verifier-side* acceptance check `is_known_sigstore_rekor_v1_tree_id` does roster membership against the full slice so historical anchors captured under earlier shards still verify. Atlas accepts an anchor as Sigstore-verified if (a) its `tree_id` is a roster member, (b) the C2SP-format origin line `"rekor.sigstore.dev - {tree_id}\n"` reconstructs against that tree-ID, and (c) the anchor signature verifies against the pinned pubkey. Adding a new shard is intentionally a source change requiring a crate-version bump — silent acceptance of unknown tree-IDs is exactly the forgery primitive the roster forbids. This pin is load-bearing for every Sigstore-anchored trace's "anchored ⇒ trustworthy" claim. Coverage: see `crates/atlas-trust-core/tests/sigstore_golden.rs` plus the `sigstore_tree_id_roster_is_pinned` invariant test.
+`crates/atlas-trust-core/src/anchor.rs` pins the Rekor v1 production signing pubkey (`SIGSTORE_REKOR_V1.pem`, P-256 SPKI) and the **roster** of accepted Trillian tree-IDs (`SIGSTORE_REKOR_V1.tree_id_roster`, currently a three-entry slice: the active production shard `1_193_050_959_916_656_506`, plus two historical shards `3_904_496_407_287_907_110` and `2_605_736_670_972_794_746`). The `SIGSTORE_REKOR_V1.active_tree_id` field is the *issuer-side* anchor (atlas-signer always posts to the active shard); the *verifier-side* acceptance check `SIGSTORE_REKOR_V1.is_known_tree_id` does roster membership against the full slice so historical anchors captured under earlier shards still verify. Atlas accepts an anchor as Sigstore-verified if (a) its `tree_id` is a roster member, (b) the C2SP-format origin line `"rekor.sigstore.dev - {tree_id}\n"` reconstructs against that tree-ID, and (c) the anchor signature verifies against the pinned pubkey. Adding a new shard is intentionally a source change requiring a crate-version bump — silent acceptance of unknown tree-IDs is exactly the forgery primitive the roster forbids. This pin is load-bearing for every Sigstore-anchored trace's "anchored ⇒ trustworthy" claim. Coverage: see `crates/atlas-trust-core/tests/sigstore_golden.rs` plus the `rekor_issuer_rosters_are_pinned` + `rekor_issuer_tree_id_membership` invariant tests. (V1.18 Welle B (2) — §5.1 — moved these from top-level constants onto the `SIGSTORE_REKOR_V1: RekorIssuer` static; data unchanged.)
 
 **B. npm publish `--provenance` (`wasm-publish.yml`).**
 On a tag-push that mints `@atlas-trust/verify-wasm` to npmjs.org, the workflow runs `npm publish --provenance`. This mints an OIDC token via the GitHub Actions ID-token service, exchanges it at Fulcio for a short-lived signing certificate, signs the tarball SHA512 + workflow metadata, and writes the attestation entry to Rekor. The npm registry stores the attestation; downstream consumers can pull it via `npm audit signatures`. Single-issuer dependency: Fulcio (Sigstore's CA) + Rekor (Sigstore's transparency log). A Fulcio compromise breaks attestation issuance; a Rekor compromise/partition breaks attestation verification.
@@ -69,7 +69,7 @@ This section is the working snapshot of upstream state. Treat numbers older than
 
 The Sigstore project has publicly committed to a Rekor v2 architecture that addresses Rekor v1's known scaling and operational-cost limits. The v2 design moves from a single Trillian tree to a sharded, witness-anchored model. This is **not multi-issuer in itself** — a single Sigstore Foundation–operated v2 instance still has the same single-operator dependency — but v2 is a *prerequisite* for federated multi-instance deployment because it formalises the cross-shard inclusion proof structure that any multi-issuer verification must consume.
 
-Atlas exposure: when Rekor v2 ships and the npm registry switches to v2-issued attestations, `npm audit signatures` will need to handle v2-format entries. The current `SIGSTORE_REKOR_V1_TREE_IDS` roster will continue to verify v1-issued anchors (which auditors may have captured years ago and replay against the verifier indefinitely); v2 will need a parallel roster (`SIGSTORE_REKOR_V2_TREE_IDS`) plus a `SIGSTORE_REKOR_V2_PEM` pubkey, both keyed off a separate `is_known_sigstore_rekor_v2_tree_id` check. The §5.1 registry-pattern refactor formalises this so v1 and v2 issuers coexist via a uniform `RekorIssuer` slice — but this requires the refactor first; today's anchor.rs is single-version-per-roster.
+Atlas exposure: when Rekor v2 ships and the npm registry switches to v2-issued attestations, `npm audit signatures` will need to handle v2-format entries. The current `SIGSTORE_REKOR_V1.tree_id_roster` will continue to verify v1-issued anchors (which auditors may have captured years ago and replay against the verifier indefinitely); v2 will need a parallel `SIGSTORE_REKOR_V2: RekorIssuer` static (with its own `pem`, `origin`, `active_tree_id`, `tree_id_roster`) appended to `REKOR_ISSUERS`. The §5.1 registry-pattern refactor (DONE in V1.18 Welle B (2)) formalises this so v1 and v2 issuers coexist via a uniform `&[&RekorIssuer]` slice — adding v2 is now a single-static + single-slice-extension change, no call-site touches required.
 
 ### 3.2 npm-side TUF root rotation
 
@@ -107,11 +107,11 @@ The npm-published TUF trust root document lists a second Fulcio CA OR a second R
 
 ### Trigger B — Rekor v2 issued for `@atlas-trust/verify-wasm`
 
-The first time we cut a release where `npm publish --provenance` records the attestation in Rekor v2 (rather than v1), the verifier core needs to handle v2-format anchors. Trigger work: extend `anchor.rs` to accept v2 entries via a `SIGSTORE_REKOR_V2_PEM` + `SIGSTORE_REKOR_V2_TREE_ID` pair, update `crates/atlas-signer/src/rekor_client.rs` to negotiate v2 endpoints, port the golden-test fixtures, validate cross-format mixed-mode (v1-anchor + v2-anchor in the same chain). Estimate: ~1 week of focused work; well-scoped, no design ambiguity.
+The first time we cut a release where `npm publish --provenance` records the attestation in Rekor v2 (rather than v1), the verifier core needs to handle v2-format anchors. Trigger work: extend `anchor.rs` to accept v2 entries by adding a `SIGSTORE_REKOR_V2: RekorIssuer` static (pem + origin + active_tree_id + tree_id_roster) and appending `&SIGSTORE_REKOR_V2` to `REKOR_ISSUERS` (post-V1.18 Welle B (2) registry pattern), update `crates/atlas-signer/src/rekor_client.rs` to negotiate v2 endpoints, port the golden-test fixtures, validate cross-format mixed-mode (v1-anchor + v2-anchor in the same chain). The registry refactor reduces this from ~1 week to ~3-4 days since the verifier dispatch already iterates issuers. No design ambiguity.
 
 ### Trigger C — Sigstore Public Good incident with documented degradation
 
-A public incident affecting Rekor v1 availability or integrity (operational outage longer than 24 hours, rotation of `SIGSTORE_REKOR_V1_PEM` outside the planned ceremony schedule, any documented integrity breach). Atlas's response is not adoption-of-multi-issuer in the moment (which would be reactive and fragile) but an **operator-runbook activation**: switch downstream-consumer guidance to Welle B SSH-tag verification, with adoption planning starting in parallel.
+A public incident affecting Rekor v1 availability or integrity (operational outage longer than 24 hours, rotation of `SIGSTORE_REKOR_V1.pem` outside the planned ceremony schedule, any documented integrity breach). Atlas's response is not adoption-of-multi-issuer in the moment (which would be reactive and fragile) but an **operator-runbook activation**: switch downstream-consumer guidance to Welle B SSH-tag verification, with adoption planning starting in parallel.
 
 **Documentation gap acknowledged.** As of 2026-05-06 `docs/CONSUMER-RUNBOOK.md` does NOT have a "Sigstore Public Good incident — extended degradation protocol" section. §6 of that runbook covers reproduce-from-source for general unreachable-registry scenarios, and §5 covers transient-outage retries, but neither prescribes the specific "abandon `npm audit signatures`, fall back to SSH-tag-only primary verification, document the incident reference in your build logs" protocol that Trigger C activation would require. Filling this gap is an **explicit prerequisite for Trigger C readiness** and is recorded as a follow-on task: open `docs(consumer-runbook)/sigstore-incident-protocol` to add §10 "Sigstore Public Good incident protocol" before the next ADR refresh, regardless of whether Trigger C has fired by then. Until that section ships, an actual Trigger C event would require ad-hoc operator communication to consumers, which is exactly the failure mode an incident runbook is supposed to prevent.
 
@@ -138,13 +138,31 @@ Even without adopting multi-issuer today, three preparatory steps lower the futu
 
 ### 5.1 Refactor `anchor.rs` constants to a registry pattern
 
-Currently `SIGSTORE_REKOR_V1_PEM`, `SIGSTORE_REKOR_V1_ACTIVE_TREE_ID`, and `SIGSTORE_REKOR_V1_TREE_IDS` (the unified active-plus-historical roster) are top-level constants tied to a single issuer. A multi-issuer adoption would prefer a `RekorIssuer { name, pem, active_tree_id, tree_id_roster }` struct and a `&[&RekorIssuer]` slice so verification iterates issuers and applies roster membership per-issuer. This refactor is mechanical and does not change verification semantics — it can land in V1.18 Welle B or later as pure-internal-API work. The `sigstore_tree_id_roster_is_pinned` invariant test would become per-issuer.
+Originally `SIGSTORE_REKOR_V1_PEM`, `SIGSTORE_REKOR_V1_ACTIVE_TREE_ID`, and `SIGSTORE_REKOR_V1_TREE_IDS` (the unified active-plus-historical roster) were top-level constants tied to a single issuer. Multi-issuer adoption prefers a `RekorIssuer { name, pem, origin, active_tree_id, tree_id_roster }` struct and a `&[&RekorIssuer]` slice so verification iterates issuers and applies roster membership per-issuer. The refactor is mechanical and does not change verification semantics. The `sigstore_tree_id_roster_is_pinned` invariant test became per-issuer (`rekor_issuer_rosters_are_pinned` + `rekor_issuer_tree_id_membership`) with an extensibility match arm so adding a future Rekor v2 issuer requires only appending a `RekorIssuer` static + extending the match.
 
-**Status**: not in scope for this ADR; recorded as a follow-on candidate.
+**Status**: **DONE in V1.18 Welle B (2)**. Shipped as `feat(v1.18/welle-b): anchor.rs RekorIssuer registry refactor — ADR-006 §5.1`. New shape:
+
+```rust
+pub static SIGSTORE_REKOR_V1: RekorIssuer = RekorIssuer {
+    name: "sigstore-rekor-v1",
+    pem: "...",
+    origin: "rekor.sigstore.dev",
+    active_tree_id: 1_193_050_959_916_656_506,
+    tree_id_roster: &[
+        1_193_050_959_916_656_506,
+        3_904_496_407_287_907_110,
+        2_605_736_670_972_794_746,
+    ],
+};
+
+pub const REKOR_ISSUERS: &[&RekorIssuer] = &[&SIGSTORE_REKOR_V1];
+```
+
+Tree-ID membership is `SIGSTORE_REKOR_V1.is_known_tree_id(tree_id)`. Adding Rekor v2 (Trigger B in §4) is now a single-static + single-slice-extension change, no call-site touches needed.
 
 ### 5.2 Document the inline-pin-update protocol
 
-`SIGSTORE_REKOR_V1_PEM` and the tree-ID array will need updates when the next v1 root ceremony happens, AND when v2 lands, AND when a second issuer joins the trust root. The protocol for these updates (PR review requirements, golden-test fixture regeneration, cross-version-anchor compatibility test) is currently implicit. Documenting it in `docs/OPERATOR-RUNBOOK.md` §15 (TBD) makes the update path auditable.
+`SIGSTORE_REKOR_V1.pem` and the `tree_id_roster` array will need updates when the next v1 root ceremony happens, AND when v2 lands, AND when a second issuer joins the trust root. The protocol for these updates (PR review requirements, golden-test fixture regeneration, cross-version-anchor compatibility test) is currently implicit. Documenting it in `docs/OPERATOR-RUNBOOK.md` §15 (TBD) makes the update path auditable.
 
 **Status**: deferred to V1.18 Welle B as a `docs(v1.18/welle-b)` task. Not blocking for this ADR.
 
@@ -210,7 +228,7 @@ The triggers in §4 fire adoption work regardless of review cadence. Cadence is 
 ### 8.3 Open questions
 
 - How do we test multi-issuer code paths in CI before adoption, given that the Sigstore ecosystem has no test multi-issuer environment we can wire into Welle A's self-test? Likely requires a mock-Sigstore-multi-issuer fixture, parallel to the existing mock-Rekor fixture in `crates/atlas-trust-core/tests/`.
-- What is the interop story between Atlas anchor verification (pinned Rekor v1) and a multi-issuer-only consumer who has discarded the Rekor v1 trust root? This is a long-tail concern: today's anchors will need to remain verifiable for years even after multi-issuer adoption. Likely answer: keep `SIGSTORE_REKOR_V1_PEM` in the inactive-pin array indefinitely, with a documented "verifies anchors issued before $DATE" semantic.
+- What is the interop story between Atlas anchor verification (pinned Rekor v1) and a multi-issuer-only consumer who has discarded the Rekor v1 trust root? This is a long-tail concern: today's anchors will need to remain verifiable for years even after multi-issuer adoption. Likely answer: keep `SIGSTORE_REKOR_V1` in `REKOR_ISSUERS` indefinitely (post-V1.18 Welle B (2) the registry shape supports this trivially), with a documented "verifies anchors issued before $DATE" semantic per-issuer.
 - Does Atlas eventually want to operate its OWN Rekor instance as one of the federated issuers (not for general use, but for Atlas-specific anchors)? This is a V2+ question; recorded here as a long-horizon hypothetical.
 
 ### 8.4 Reversibility
@@ -224,5 +242,6 @@ This decision is fully reversible. Adoption work is prepared (§5), upstream tra
 | Date       | Event                                                  | Outcome |
 |------------|--------------------------------------------------------|---------|
 | 2026-05-06 | ADR-Atlas-006 opened. Initial status: Tracking.        | —       |
+| 2026-05-06 | V1.18 Welle B (2): §5.1 registry-pattern refactor shipped (`feat(v1.18/welle-b): anchor.rs RekorIssuer registry refactor`). | §5.1 status flipped to DONE. Reduces Trigger B (Rekor v2) adoption work from ~1 week to ~3–4 days. No verification semantics changed. |
 
 (Future quarterly refreshes append rows here.)

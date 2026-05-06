@@ -12,7 +12,7 @@
 //!   - End-to-end shape: the verifier accepts the exact JSON shape that
 //!     `rekor.sigstore.dev/api/v1` returns, no schema drift between our
 //!     `AnchorEntry` and what the log actually emits.
-//!   - The pinned PEM in `atlas-trust-core::anchor::SIGSTORE_REKOR_V1_PEM`
+//!   - The pinned PEM in `atlas-trust-core::anchor::SIGSTORE_REKOR_V1.pem`
 //!     is the production key (if it weren't, the ECDSA verify here would
 //!     fail with the real signature).
 //!   - The 4-byte C2SP keyID check: the signed-note keyID `c0d23d6a` must
@@ -21,7 +21,7 @@
 //!     production hashedrekord body.
 //!
 //! If Sigstore ever rotates the active log key, this test starts failing
-//! and forces a coordinated update of `SIGSTORE_REKOR_V1_PEM` + a new
+//! and forces a coordinated update of `SIGSTORE_REKOR_V1.pem` + a new
 //! fixture capture.
 
 use atlas_trust_core::anchor::{

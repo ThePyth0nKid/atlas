@@ -13,7 +13,7 @@
 //! minimal signed trace.
 
 use atlas_trust_core::{
-    anchor::{SIGSTORE_REKOR_V1_LOG_ID, SIGSTORE_REKOR_V1_TREE_IDS},
+    anchor::{SIGSTORE_REKOR_V1, SIGSTORE_REKOR_V1_LOG_ID},
     chain_head_for,
     cose::build_signing_input,
     hashchain::compute_event_hash,
@@ -553,8 +553,8 @@ fn fake_sigstore_entry(seed: u64) -> AnchorEntry {
     // of the inclusion-proof-failure branch they're meant to exercise.
     const ACTIVE_TREE_ID: i64 = 1_193_050_959_916_656_506;
     debug_assert!(
-        SIGSTORE_REKOR_V1_TREE_IDS.contains(&ACTIVE_TREE_ID),
-        "ACTIVE_TREE_ID {} not in SIGSTORE_REKOR_V1_TREE_IDS — fixture would test the wrong rejection branch",
+        SIGSTORE_REKOR_V1.is_known_tree_id(ACTIVE_TREE_ID),
+        "ACTIVE_TREE_ID {} not in SIGSTORE_REKOR_V1.tree_id_roster — fixture would test the wrong rejection branch",
         ACTIVE_TREE_ID,
     );
     AnchorEntry {

@@ -742,12 +742,16 @@ flow through the same trust path.
   `log_id` → `TrustedLog { pubkey, format }`. The production Sigstore
   Rekor v1 pubkey is one of the pinned entries. An inbound anchor whose
   `log_id` is not in the map is rejected before proof work.
-- **Sigstore Rekor v1 pinning:** `SIGSTORE_REKOR_V1_PEM` is the production
+- **Sigstore Rekor v1 pinning:** `SIGSTORE_REKOR_V1.pem` is the production
   log's ECDSA P-256 SPKI public key (retrieved from
   `https://rekor.sigstore.dev/api/v1/log/publicKey` and checked in).
-  `SIGSTORE_REKOR_V1_LOG_ID` is SHA-256 of the DER bytes. `SIGSTORE_REKOR_V1_ACTIVE_TREE_ID`
+  `SIGSTORE_REKOR_V1_LOG_ID` is SHA-256 of the DER bytes. `SIGSTORE_REKOR_V1.active_tree_id`
   pins the active Trillian tree-ID (`1_193_050_959_916_656_506`); an
   anchor with a mismatched tree-ID is rejected before signature verify.
+  All Sigstore-pinned data lives on the `SIGSTORE_REKOR_V1: RekorIssuer`
+  static (V1.18 Welle B (2) — ADR-006 §5.1) so a future Rekor v2 issuer
+  can be added by appending a second `RekorIssuer` to the
+  `REKOR_ISSUERS: &[&RekorIssuer]` registry without forking call sites.
 - **API version pin:** `apiVersion == "0.0.1"` enforced in
   `entry_body_binds_anchored_hash` — any other value is rejected.
   Enforced in both issuer (generates 0.0.1 requests) and verifier
@@ -917,8 +921,8 @@ public key.
 #### Current constraint (V1.6)
 
 V1.6 pins the active Sigstore Rekor v1 tree-ID: `SIGSTORE_REKOR_V1_ACTIVE_TREE_ID =
-1_193_050_959_916_656_506`. An anchor with any other tree-ID is rejected at
-verification time, before proof work.
+1_193_050_959_916_656_506` (now `SIGSTORE_REKOR_V1.active_tree_id` post-V1.18 Welle B (2)).
+An anchor with any other tree-ID is rejected at verification time, before proof work.
 
 #### V1.7 roster expansion
 
@@ -926,21 +930,24 @@ Sigstore maintains historical shards signed by the same pubkey but with differen
 tree IDs. After a shard rotation event, V1.6 anchors would instantly become unverifiable
 against the new active shard.
 
-V1.7 introduces `SIGSTORE_REKOR_V1_TREE_IDS: &[i64]`, a 3-element list:
+V1.7 introduces `SIGSTORE_REKOR_V1_TREE_IDS: &[i64]` (now
+`SIGSTORE_REKOR_V1.tree_id_roster: &'static [i64]` post-V1.18 Welle B (2)), a 3-element list:
 
 - `1_193_050_959_916_656_506` — active shard (current production).
 - `3_904_496_407_287_907_110` — historical shard.
 - `2_605_736_670_972_794_746` — historical shard.
 
-The verifier's `is_known_sigstore_rekor_v1_tree_id(tree_id)` function replaces the
-strict equality check. An inbound anchor passes the tree-ID gate if its `tree_id` is
-a member of the roster.
+The verifier's `is_known_sigstore_rekor_v1_tree_id(tree_id)` function (now
+`SIGSTORE_REKOR_V1.is_known_tree_id(tree_id)` — method on the `RekorIssuer` struct)
+replaces the strict equality check. An inbound anchor passes the tree-ID gate if its
+`tree_id` is a member of the roster.
 
 #### Same-key trust property
 
-The pinned ECDSA P-256 pubkey (`SIGSTORE_REKOR_V1_PEM`) remains unchanged across
-shards. Signature verification still depends only on this single key. An attacker
-cannot exploit different keys per shard because there is only one pinned key.
+The pinned ECDSA P-256 pubkey (`SIGSTORE_REKOR_V1.pem`, formerly
+`SIGSTORE_REKOR_V1_PEM`) remains unchanged across shards. Signature
+verification still depends only on this single key. An attacker cannot
+exploit different keys per shard because there is only one pinned key.
 
 The C2SP signed-note origin line embeds the tree-ID (rekor.sigstore.dev's origin
 line is reconstructed from caller-supplied `entry.tree_id`), so cross-shard replay
@@ -1060,11 +1067,14 @@ Headline:
 - **Chain rotation:** `atlas-signer rotate-chain --confirm <workspace>` produces
   new genesis batch with `previous_head = old_chain.head`, bridging continuity.
 - **Sigstore Rekor v1 shard roster:** Replaces single-tree-id pin with
-  `SIGSTORE_REKOR_V1_TREE_IDS: &[i64]` roster of 3 shards (active +
-  2 historical): `1_193_050_959_916_656_506`,
-  `3_904_496_407_287_907_110`, `2_605_736_670_972_794_746`. Verifier accepts
-  membership; same pubkey across shards, no cross-shard replay (C2SP origin
-  embeds tree_id). Issuer still posts to active shard only.
+  `SIGSTORE_REKOR_V1_TREE_IDS: &[i64]` (now `SIGSTORE_REKOR_V1.tree_id_roster`
+  post-V1.18 Welle B (2)) roster of 3 shards (active + 2 historical):
+  `1_193_050_959_916_656_506`, `3_904_496_407_287_907_110`,
+  `2_605_736_670_972_794_746`. Verifier accepts membership; same pubkey
+  across shards, no cross-shard replay (C2SP origin embeds tree_id).
+  Issuer still posts to active shard only. (V1.18 Welle B (2) moved this
+  slice onto `SIGSTORE_REKOR_V1.tree_id_roster` — same data, registry
+  shape via the `RekorIssuer` struct; see ADR-Atlas-006 §5.1.)
 
 ### V1.9 — per-tenant Atlas anchoring keys (shipped)
 
