@@ -2496,3 +2496,300 @@ drift before pushing.
 | `verify-trust-root-mutations` reports `FAIL: commit not signed by a trusted key` | PR commit signed by a key not in the prior trust root | Re-sign with a trusted key, or first add the new key in a prior PR signed by an existing trusted key. |
 | Test 7 (`PROTECTED_SURFACE / CODEOWNERS parity`) fails locally | Drift between the two lists | Sync them per the "Adding a new file" recipe above. |
 | Admin pushes directly to master and bypasses everything | "Include administrators" toggle disabled | Re-enable it; review what landed during the bypass window. |
+
+---
+
+## 15. Inline-pin-update protocol — `SIGSTORE_REKOR_V1.pem` / `tree_id_roster` (V1.18 Welle B)
+
+The Sigstore Rekor v1 trust root is pinned **inline** in
+`crates/atlas-trust-core/src/anchor.rs` as
+`SIGSTORE_REKOR_V1.pem` (the production log's P-256 SPKI public key)
+and `SIGSTORE_REKOR_V1.tree_id_roster` (the active shard plus the two
+known historical shards). Both fields are part of `PROTECTED_SURFACE`
+— any edit must traverse `verify-trust-root-mutations` (§14) and
+CODEOWNERS-required review.
+
+This section closes the protocol gap that
+[ADR-Atlas-006 §5.2](ADR/ADR-Atlas-006-multi-issuer-sigstore-tracking.md)
+identified: the *when* of an inline-pin update is well-defined
+(Sigstore root ceremony, Rekor v2 launch, shard rotation, multi-issuer
+adoption), but the *how* — review requirements, golden-fixture
+regeneration, cross-version-anchor compatibility — was implicit.
+[CONSUMER-RUNBOOK §10.6](CONSUMER-RUNBOOK.md) closure step 4 references
+this section as the canonical operator path for closing a Trigger-C
+incident on the consumer side.
+
+### When this protocol fires
+
+| Trigger | Source | Pin fields touched |
+|---|---|---|
+| Sigstore Rekor v1 root ceremony (key rotation) | Sigstore Foundation post-mortem or planned ceremony announcement | `SIGSTORE_REKOR_V1.pem` (the PEM body changes; `name`/`origin` stay) |
+| Active-shard rotation (new tree-ID promoted) | Sigstore Rekor operations channel — new logIndex range, prior shard frozen | `SIGSTORE_REKOR_V1.active_tree_id` + prepend the new tree-ID at `tree_id_roster[0]`, push the prior active to index 1 |
+| Historical-shard discovery (a missing shard surfaces during an audit) | Independent discovery; cross-checked against rekor-monitor or the Sigstore Foundation public statement | `tree_id_roster` (append the historical shard, preserving index 0 = active) |
+| Rekor v2 launch (ADR-006 Trigger B) | Rekor v2 GA + npm trust root update | New `SIGSTORE_REKOR_V2: RekorIssuer` static + extend `REKOR_ISSUERS = &[&SIGSTORE_REKOR_V1, &SIGSTORE_REKOR_V2]` (per-issuer registry shape from V1.18 Welle B (2)) |
+| Second issuer joining (ADR-006 Trigger A/D) | Sigstore Foundation federation announcement OR Atlas-side compliance requirement | New `RekorIssuer` static + `REKOR_ISSUERS` slice extension (same shape as Rekor v2) |
+
+The first three are routine rotations within the existing Rekor v1
+trust scope; the last two are full ADR-006 adoption events and require
+a follow-on ADR amendment in the same PR (§5 → §6 transition: pin
+update lands together with the design that justifies it).
+
+### Pre-edit verification
+
+Run all anti-drift gates before opening the PR. A red gate before the
+edit means there is preexisting drift to investigate — do **not** mask
+it under the rotation:
+
+```bash
+cargo test -p atlas-trust-core --test sigstore_golden -- --nocapture
+cargo test -p atlas-trust-core anchor::tests::rekor_issuer_rosters_are_pinned
+cargo test -p atlas-trust-core anchor::tests::rekor_issuer_tree_id_membership
+bash tools/test-trust-root-mutations.sh
+```
+
+Expected outputs (V1.18 baseline):
+
+- `sigstore_golden` — 6/6 PASS (`fixture_log_id_matches_pinned`,
+  `verifies_real_sigstore_rekor_entry`, `tampered_entry_body_is_rejected`,
+  `unknown_tree_id_is_rejected`, `historical_shard_tree_id_passes_dispatch_gate`,
+  `anchored_hash_forgery_is_rejected`).
+- `rekor_issuer_rosters_are_pinned` — PASS (the per-issuer expected-pin
+  block matches today's source).
+- `rekor_issuer_tree_id_membership` — PASS.
+- `tools/test-trust-root-mutations.sh` — `PASS: 17 / 17` (or N+1 with
+  any newer test).
+
+### Step-by-step pin update
+
+```bash
+# 1. Branch from a known-clean master.
+git checkout master
+git pull --ff-only
+git checkout -b "docs(v1.18/welle-x)/sigstore-pin-update-${ROTATION_ID}"
+
+# 2. Edit the SIGSTORE_REKOR_V1 static in
+#    crates/atlas-trust-core/src/anchor.rs. Change ONLY the field(s)
+#    the trigger demands:
+#      - PEM rotation:   pem field
+#      - shard rotation: active_tree_id + tree_id_roster (index 0 == active)
+#      - historical:     tree_id_roster (append; index 0 untouched)
+#    Every other field stays byte-identical. Multi-field churn under a
+#    single rotation muddies the diff and the audit trail.
+
+# 3. Update the per-issuer expected-pin block in the
+#    rekor_issuer_rosters_are_pinned test in the same file (the
+#    "sigstore-rekor-v1" arm). Source-of-truth is the static itself;
+#    the test exists to force the change to surface in code review,
+#    so it MUST be updated in the same commit. A drift between the
+#    static and the expected-pin arm fails the test red — that IS the
+#    audit signal, not a bug.
+
+# 4. Regenerate the Sigstore golden fixture (Trigger A/B only —
+#    PEM rotation invalidates the captured signature; shard
+#    rotations do NOT, since the active shard's prior signatures
+#    remain valid under the prior key).
+#
+#    For PEM rotation:
+bash tools/regenerate-sigstore-fixture.sh \
+  --log-index 800000000 \
+  --out crates/atlas-trust-core/tests/fixtures/sigstore_rekor_v1_logindex_800000000.json
+#
+#    For shard rotation (new active shard): capture a fresh fixture
+#    from the new active shard so the historical shard's continued
+#    acceptance is also exercised by historical_shard_tree_id_passes_dispatch_gate:
+bash tools/regenerate-sigstore-fixture.sh \
+  --log-index <newly-promoted-shard-logIndex> \
+  --out crates/atlas-trust-core/tests/fixtures/sigstore_rekor_v1_logindex_<N>.json
+
+# 5. Run the cross-version-anchor compatibility test (see next sub-section).
+#    NOTE: tools/cross-version-anchor-compat.sh is slated to ship
+#    alongside the first real rotation event — it does not exist
+#    in V1.18 today. Until it ships, the manual substitute is to
+#    run `cargo test -p atlas-trust-core --test sigstore_golden`
+#    against the existing prior-version fixture corpus in
+#    crates/atlas-trust-core/tests/fixtures/ — the same test
+#    harness the script will eventually wrap. Document the manual
+#    run + its result in the PR body in lieu of the script log.
+bash tools/cross-version-anchor-compat.sh
+
+# 6. Re-run all anti-drift gates from the pre-edit verification.
+#    All must be GREEN before push.
+
+# 7. Commit. Use a SSH-signed commit (the PROTECTED_SURFACE write
+#    requires it via §14). Single commit per rotation — multi-rotation
+#    PRs are rejected (one rotation = one auditable trust-property
+#    delta).
+git add crates/atlas-trust-core/src/anchor.rs \
+        crates/atlas-trust-core/tests/fixtures/
+git commit -S -m "$(cat <<'EOF'
+chore(v1.x/welle-x): rotate SIGSTORE_REKOR_V1 <field> per <trigger>
+
+Trigger: <Sigstore Foundation post-mortem URL OR root-ceremony
+announcement OR ADR-006 §5.2 Trigger N>
+
+Fields changed:
+  - SIGSTORE_REKOR_V1.<field>: <old value (truncated)> → <new value>
+
+Cross-references:
+  - Sigstore Foundation source: <URL>
+  - Golden-fixture regeneration: <new logIndex>
+  - Anti-drift gates: 6/6 GREEN, 17/17 GREEN
+EOF
+)"
+
+# 8. Push, open PR. The PR is gated by:
+#    - verify-trust-root-mutations (§14) — must be signed by a key in
+#      the prior trust root.
+#    - CODEOWNERS-required review on the PROTECTED_SURFACE.
+#    - Required status check: hsm-byte-equivalence (signer side
+#      unaffected by Rekor pin, but the lane proves no collateral
+#      damage).
+git push -u origin HEAD
+```
+
+### PR review requirements
+
+Reviewers MUST verify each of the following before approval. The list
+exists because each item closes a class of mistake that the gates
+above cannot catch on their own:
+
+| Review item | What it catches | How to verify |
+|---|---|---|
+| Source-of-truth match | The new pin matches the cited Sigstore Foundation announcement byte-for-byte (PEM, tree-ID magnitude, origin string) | Open the cited URL; copy the field; `diff` against the diff hunk |
+| Single-field discipline | Only the trigger's field changed; no opportunistic edits to `name`/`origin`/other fields | Eyeball the diff — every line outside the documented field is suspect |
+| Test arm parity | `rekor_issuer_rosters_are_pinned`'s `"sigstore-rekor-v1"` match arm changed in lockstep with the static | Diff hunks must include both `anchor.rs` static AND the test arm |
+| Index-0 invariant on shard rotation | After rotation, `tree_id_roster[0] == active_tree_id` | The test enforces this — but a reviewer should still see it explicit in the diff |
+| Fixture freshness on PEM rotation | A new fixture was captured AFTER the new key was active on the production log | `fetched_at_unix` in the fixture > the announced rotation timestamp |
+| ADR cross-reference | The PR description links the Sigstore source AND ADR-006 (and adds an ADR amendment if Trigger A/B/D fired) | PR body must contain both URLs |
+| Cross-version-anchor compat | `cross-version-anchor-compat.sh` PASS log attached to the PR | CI artifact OR pasted output in PR body |
+
+A PR that fails any of these MUST be requested-changes, NOT
+approved-with-comment. The PROTECTED_SURFACE gate (§14) is the
+cryptographic last line of defence for the source-code pin in
+`crates/atlas-trust-core/src/anchor.rs` — reviewer rigour is the
+load-bearing one for the rotation as a whole.
+
+> **Recipe-text caveat:** OPERATOR-RUNBOOK.md (this file) is itself
+> NOT in `PROTECTED_SURFACE` and is not gated by §14's cryptographic
+> verifier. The integrity of the §15 recipe text relies on
+> normal branch-protection + CODEOWNERS reviewer scrutiny on every
+> docs PR — *not* on the trust-root mutation gate. An attacker who
+> rewrote §15 mid-incident to point operators at a malicious key
+> would still hit §14 when trying to land that key in `anchor.rs`,
+> but a vigilant reviewer is required to catch the rewrite of the
+> recipe itself before it misleads an in-incident operator. Treat
+> §15 edits with the same scrutiny as a `PROTECTED_SURFACE` edit
+> even though the cryptographic gate does not apply to it.
+
+### Golden-fixture regeneration
+
+`tools/regenerate-sigstore-fixture.sh` is the one-shot helper that
+captures a hashedrekord entry from `rekor.sigstore.dev/api/v1/log/
+entries?logIndex=<N>`, normalises it into the Atlas
+`tests/fixtures/sigstore_rekor_v1_logindex_<N>.json` shape (matching
+the `Fixture` struct in
+`crates/atlas-trust-core/tests/sigstore_golden.rs`), and stamps
+`source` + `fetched_at_unix` so the provenance is auditable from a
+clone alone (no Sigstore round-trip required to re-verify the capture
+chain).
+
+The script is intentionally idempotent and offline-after-fetch — the
+captured JSON is the entire fixture; no derived data is computed at
+test time. An auditor reproduces the capture by re-fetching the
+`source` URL and `diff`-ing against the checked-in JSON.
+
+If the script does not yet exist at the time of a rotation (it is
+slated to ship alongside the first real rotation event), the manual
+capture procedure is:
+
+```bash
+# 1. Pick a logIndex on the relevant shard, ideally a hashedrekord
+#    entry (the test's anti-forgery check is hashedrekord-only).
+LOG_INDEX=800000000  # or the new active shard's first hashedrekord
+
+# 2. Fetch the entry. The API returns a single-key map keyed by uuid;
+#    flatten it to the inner object plus a top-level uuid for easier
+#    indexing.
+curl -fsSL \
+  "https://rekor.sigstore.dev/api/v1/log/entries?logIndex=${LOG_INDEX}" \
+  -o /tmp/rekor-raw.json
+
+# 3. Normalise into the Atlas fixture shape. Field mapping:
+#      body, anchored_hash, log_id ← from the entry's body decode
+#      tree_id ← from logID's tree_id portion (hex → i64)
+#      tree_size, root_hash, hashes, checkpoint_sig
+#        ← from verification.inclusionProof + signedEntryTimestamp
+#    The current sigstore_rekor_v1_logindex_800000000.json fixture
+#    is the canonical example.
+#
+#    NOTE: tools/normalize-rekor-fixture.js is slated to ship
+#    alongside tools/regenerate-sigstore-fixture.sh — it does not
+#    exist in V1.18 today. Until it ships, perform the field-
+#    mapping by hand using the existing fixture as the schema
+#    template, OR write the transform inline (jq + node) in the
+#    rotation PR itself and remove the shell-out to the missing
+#    helper.
+node tools/normalize-rekor-fixture.js \
+  /tmp/rekor-raw.json \
+  > crates/atlas-trust-core/tests/fixtures/sigstore_rekor_v1_logindex_${LOG_INDEX}.json
+
+# 4. Stamp source + fetched_at_unix (jq, in place).
+jq --arg src "https://rekor.sigstore.dev/api/v1/log/entries?logIndex=${LOG_INDEX}" \
+   --argjson now $(date +%s) \
+   '. + {source: $src, fetched_at_unix: $now}' \
+   crates/atlas-trust-core/tests/fixtures/sigstore_rekor_v1_logindex_${LOG_INDEX}.json \
+   > /tmp/fixture.json
+mv /tmp/fixture.json \
+   crates/atlas-trust-core/tests/fixtures/sigstore_rekor_v1_logindex_${LOG_INDEX}.json
+```
+
+The rotation PR MUST include the new fixture file in the same commit
+as the pin edit. Splitting them across commits breaks `git bisect` on
+the rotation: bisecting through the gap lands on a commit where the
+test harness is internally inconsistent.
+
+### Cross-version-anchor compatibility test
+
+The verifier ships pinned roots that are read by **every** trace bundle
+the verifier evaluates, including bundles produced by Atlas builds
+from before the rotation. A pin update that breaks acceptance of a
+prior-version anchor would silently invalidate the verifier's
+historical replay property.
+
+The compatibility test re-runs the verifier against a corpus of
+fixtures captured from prior Atlas releases (one per minor version
+since V1.6, when Sigstore anchoring shipped). Each fixture exercises
+a different combination of (signer build, anchor shard, log key) so
+the rotation's blast radius is bounded by the corpus and visible in
+the diff.
+
+```bash
+bash tools/cross-version-anchor-compat.sh
+```
+
+Expected output: every prior-version fixture PASSES under the new pin.
+Failure mode interpretation:
+
+| Failure | Cause | Required action |
+|---|---|---|
+| Prior-version fixture fails on `log_id_not_trusted` | The pin update accidentally rotated `name` or removed an issuer entry | Reverse the unintended field change |
+| Prior-version fixture fails on `unknown_tree_id` | A historical shard was dropped from `tree_id_roster` | Re-add the dropped historical shard — historical shards are append-only |
+| Prior-version fixture fails on `checkpoint_signature_invalid` | The PEM was rotated, but the prior key's PEM was not preserved | **STOP.** Multi-issuer support is required (see ADR-006 §5.2 and §8.3) — verifier MUST keep verifying old anchors under the prior key. Do not ship the rotation; open a follow-on ADR for the multi-key issuer pattern |
+| Prior-version fixture fails on `tampered_entry_body` | The fixture itself was edited, not the verifier | Restore the fixture from `git`; the rotation does not break verification |
+
+The third row is the load-bearing one. ADR-006 §8.3 records this as
+an open question (interop between pinned-Rekor-v1 verifier and
+multi-issuer-only consumer); the cross-version test is the gate that
+forces the question to be answered before the rotation lands, not
+after a downstream auditor finds historical anchors no longer verify.
+
+### Failure modes
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `cargo test rekor_issuer_rosters_are_pinned` fails after pin edit | Static was edited but the matching test arm was not | Update the `"sigstore-rekor-v1"` match arm in the same commit |
+| `cargo test verifies_real_sigstore_rekor_entry` fails after PEM rotation | Pinned PEM was rotated but the golden fixture is still signed under the prior key | Regenerate the fixture per the Golden-fixture sub-section |
+| `cargo test historical_shard_tree_id_passes_dispatch_gate` fails after shard rotation | The prior active shard was removed from the roster instead of demoted to historical | Restore the prior shard at `tree_id_roster[1]` — historical shards are append-only |
+| `cross-version-anchor-compat.sh` fails on a `checkpoint_signature_invalid` for a prior-version fixture | PEM rotation without multi-key support — see the table above | Hold the rotation; open follow-on ADR; do NOT ship until multi-key is designed |
+| `verify-trust-root-mutations` fails on the PR | Commit was not signed by a key in the prior trust root | Re-sign with a `.github/allowed_signers` key, or first add the new key in a prior PR signed by an existing trusted key (§14 recipe) |
+| Pinned PEM no longer matches the Sigstore Foundation announcement | Source-of-truth drift OR Foundation announcement was updated mid-rotation | Re-fetch the announcement; `diff` against the diff hunk; if Foundation revised its publication, re-cut the rotation against the latest revision |

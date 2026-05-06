@@ -162,9 +162,9 @@ Tree-ID membership is `SIGSTORE_REKOR_V1.is_known_tree_id(tree_id)`. Adding Reko
 
 ### 5.2 Document the inline-pin-update protocol
 
-`SIGSTORE_REKOR_V1.pem` and the `tree_id_roster` array will need updates when the next v1 root ceremony happens, AND when v2 lands, AND when a second issuer joins the trust root. The protocol for these updates (PR review requirements, golden-test fixture regeneration, cross-version-anchor compatibility test) is currently implicit. Documenting it in `docs/OPERATOR-RUNBOOK.md` §15 (TBD) makes the update path auditable.
+`SIGSTORE_REKOR_V1.pem` and the `tree_id_roster` array will need updates when the next v1 root ceremony happens, AND when v2 lands, AND when a second issuer joins the trust root. The protocol for these updates (PR review requirements, golden-test fixture regeneration, cross-version-anchor compatibility test) is currently implicit. Documenting it in `docs/OPERATOR-RUNBOOK.md` §15 makes the update path auditable.
 
-**Status**: deferred to V1.18 Welle B as a `docs(v1.18/welle-b)` task. Not blocking for this ADR.
+**Status**: **DONE in V1.18 Welle B (4)**. Shipped as `docs(v1.18/welle-b): OPERATOR-RUNBOOK §15 inline-pin-update protocol + SECURITY-NOTES scope-k → ADR-006 forward link`. [OPERATOR-RUNBOOK §15](../OPERATOR-RUNBOOK.md) covers: trigger taxonomy (root ceremony / shard rotation / historical-shard discovery / Rekor v2 launch / second-issuer adoption), pre-edit verification gates, the step-by-step pin-update recipe (single-field discipline, signed commit, branch-protection traversal), seven-item PR review checklist, golden-fixture regeneration helper, cross-version-anchor compatibility test (the load-bearing gate against breaking historical anchor verification — §8.3 open question on multi-key-issuer interop is enforced here pre-merge), and a failure-modes table. CONSUMER-RUNBOOK §10.6 closure step 4 was updated in the same PR to point at §15 as the canonical operator path. The cross-version-anchor compat test specifically forbids shipping a PEM rotation that breaks prior-version fixture verification — that case forces opening a follow-on ADR for multi-key-issuer support before the rotation can land, closing the §8.3 interop question pre-merge instead of post-incident.
 
 ### 5.3 Add a Sigstore-degraded-mode flag to `verify-wasm-pin-check@v1`
 
