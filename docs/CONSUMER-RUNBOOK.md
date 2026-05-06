@@ -685,6 +685,349 @@ input documentation see
 
 ---
 
+## 10. Sigstore Public Good incident — extended degradation protocol
+
+This section is the consumer-side response protocol for an **extended
+Sigstore Public Good incident**: a degradation of the public Sigstore
+infrastructure (Fulcio CA `fulcio.sigstore.dev` or Rekor transparency
+log `rekor.sigstore.dev`) that lasts **longer than 24 hours**, OR an
+unscheduled rotation of the Rekor v1 production signing pubkey, OR any
+documented integrity breach. It is the structural complement to ADR-Atlas-006
+§4 Trigger C, which from the *operator side* describes when Atlas opens
+multi-issuer-Sigstore adoption work; from the *consumer side* this section
+prescribes how to keep your installs trustworthy *during* the incident
+window — without waiting for upstream multi-issuer infrastructure to land.
+
+§5's "transient outage" guidance (re-run after a few minutes; check the
+status pages) is the right move for **short** outages — minutes, hours,
+ad-hoc retries fix it. This §10 is for the longer tail: the case where
+the status page itself reports an extended event, or where you have
+re-tried over multiple hours and the failure persists, and you need a
+defensible position for shipping software during the degradation window.
+
+### 10.1 Why a separate protocol — what changes at scale
+
+Three things shift once a Sigstore incident exceeds the transient-retry
+threshold:
+
+1. **`npm audit signatures` becomes a noisy gate, not a signal.** Under a
+   transient outage it returns missing-or-invalid for a few minutes and
+   recovers; under an extended incident it returns the same result for
+   the entire window, which means *every* CI run for *every* package in
+   your tree that has Sigstore-anchored provenance fails the gate. The
+   information value collapses from "this artefact is suspicious" to
+   "Sigstore is unreachable for everyone".
+2. **The remaining trust roots become primary, not backup.** During
+   normal operation Atlas's consumer-side trust posture rests on three
+   distinct types of guarantee. (a) Three online verification layers
+   that the `verify-wasm-pin-check@v1` action checks on every CI run:
+   Layer 1 version-pin (V1.15 Welle A), Layer 2 lockfile integrity
+   (V1.15 Welle B), Layer 3 SLSA L3 provenance (V1.14 Scope E + V1.17
+   Welle A). (b) The release-side trust root: V1.17 Welle B SSH-signed
+   tags rooted in `.github/allowed_signers`. (c) The ultimate offline
+   fallback: §6 reproduce-from-source. During an extended Sigstore
+   incident, Layer 3 of (a) is unavailable; Layers 1 and 2 of (a)
+   continue to operate (they do not call Sigstore), and (b) and (c)
+   are entirely independent of Sigstore by construction. Treating
+   (a)-Layer-1, (a)-Layer-2, (b), and (c) as the *primary* verification
+   path during the window — rather than as fallback — is the correct
+   posture for the duration.
+3. **Audit-trail requirements grow.** A regulator or internal auditor
+   asking "how did you verify this install during the Sigstore incident
+   2026-Qx" needs a documented protocol you followed, not an ad-hoc
+   judgment call. This section is that protocol — cite it in your build
+   logs.
+
+### 10.2 Classification — is this Trigger C?
+
+A Sigstore incident is in scope for §10 if **any** of the following holds:
+
+- The Sigstore Public Good operations status page
+  (<https://status.sigstore.dev>) reports an active incident, **and** the
+  incident description explicitly affects Rekor write availability,
+  Rekor read availability, Fulcio CA availability, or signing-key
+  integrity, **and** the incident is older than 24 hours OR has been
+  flagged as "extended" on the status page.
+- A separate Sigstore Foundation announcement (blog, security advisory)
+  documents an unscheduled rotation of the Rekor v1 production signing
+  pubkey, regardless of the visible status-page state. Pubkey rotation
+  outside the planned ceremony schedule is by definition an integrity
+  event, not a routine availability event.
+- A separate Sigstore Foundation announcement documents an integrity
+  breach: forged attestation, log inconsistency proof, compromise of any
+  Sigstore Foundation key material.
+
+If **none** of the above holds, you are likely seeing a transient outage
+or a local network problem; follow §5's retry guidance instead, and
+escalate to §10 only if the retry pattern persists past the threshold.
+
+**Verification path** (run from any host with internet, before
+classifying — and ideally from **two** hosts on **two** independent
+network paths, since `status.sigstore.dev` and `blog.sigstore.dev` are
+hosted under the same DNS authority and a BGP / DNS hijack of one
+likely affects both):
+
+```bash
+# 1. Status page — JSON API (Atlassian Statuspage format). This is the
+#    machine-readable surface; prefer it over the HTML page.
+curl -fsS https://status.sigstore.dev/api/v2/summary.json | jq '.incidents[] | {name, status, impact, started_at}'
+
+# 2. Sigstore project security advisories — the canonical channel for
+#    pubkey rotation notices, integrity-breach disclosures, and any
+#    other security event that triggers §10.2 classification. The blog
+#    is for general announcements; advisories live here.
+curl -fsS https://api.github.com/repos/sigstore/sigstore/security-advisories | jq '.[].summary'
+# Plus the Sigstore community advisories repo for cross-project events:
+curl -fsS https://api.github.com/repos/sigstore/community/security-advisories | jq '.[].summary'
+
+# 3. Independent out-of-band cross-check — at least one signal that
+#    is NOT under the sigstore.dev DNS authority. Candidates:
+#    * Sigstore Foundation Mastodon / X account posts (different infra,
+#      different DNS authority — but treat social media as
+#      best-effort, not authoritative on its own).
+#    * The CNCF security mailing list archive
+#      (https://lists.cncf.io/g/cncf-security) — Sigstore is a CNCF
+#      project; security events of this magnitude are typically
+#      cross-posted there.
+#    * Direct out-of-band contact with a peer organisation also
+#      consuming Sigstore-anchored attestations — if their CI is
+#      seeing the same failure pattern, the incident is real.
+
+# 4. Cross-check the Atlas-side Sigstore monitoring you have configured.
+#    If your CI lane has a saved baseline of `npm audit signatures`
+#    output for `@atlas-trust/verify-wasm` from a known-good run, the
+#    diff against today's run is a fast local indicator.
+```
+
+The verification path is **observational only** — it tells you whether
+the incident exists; it does not prove the incident's specific scope or
+severity. The classification call belongs to whoever owns supply-chain
+trust at your organisation. This protocol is the "what to do once the
+call is made" half.
+
+**Adversary spoofing note.** A network-positioned attacker who can
+hijack `status.sigstore.dev` AND suppress the GitHub security-advisory
+API response can in principle keep a real Trigger C event invisible to
+a single observer. Step 3's independent out-of-band cross-check is the
+mitigation: the more independent surfaces report consistently, the
+harder a coordinated suppression becomes. If steps 1-2 say "no
+incident" but step 4's local diff against your baseline says
+"`npm audit signatures` is failing for every Sigstore-anchored
+package", trust the local diff and classify as in-scope for §10
+provisionally — better to over-classify and document the skip than to
+stay in §5's retry loop while a real incident is underway.
+
+### 10.3 Response decision tree
+
+Once an incident is classified as in-scope for §10, the response depends
+on what you are about to do *with* `@atlas-trust/verify-wasm` during the
+window:
+
+| Operation | Response |
+|---|---|
+| **No new install — `node_modules` already populated, lockfile committed.** | **Prerequisite:** before flipping the skip flag, re-run `npm ci --ignore-scripts` (or pnpm/Bun strict-frozen-lockfile equivalent) to re-prove the on-disk `node_modules` bytes against the committed lockfile-integrity hashes. The action's Layer 2 verifies the *lockfile entry*, not on-disk bytes; without this re-run, a post-install mutation (compromised local hook, in-place binary patch) would be invisible after Layer 3 is skipped. Once re-integrity is proven: continue running with `skip-provenance: true` in the V1.17 Welle A action — see §9 "When to skip a layer". Document in your build logs that the skip is incident-driven, with a status-page snapshot per §10.4. Re-enable Layer 3 only on incident closure per §10.6, not on per-run convenience. |
+| **Lockfile-bump install — picking up a new `@atlas-trust/verify-wasm` version.** | Defer the bump if possible. If the bump is mandatory (security advisory on the previous version, contractual obligation to track latest), proceed via §6 reproduce-from-source: clone the Atlas repo at the new tag, verify the SSH tag signature with `tools/verify-tag-signatures.sh`, build locally, byte-compare against the registry-fetched tarball. The §6 path does **not** depend on Sigstore — but it **does** depend on `crates.io` for `cargo install wasm-pack` (see §6 caveats). Under a coordinated attack scenario where Sigstore is degraded *and* `crates.io` is also compromised for the pinned `wasm-pack` version, the §6 build itself is suspect. **Mitigation:** any high-assurance pipeline that may need to invoke §6 during a Sigstore incident window should pre-cache the resolved `wasm-pack` binary alongside the offline Atlas clone *before* the incident — caching during the window gives no integrity guarantee. If you do not have a pre-cached `wasm-pack` and the bump is not deferrable, escalate per §10.5. |
+| **Fresh-clone install — first-time install in a new environment.** | Use §6 reproduce-from-source for the initial install. Once `node_modules` is populated, the install itself is complete — but a CI lane that runs `npm audit signatures` (per §5's recommendation) will continue to fail until the incident closes or `skip-provenance: true` is set per §10.4. Re-enable Layer 3 only on incident closure per §10.6. |
+| **Audit re-verification — a regulator or internal auditor asks you to re-verify a previously-installed version.** | Use §6 reproduce-from-source. The §6 path produces a stronger byte-equality proof than `npm audit signatures` ever did; the incident-window re-verification can in fact *exceed* the normal-operation guarantee if you record the SHA256 of the locally-rebuilt tarball alongside the auditor's question. |
+
+The decision tree's underlying invariant: **`npm audit signatures` is one
+of three independent verification surfaces, not the load-bearing one.**
+Welle B SSH tag-signing is the load-bearing trust root for Atlas releases
+(SECURITY-NOTES §scope-l); the §6 reproduce-from-source path collapses
+trust onto the Apache-2.0-licensed source code itself. During an extended
+Sigstore incident, those two surfaces remain fully active and are the
+correct primary verification path.
+
+### 10.4 Documenting the skip
+
+For every CI run that disables `npm audit signatures` during the
+incident window, the build log must capture, in order:
+
+- The Sigstore Public Good operations status page URL **plus a
+  byte-level snapshot the CI lane actually captured** (a URL alone is
+  insufficient — the page is dynamic and an auditor cannot retrieve
+  the page state at your specific timestamp from the URL alone). The
+  minimum mechanical form is a `curl -fsS <url> | sha256sum` line in
+  the build log, optionally also archiving the captured body to the
+  build's artefact store.
+- The Sigstore project security-advisory URL if pubkey rotation or
+  integrity event is in scope (per §10.2 step 2 — GitHub
+  security-advisory API or the published advisory page itself).
+- The action's exact version reference used during the skip — both
+  the human-readable tag (e.g. `verify-wasm-pin-check@v1`) and the
+  resolved commit SHA. SHA-pinning is recommended for the action in
+  general (§9 "Recommended pinning posture"); during an incident skip,
+  recording the SHA is mandatory so a forensic re-run can use the
+  identical action implementation.
+- An assertion that the SSH trust root in `.github/allowed_signers` (or
+  your pinned consumer-side copy of it) was independently verified
+  against the canonical Atlas-repo HEAD `.github/allowed_signers` at
+  some point inside the audit-trail's reconstructable window. This is
+  the trust root the §6 fallback depends on; a §10 skip with no SSH
+  trust root assertion leaves no record that the fallback path was
+  intact during the skip.
+- The verification path actually used in place of `npm audit signatures`
+  — for most cases this is "Layer 1 version-pin + Layer 2 lockfile
+  integrity (re-proven via fresh `npm ci --ignore-scripts`) + V1.17
+  Welle B SSH-tag verification" or "Layer 1 + Layer 2 (no install delta
+  in this run, last `npm ci` succeeded at `<previous timestamp>`)".
+- The Atlas-side incident reference if Atlas has issued one (per
+  ADR-006 §7, incident-triggered refreshes append an incident-record
+  sub-section *after* the existing review-cadence text in §7.2 — i.e.
+  the record appears as a new sub-section, not at §7.2 itself).
+- For a lockfile-bump install during the window: the package
+  version(s) installed during the skip, recorded explicitly so §10.6
+  step 2's post-closure re-verification can target them.
+
+The audit-trail bar is "a future auditor reading these logs cold can
+reconstruct what was verified, by which path, against which incident".
+Anything less than that is ad-hoc, not a protocol.
+
+A minimal log fragment that meets the bar (the field names below are
+**human-readable annotations**, not machine-parseable structured-log
+keys; if your CI lane ingests structured logs into a SIEM, also emit
+the same data via your platform's native annotation syntax — e.g.
+GitHub Actions `::notice file=...,title=...` for the workflow run's
+job summary, or your structured logger's `key=value` schema):
+
+```
+[timestamp] verify-wasm-pin-check action: v1 (commit SHA <40-hex-chars>)
+[timestamp] skip-provenance: true (incident-driven; not steady-state policy)
+[timestamp] sigstore-status-snapshot: https://status.sigstore.dev (curl-fsS-sha256: <64-hex-chars>; body archived as build-artefact path/to/sigstore-status-2026-MM-DD-HHMM.html)
+[timestamp] sigstore-security-advisory-ref: <URL or "n/a — no advisory at snapshot time">
+[timestamp] ssh-trust-root-verified: .github/allowed_signers verified against canonical Atlas HEAD at <timestamp> (sha256 <64-hex-chars>)
+[timestamp] alt-verification-path: Layer1 (version-pin) + Layer2 (re-proven via "npm ci --ignore-scripts" at <timestamp>) + V1.17 Welle B SSH-tag verification (last verified <timestamp>)
+[timestamp] atlas-incident-ref: <URL or "n/a — Atlas has not posted">
+[timestamp] skipped-package-versions: @atlas-trust/verify-wasm@<exact-version> (and any other Sigstore-anchored packages in the lockfile that were skipped)
+```
+
+### 10.5 Escalation — when §10 itself isn't enough
+
+The §10 protocol assumes the rest of Atlas's trust posture is healthy:
+the GitHub repo is reachable, the SSH tag-signing trust root in
+`.github/allowed_signers` is unmodified, the npm registry can serve the
+specific version you have pinned (even if Sigstore can't attest to it),
+and the published tarballs match the Atlas repo's tagged source. A
+**concurrent** incident across two of those surfaces collapses the
+protocol's assumptions and requires escalation:
+
+| Concurrent failure | Escalation |
+|---|---|
+| Sigstore down + GitHub repo unreachable | **Hard pause.** New installs are halted until at least one of GitHub or Sigstore recovers. If you have a pre-cached offline clone of the Atlas repo at the version you need (per §6's caveats), the §6 path still works locally — but a fresh-clone install is not possible. The directive here is stronger than §10.3's "defer if possible" because both the registry-attestation surface AND the source-of-truth surface are simultaneously unavailable; there is no remaining online verification surface. Document the pause in your build logs with a §10.4-shape entry, marked `paused = true`. |
+| Sigstore down + npm registry serving different bytes than the lockfile integrity | This is a **registry-side compromise** under cover of the Sigstore incident — exactly the threat model the three-layer trust stack is designed to catch. Treat it as a security incident. Escalate to security@your-org and to nelson@ultranova.io. Do not install. |
+| Sigstore down + SSH-tag-signing CI gate red | Escalate to nelson@ultranova.io with the failing tag identifier. Do not install. |
+| Sigstore down + your CI's allowed_signers integrity check fails (the consumer-side copy of `.github/allowed_signers` no longer matches canonical Atlas HEAD, OR your scope-m-equivalent gate flags a mutation) | This is the **design anti-goal scenario**: an attacker uses the Sigstore incident as cover to inject a malicious key into the trust root that §10's fallback paths depend on. **Hard pause.** Do not install. Do not flip `skip-provenance: true`. Do not invoke §6 (the §6 path's tag verification consumes the now-suspect trust root). Escalate to security@your-org and to nelson@ultranova.io with the diff between your consumer-side copy of `.github/allowed_signers` and canonical Atlas HEAD. Recovery is gated on Atlas operator-side investigation per V1.17 Welle C trust-root mutation defence. |
+| Sigstore down + an Atlas-side advisory recommends pausing | Follow the Atlas-side advisory; this protocol defers to operator-side guidance when both are active. |
+
+For all four escalation paths, the §6 reproduce-from-source path is the
+ultimate trust root *only if* its preconditions hold (repo reachable,
+toolchain reproducible). If those preconditions don't hold either, the
+correct posture is to **stop installing** until the situation resolves,
+and to document the stop in your build logs the same way as a normal
+incident-window skip.
+
+### 10.6 Closing the incident — re-verification on recovery
+
+When the Sigstore Public Good operations status page reports the
+incident closed, do **not** silently re-enable `npm audit signatures`
+and forget. The closure is a checkpoint:
+
+1. Re-enable `verify-wasm-pin-check@v1` Layer 3 (`skip-provenance: false`
+   — the default).
+2. On the next CI run, capture the post-closure `npm audit signatures`
+   output and store it as the audit-trail sibling of the
+   during-incident skip log entries. The command audits the **whole
+   lockfile**, not a single package — the captured output therefore
+   covers `@atlas-trust/verify-wasm` plus every other Sigstore-anchored
+   package in your tree. This gives your auditor the bookend of the
+   incident: "X passed during incident via §10 alt-path; Y passed
+   after closure via normal path; Z bytes are equal".
+
+   **Critical clarification for lockfile-bump installs during the
+   window:** if §10.3's lockfile-bump row was activated and the
+   skipped-package-versions field in §10.4's log captured one or more
+   specific versions that were installed during the incident window,
+   the post-closure audit must explicitly include those versions. If
+   you have since bumped further past the during-window version, run a
+   targeted `npm audit signatures` against a temporary install of the
+   exact during-window version (e.g. in a scratch directory) so the
+   audit-trail bookend covers the *skipped versions*, not just the
+   currently-installed ones. Without this, an attestation issued under
+   compromised key material during the window for the during-window
+   version is never re-verified.
+3. If the incident's Sigstore Foundation post-mortem recommends
+   consumer-side actions (e.g. revalidate any provenance attestations
+   issued during a window of compromised key material), follow them
+   per the post-mortem; this is incident-specific and outside the
+   pre-shippable protocol.
+4. If the incident classification was "Trigger C — pubkey rotation" or
+   "Trigger C — integrity breach", expect Atlas to ship a verifier-core
+   update with the new pin before resuming normal anchor verification.
+   Pin-updates land in the active-shard constants
+   `SIGSTORE_REKOR_V1_PEM` / `SIGSTORE_REKOR_V1_TREE_IDS` per ADR-006
+   §5.2; the operator-side update protocol *will* live in
+   OPERATOR-RUNBOOK §15 once it is written (currently TBD per
+   ADR-006 §5.2 follow-on; OPERATOR-RUNBOOK ends at §14 today).
+   **Until §15 ships**, the closure condition for a pubkey-rotation /
+   integrity-breach incident is: (a) the Sigstore Foundation has
+   issued a post-mortem with concrete consumer-side actions, AND
+   (b) Atlas has shipped a tagged release whose
+   `SIGSTORE_REKOR_V1_PEM` / `SIGSTORE_REKOR_V1_TREE_IDS` constants
+   match the values the Foundation post-mortem prescribes. Either
+   signal alone is insufficient. Verify (b) by reading the active
+   constants in `crates/atlas-trust-core/src/anchor.rs` at the
+   tagged-release commit and cross-referencing the post-mortem.
+
+### 10.7 What §10 does NOT do
+
+This protocol is deliberately **scoped**. It does not:
+
+- Add multi-issuer Sigstore verification on the consumer side. That is
+  ADR-006's adoption work, gated on §4 triggers.
+- Modify the `verify-wasm-pin-check@v1` action's logic. The action
+  already supports `skip-provenance: true` (§9) — §10 prescribes when to
+  use it, not how to extend it.
+- Replace `npm audit signatures` with a synthetic always-pass during the
+  window. Skipping is explicit; faking-success is forbidden — it would
+  pollute the audit trail in exactly the way §10's documentation
+  requirements are designed to prevent.
+- Promise that §6 reproduce-from-source always succeeds. It depends on
+  the Atlas repo being reachable and the toolchain pin being respected;
+  see §6's caveats. §10 references §6 as the recommended path during the
+  incident window — it does not guarantee §6 is itself unaffected.
+- **Authorise permanent disablement of Layer 3.** `skip-provenance: true`
+  is permitted under §10 only for the duration of an active in-scope
+  Sigstore incident (per §10.2 classification). The skip flag must be
+  removed on incident closure per §10.6; using §10 as cover for an
+  ongoing steady-state policy of skipped provenance is **out of scope
+  and explicitly disallowed**. Audit-trail entries should record
+  `skip-provenance: true (incident-driven; not steady-state policy)`
+  exactly to make the time-boundedness machine-checkable across log
+  searches.
+- **Evaluate whether the Atlas publish lane itself was affected by the
+  incident window.** A Trigger C integrity-breach incident may mean
+  that `@atlas-trust/verify-wasm` releases published *during the
+  incident window* carry attestations issued under compromised Fulcio
+  or Rekor key material. §10 does not assess this — that is an
+  Atlas-side post-incident analysis owned by ADR-006 §7.2's
+  incident-triggered refresh. A consumer whose pinned version was
+  published during the breach window MUST treat their post-closure
+  re-verification (§10.6 step 2) as **necessary but not sufficient**
+  and wait for the Atlas post-incident statement before treating the
+  install as fully audited; the §6 reproduce-from-source path is the
+  consumer-side mitigation while waiting, since §6 collapses trust
+  onto the Apache-2.0-licensed source code itself, independent of any
+  publish-lane attestation. If the Atlas post-incident statement
+  recommends a re-pin to a post-incident version, follow it.
+
+The principle: §10 turns an **information-poor** incident state (one of
+three layers gone) into an **information-rich** one (documented skip,
+documented alt-path, documented audit trail) without changing the
+verifier's actual trust posture. That is the right scope for a
+runbook-side response to an upstream-infrastructure event.
+
+---
+
 ## Reporting issues
 
 Verifier vulnerabilities — bypasses, signature-acceptance bugs,
