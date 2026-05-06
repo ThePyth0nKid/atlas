@@ -963,8 +963,8 @@ and forget. The closure is a checkpoint:
 4. If the incident classification was "Trigger C — pubkey rotation" or
    "Trigger C — integrity breach", expect Atlas to ship a verifier-core
    update with the new pin before resuming normal anchor verification.
-   Pin-updates land in the active-shard constants
-   `SIGSTORE_REKOR_V1_PEM` / `SIGSTORE_REKOR_V1_TREE_IDS` per ADR-006
+   Pin-updates land in the active-shard fields
+   `SIGSTORE_REKOR_V1.pem` / `SIGSTORE_REKOR_V1.tree_id_roster` per ADR-006
    §5.2; the operator-side update protocol *will* live in
    OPERATOR-RUNBOOK §15 once it is written (currently TBD per
    ADR-006 §5.2 follow-on; OPERATOR-RUNBOOK ends at §14 today).
@@ -972,7 +972,7 @@ and forget. The closure is a checkpoint:
    integrity-breach incident is: (a) the Sigstore Foundation has
    issued a post-mortem with concrete consumer-side actions, AND
    (b) Atlas has shipped a tagged release whose
-   `SIGSTORE_REKOR_V1_PEM` / `SIGSTORE_REKOR_V1_TREE_IDS` constants
+   `SIGSTORE_REKOR_V1.pem` / `SIGSTORE_REKOR_V1.tree_id_roster` fields
    match the values the Foundation post-mortem prescribes. Either
    signal alone is insufficient. Verify (b) by reading the active
    constants in `crates/atlas-trust-core/src/anchor.rs` at the

@@ -8,7 +8,7 @@
 #      shifts, deprecation of accepted entry types.
 #   2. Sigstore log-pubkey rotation — when Sigstore rotates the
 #      ECDSA P-256 log signing key, the verifier's pinned roster needs
-#      a corresponding update (see SIGSTORE_REKOR_V1_TREE_IDS in
+#      a corresponding update (see SIGSTORE_REKOR_V1.tree_id_roster in
 #      atlas-trust-core/src/anchor.rs); a nightly red here is the
 #      first signal.
 #   3. Tree_id growth — the precision-preserving JSON path (V1.8

@@ -27,8 +27,8 @@
 use atlas_trust_core::anchor::{
     canonical_checkpoint_bytes, extract_signature_line_sigstore, leaf_hash_for,
     parse_sigstore_checkpoint_tree_id, sigstore_anchored_hash_for, sigstore_artifact_bytes_for,
-    MOCK_LOG_ID, MOCK_LOG_PUBKEY_HEX, SIGSTORE_REKOR_V1_KEY_ID, SIGSTORE_REKOR_V1_LOG_ID,
-    SIGSTORE_REKOR_V1_ORIGIN,
+    MOCK_LOG_ID, MOCK_LOG_PUBKEY_HEX, SIGSTORE_REKOR_V1, SIGSTORE_REKOR_V1_KEY_ID,
+    SIGSTORE_REKOR_V1_LOG_ID,
 };
 use atlas_trust_core::trace_format::{AnchorEntry, AnchorKind, InclusionProof};
 use base64::Engine;
@@ -362,12 +362,12 @@ fn issue_one_via_rekor(
     // verification later.
     let checkpoint_sig = extract_signature_line_sigstore(
         &response.verification.inclusion_proof.checkpoint,
-        SIGSTORE_REKOR_V1_ORIGIN,
+        SIGSTORE_REKOR_V1.origin,
         Some(&*SIGSTORE_REKOR_V1_KEY_ID),
     )?;
 
     // Pull the active tree-id out of the FIRST line of the signed
-    // checkpoint body. The verifier pins SIGSTORE_REKOR_V1_ACTIVE_TREE_ID,
+    // checkpoint body. The verifier pins SIGSTORE_REKOR_V1.active_tree_id,
     // so an entry whose checkpoint names a different tree is doomed at
     // verify time. We extract here so the trace bundle can carry it for
     // the verifier; we do NOT default to the constant, because doing so

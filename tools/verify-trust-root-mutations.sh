@@ -100,6 +100,16 @@ PROTECTED_SURFACE=(
   ".github/workflows/verify-tag-signatures.yml"
   ".github/workflows/verify-trust-root-mutations.yml"
   ".github/workflows/wasm-publish.yml"
+  # Sigstore Rekor v1 anchor verifier — pins the production log pubkey
+  # (`SIGSTORE_REKOR_V1.pem`), the active Trillian tree-ID, and the
+  # trusted-shard roster. A PR that simultaneously mutates this file
+  # AND the pin tests would silently widen Atlas's accepted trust root
+  # for every Sigstore-anchored trace. Gating closes that gap; the next
+  # mutation must carry an SSH-signed commit from an allowed_signer
+  # (e.g. an actual upstream Sigstore rotation event handled by an
+  # operator with the required key). Added in V1.18 Welle B (2)
+  # post-review (security M-1).
+  "crates/atlas-trust-core/src/anchor.rs"
   "tools/setup-tag-signing.sh"
   "tools/test-tag-signatures.sh"
   "tools/test-trust-root-mutations.sh"

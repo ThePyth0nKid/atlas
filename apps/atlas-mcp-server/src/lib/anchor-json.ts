@@ -7,7 +7,7 @@
  * `Number.MAX_SAFE_INTEGER` (~2^53), so a `JSON.parse` round-trip in
  * Node silently rewrites the low digits and the entry no longer
  * verifies under the pinned shard roster (see
- * `crates/atlas-trust-core/src/anchor.rs::SIGSTORE_REKOR_V1_TREE_IDS`).
+ * `crates/atlas-trust-core/src/anchor.rs::SIGSTORE_REKOR_V1.tree_id_roster`).
  *
  * V1.7 sidestepped the problem by gating anchor-chain extension on the
  * mock-issuer path. V1.8 closes the gap: the MCP server uses

@@ -51,6 +51,14 @@
 # Publish workflow (has the inline first-step verify-tag gate).
 /.github/workflows/wasm-publish.yml @ThePyth0nKid
 
+# Sigstore Rekor v1 anchor verifier (V1.18 Welle B (2) post-review M-1).
+# Pins production log pubkey, active Trillian tree-ID, and trusted-shard
+# roster for every Sigstore-anchored Atlas trace. Mutation here without
+# both an SSH-signed commit (Welle C gate) AND a second-maintainer review
+# (this CODEOWNERS entry) would silently widen Atlas's accepted trust
+# root for Sigstore-path verification.
+/crates/atlas-trust-core/src/anchor.rs @ThePyth0nKid
+
 # Tag-signing setup helper (could be modified to weaken key-type
 # allow-list checks).
 /tools/setup-tag-signing.sh @ThePyth0nKid

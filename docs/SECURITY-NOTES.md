@@ -153,14 +153,14 @@ by log_id dispatch:
 - **Atlas anchoring key drift:** `crates/atlas-signer/src/anchor.rs::atlas_anchor_pubkey_pem_is_pinned`
   pins the ECDSA P-256 pubkey derived from `ATLAS_ANCHOR_SEED`. Touching
   the seed or the derivation without updating the pin fails CI.
-- **Sigstore Rekor v1 production pubkey pin:** `crates/atlas-trust-core/src/anchor.rs::SIGSTORE_REKOR_V1_PEM`
+- **Sigstore Rekor v1 production pubkey pin:** `crates/atlas-trust-core/src/anchor.rs::SIGSTORE_REKOR_V1.pem`
   is the fixed ECDSA P-256 SPKI key (fetched from
   `https://rekor.sigstore.dev/api/v1/log/publicKey` on 2026-04-28).
   `SIGSTORE_REKOR_V1_LOG_ID` is SHA-256(DER bytes). Any anchor with a
   mismatched log_id is rejected before proof work.
 - **apiVersion pin:** `entry_body_binds_anchored_hash` asserts
   `apiVersion == "0.0.1"` — any other value is rejected at verify time.
-- **Trillian tree-ID pin:** `SIGSTORE_REKOR_V1_ACTIVE_TREE_ID` pins the
+- **Trillian tree-ID pin:** `SIGSTORE_REKOR_V1.active_tree_id` pins the
   active shard (`1_193_050_959_916_656_506`). An anchor whose tree_id
   does not match is rejected before ECDSA signature verify.
 - **keyID rotation handling:** The C2SP signed-note may carry multiple
@@ -261,11 +261,13 @@ pipeline diverges the heads and breaks audit-by-mail.
 V1.7 expands the Sigstore verifier to accept multiple shards (active + historical)
 while maintaining the same single-key trust property:
 
-- **Roster membership check:** Replaces strict tree-ID equality (`SIGSTORE_REKOR_V1_ACTIVE_TREE_ID == entry.tree_id`)
-  with membership check (`is_known_sigstore_rekor_v1_tree_id(entry.tree_id)`). The roster
-  is a pinned constant `SIGSTORE_REKOR_V1_TREE_IDS: &[i64] = &[1_193_050_959_916_656_506, 3_904_496_407_287_907_110, 2_605_736_670_972_794_746]`.
-  Tested via `sigstore_tree_id_roster_is_pinned` and `known_sigstore_tree_id_membership` unit tests.
-- **Same-key trust property:** The pinned ECDSA P-256 pubkey (`SIGSTORE_REKOR_V1_PEM`)
+- **Roster membership check:** Replaces strict tree-ID equality (`SIGSTORE_REKOR_V1.active_tree_id == entry.tree_id`)
+  with membership check (`SIGSTORE_REKOR_V1.is_known_tree_id(entry.tree_id)`). The roster
+  is the pinned slice field `SIGSTORE_REKOR_V1.tree_id_roster: &[i64] = &[1_193_050_959_916_656_506, 3_904_496_407_287_907_110, 2_605_736_670_972_794_746]`.
+  Tested via `rekor_issuer_rosters_are_pinned` and `rekor_issuer_tree_id_membership` unit tests
+  (the per-issuer V1.18 Welle B (2) successors of `sigstore_tree_id_roster_is_pinned` /
+  `known_sigstore_tree_id_membership`).
+- **Same-key trust property:** The pinned ECDSA P-256 pubkey (`SIGSTORE_REKOR_V1.pem`)
   is unchanged across all three shards. Signature verification depends only on this
   single key. An attacker cannot exploit per-shard keys because there is only one
   pinned key.
@@ -797,8 +799,8 @@ forks consume an affected build.
   has landed: (1) Sigstore Rekor v1 API surface change (response
   schema, error format, deprecation event); (2) Sigstore log-pubkey
   rotation — the pinned ECDSA P-256 key in
-  `SIGSTORE_REKOR_V1_PEM` (and, where the rotation also adds a new
-  shard, the tree-ID roster `SIGSTORE_REKOR_V1_TREE_IDS`) requires
+  `SIGSTORE_REKOR_V1.pem` (and, where the rotation also adds a new
+  shard, the tree-ID roster `SIGSTORE_REKOR_V1.tree_id_roster`) requires
   a coordinated update + crate-version bump per V1.7's boundary rule;
   (3) tree_id growth past V1.8's lossless-JSON precision-preservation
   guarantee. The lane is decoupled from PR triggers so a Sigstore
