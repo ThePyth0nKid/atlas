@@ -480,13 +480,27 @@ fn map_session_lock_poison() -> MasterSeedError {
 ///   base key for further chained derivations; the workflow uses it
 ///   as Ed25519 seed material, full stop.
 fn derived_key_template() -> Vec<Attribute> {
+    // CK_ULONG is the C `unsigned long` type, whose width is set by
+    // the platform's data model — not by the OS alone:
+    //   * Windows is LLP64 → `unsigned long` is always 32-bit, on
+    //     both 32-bit and 64-bit Windows targets.
+    //   * Unix-likes follow the pointer width: ILP32 (32-bit Linux,
+    //     `armv7-unknown-linux-gnueabihf`, wasm32, …) → 32-bit;
+    //     LP64 (64-bit Linux/macOS) → 64-bit.
+    // The cryptoki crate's `Ulong: From<CK_ULONG>` impl therefore
+    // resolves to `From<u32>` on { any-Windows, 32-bit Unix } and
+    // `From<u64>` on 64-bit Unix. A single literal cast cannot
+    // satisfy both; the cfg below selects the right width at
+    // compile time across the full target matrix.
+    // `DERIVED_LEN = 32` fits in either width trivially.
+    #[cfg(any(windows, target_pointer_width = "32"))]
+    let derived_len_ck = DERIVED_LEN as u32;
+    #[cfg(all(not(windows), target_pointer_width = "64"))]
+    let derived_len_ck = DERIVED_LEN as u64;
     vec![
         Attribute::Class(ObjectClass::SECRET_KEY),
         Attribute::KeyType(KeyType::GENERIC_SECRET),
-        // cryptoki normalises CK_ULONG to a `u32` wrapper because
-        // CK_ULONG is 4 bytes on Windows. `DERIVED_LEN = 32` fits in
-        // a u32 trivially; the cast is checked at compile time.
-        Attribute::ValueLen((DERIVED_LEN as u32).into()),
+        Attribute::ValueLen(derived_len_ck.into()),
         Attribute::Token(false),
         Attribute::Sensitive(false),
         Attribute::Extractable(true),

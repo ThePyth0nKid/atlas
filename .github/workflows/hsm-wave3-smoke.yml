@@ -110,10 +110,46 @@ jobs:
             --label "${SOFTHSM2_TOKEN_LABEL}" \
             --pin "${SOFTHSM2_PIN}" \
             --so-pin "${SOFTHSM2_SO_PIN}"
+          # SoftHSM2 pads the Label field with trailing whitespace to a
+          # fixed column width, so the prior `Label:[[:space:]]+...$`
+          # regex stopped matching once the runner image picked up a
+          # SoftHSM2 build that emits the padding (regression observed
+          # on master 2026-05-04). The label is also passed via `awk -v`
+          # rather than shell-interpolated into the awk script, so a
+          # future label string containing awk-special characters
+          # cannot break the parser. Match shape: capture the slot id
+          # from `^Slot N` headers; on any line containing `Label:`,
+          # strip the leading `…Label:<spaces>` prefix + trailing
+          # whitespace, then exact-compare to the configured label.
           SLOT_ID=$(softhsm2-util --show-slots \
-            | awk '/^Slot [0-9]+/{slot=$2} /Label:[[:space:]]+'"${SOFTHSM2_TOKEN_LABEL}"'$/{print slot; exit}')
+            | awk -v label="${SOFTHSM2_TOKEN_LABEL}" '
+                /^Slot [0-9]+/ { slot = $2 }
+                /Label:[[:space:]]+/ {
+                  line = $0
+                  sub(/^[[:space:]]*Label:[[:space:]]+/, "", line)
+                  sub(/[[:space:]]+$/, "", line)
+                  if (line == label) { print slot; exit }
+                }')
           if [ -z "${SLOT_ID}" ]; then
             echo "FATAL: could not resolve slot id for token ${SOFTHSM2_TOKEN_LABEL}"
+            softhsm2-util --show-slots
+            exit 1
+          fi
+          # Defence-in-depth: require SLOT_ID to be a short string of
+          # decimal digits before exporting it via $GITHUB_ENV. Without
+          # this check, a tampered `softhsm2-util` binary could emit a
+          # Slot header line containing a literal newline in the second
+          # whitespace-delimited field, which awk's `$2` would faithfully
+          # capture and `>> "$GITHUB_ENV"` would write as two lines —
+          # injecting an arbitrary key=value pair into the step
+          # environment for every subsequent step. The `{1,10}` magnitude
+          # bound rejects pathologically long all-digit strings before
+          # they reach the env file (PKCS#11 slot ids are 32-bit
+          # unsigned per CK_SLOT_ID; max is 4294967295, exactly 10
+          # digits). Bash `[[ =~ ]]` is available in GitHub Actions'
+          # default shell on Linux runners.
+          if ! [[ "${SLOT_ID}" =~ ^[0-9]{1,10}$ ]]; then
+            echo "FATAL: SLOT_ID failed digit/length validation"
             softhsm2-util --show-slots
             exit 1
           fi
@@ -140,9 +176,15 @@ jobs:
           workspaces: . -> target
 
       - name: Install pnpm
+        # Version is resolved from the root `package.json`'s
+        # `packageManager: pnpm@x.y.z` field (Corepack convention).
+        # Specifying `with.version` here in addition would conflict
+        # — `pnpm/action-setup` v4 explicitly errors out with
+        # ERR_PNPM_BAD_PM_VERSION when both are set, to prevent the
+        # silent split between dev-machine resolution (Corepack reads
+        # packageManager) and CI resolution (overridden version).
+        # Keep packageManager as the single source of truth.
         uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47 # v4.0.0
-        with:
-          version: 9
 
       - name: Install Node.js
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
