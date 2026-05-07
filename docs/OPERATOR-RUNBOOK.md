@@ -2628,14 +2628,25 @@ bash tools/regenerate-sigstore-fixture.sh \
   --out crates/atlas-trust-core/tests/fixtures/sigstore_rekor_v1_logindex_<N>.json
 
 # 5. Run the cross-version-anchor compatibility test (see next sub-section).
-#    NOTE: tools/cross-version-anchor-compat.sh is slated to ship
-#    alongside the first real rotation event — it does not exist
-#    in V1.18 today. Until it ships, the manual substitute is to
-#    run `cargo test -p atlas-trust-core --test sigstore_golden`
-#    against the existing prior-version fixture corpus in
-#    crates/atlas-trust-core/tests/fixtures/ — the same test
-#    harness the script will eventually wrap. Document the manual
-#    run + its result in the PR body in lieu of the script log.
+#    The script materialises the prior-version Sigstore Rekor v1
+#    fixture corpus from --legacy-ref (default origin/master) and
+#    runs `cargo test -p atlas-trust-core --test sigstore_golden`
+#    against each fixture under the WORKING-TREE pin (your edited
+#    anchor.rs). Every prior fixture must verify or the rotation
+#    breaks consumer-side replay (ADR-006 §8.3) — exit 1 means STOP,
+#    do not ship.
+#
+#    Note: --legacy-ref must be the rotation branch's BASE ref (the
+#    last commit before this rotation diverged), not a future master
+#    that already contains your rotation. On a typical rotation PR
+#    branched from current master, the default origin/master is
+#    correct as long as you have run `git fetch origin master`.
+#
+#    On Windows hosts the cargo binary is typically outside the bash
+#    PATH; set CARGO (or pass --cargo) to point at it explicitly. The
+#    quoted form below survives shell expansion of the angle brackets:
+#      CARGO='/c/Users/<user>/.cargo/bin/cargo.exe' \
+#        bash tools/cross-version-anchor-compat.sh
 bash tools/cross-version-anchor-compat.sh
 
 # 6. Re-run all anti-drift gates from the pre-edit verification.
@@ -2779,8 +2790,29 @@ a different combination of (signer build, anchor shard, log key) so
 the rotation's blast radius is bounded by the corpus and visible in
 the diff.
 
+`tools/cross-version-anchor-compat.sh` (V1.18 Welle B (8) —
+[PROTECTED_SURFACE](#14-trust-root-mutation-defence)) enumerates the
+legacy fixture corpus from a git ref (default `origin/master`),
+materialises each fixture into the canonical on-disk path, and runs
+`cargo test -p atlas-trust-core --test sigstore_golden` against each
+under the working-tree `anchor.rs`. The on-disk fixture is restored
+on EXIT/INT/TERM via a trap, so an interrupted run leaves no debris.
+Exit codes: `0` = every legacy fixture PASS; `1` = at least one
+legacy fixture FAIL (cross-version compat broken — STOP); `2` =
+misconfiguration (bad `--legacy-ref`, missing canonical fixture, no
+fixtures found at the ref, cargo not callable, env-var override
+attempted under `GITHUB_ACTIONS=true`).
+
 ```bash
-bash tools/cross-version-anchor-compat.sh
+# Default invocation (uses origin/master as the legacy ref). On
+# Windows hosts cargo lives outside the bash PATH; set CARGO or
+# pass --cargo. Quote the value so the shell does not expand the
+# literal `<user>` placeholder as a redirection or globbing token.
+CARGO='/c/Users/<user>/.cargo/bin/cargo.exe' \
+  bash tools/cross-version-anchor-compat.sh
+
+# Explicit legacy ref (e.g. when the rotation branched from a tag):
+bash tools/cross-version-anchor-compat.sh --legacy-ref v1.17.0
 ```
 
 Expected output: every prior-version fixture PASSES under the new pin.
