@@ -1,0 +1,133 @@
+# V1.18 Welle B (5) — Branch-protection / Repository-Ruleset state
+# verifier workflow.
+#
+# Operator-side counterpart to V1.17 Welle C's
+# `verify-trust-root-mutations.yml`. The Welle C workflow gates *PRs
+# that mutate trust-root surfaces*; this workflow gates *operator-side
+# Ruleset configuration drift* on the Ruleset that BINDS the Welle C
+# gate as a required status check on master.
+#
+# Why this exists:
+#
+#   The Welle C in-repo trust-root-mutation gate ONLY binds because
+#   the Master Ruleset (currently id 15986324, name "Master trust-
+#   root protection") pins:
+#     1. enforcement: active
+#     2. bypass_actors: [] (no admin-bypass)
+#     3. required_status_checks includes
+#        "Verify trust-root-modifying commits"
+#     4. pull_request.require_code_owner_review: true
+#     5. required_signatures rule present
+#     6. non_fast_forward + deletion rules present
+#
+#   If any of these silently regress (operator misclick in the
+#   Settings UI; out-of-band API PATCH; ruleset replaced with a
+#   weaker one of the same name; ruleset disabled "for a moment"
+#   and forgotten), the Welle C gate stops being load-bearing
+#   without any commit landing in the repo. There is no in-repo
+#   signal that defence-in-depth has been weakened.
+#
+#   This workflow IS that in-repo signal: a daily cron + post-push
+#   + on-demand check that fires red the moment the live Ruleset
+#   diverges from the pinned canonical form in
+#   `tools/expected-master-ruleset.json`.
+#
+# Trigger choice:
+#
+#   * schedule: nightly cron — catches drift even when no commits
+#     land for days/weeks. 03:30 UTC chosen to avoid the
+#     top-of-hour cron-rush window (GitHub clusters cron jobs at
+#     :00 and degrades them under heavy load).
+#
+#   * push to master — catches drift on the heartbeat of normal
+#     development activity. Atlas master pushes are gated by PR
+#     with required-status-check, so this fires ~1× per merged
+#     PR — modest cadence, useful redundancy.
+#
+#   * workflow_dispatch — manual re-check after a deliberate
+#     Ruleset change (operator re-pins expected-master-ruleset.json
+#     and wants to confirm the new pin matches reality).
+#
+#   * NOT pull_request — the PR-side trust-root mutation defence
+#     is already covered by verify-trust-root-mutations.yml; this
+#     workflow's concern is the operator-side Ruleset state, which
+#     is orthogonal to PR contents.
+#
+# Permissions:
+#
+#   * contents: read       — to checkout the repo (and read the
+#                            pinned expected file).
+#   * administration: read — required by GitHub to read Repository
+#                            Rulesets via the REST API. Without
+#                            this, gh api will return 403 and the
+#                            verifier exits 2.
+#
+# Trust posture: SHA-pinned `actions/checkout` (not the mutable
+# `@v4` tag). Same rationale as verify-tag-signatures.yml + verify-
+# trust-root-mutations.yml — workflows that enforce supply-chain
+# hygiene must not themselves depend on mutable references.
+
+name: verify-branch-protection
+
+on:
+  schedule:
+    - cron: '30 3 * * *'
+  push:
+    branches:
+      - master
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  administration: read
+
+# Serialise overlapping runs (cron + push collisions) without
+# discarding any drift signal.
+#
+# `cancel-in-progress: false` is load-bearing: a cron run that is
+# about to report exit 1 (drift detected) must not be silently
+# cancelled by a subsequent push run. The GitHub Actions UI shows
+# cancelled runs as "cancelled", not "failed" — no failure
+# notification fires. For a verifier whose entire purpose is to
+# surface a defence-down state, swallowing an in-progress run is
+# the worst possible behaviour. The verifier completes in <30s; the
+# cost of serialising rather than cancelling is negligible.
+# Reported as code-review finding HIGH-2 in V1.18 Welle B (5).
+concurrency:
+  group: verify-branch-protection
+  cancel-in-progress: false
+
+jobs:
+  verify-master-ruleset:
+    name: Verify Master ruleset state
+    runs-on: ubuntu-latest
+    steps:
+      # SHA-pinned. v4.2.2 = `11bd71901bbe5b1630ceea73d27597364c9af683`.
+      # `fetch-depth: 1` — verifier only reads tools/expected-master-
+      # ruleset.json + tools/verify-master-ruleset.sh; no history walk.
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+
+      # Diagnostic: surface the run context (trigger, repo, runner)
+      # before the verifier fires. Useful when debugging a red
+      # nightly that nobody recognises.
+      - name: Show run context
+        run: |
+          echo "=== verify-branch-protection run context ==="
+          echo "  trigger:    ${GITHUB_EVENT_NAME}"
+          echo "  repository: ${GITHUB_REPOSITORY}"
+          echo "  ref:        ${GITHUB_REF}"
+          echo "  sha:        ${GITHUB_SHA}"
+
+      # Run the verifier. ATLAS_OWNER/ATLAS_REPO default to
+      # ThePyth0nKid/atlas inside the script; we set them explicitly
+      # from the workflow's GITHUB_REPOSITORY so a fork's CI verifies
+      # the fork's own ruleset, not the upstream's.
+      - name: Verify Master ruleset matches pinned configuration
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ATLAS_OWNER: ${{ github.repository_owner }}
+          ATLAS_REPO: ${{ github.event.repository.name }}
+        run: bash tools/verify-master-ruleset.sh

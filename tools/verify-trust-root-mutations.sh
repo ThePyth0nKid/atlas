@@ -97,6 +97,16 @@ set -euo pipefail
 PROTECTED_SURFACE=(
   ".github/CODEOWNERS"
   ".github/allowed_signers"
+  # Branch-protection / Repository-Ruleset state verifier workflow
+  # (V1.18 Welle B (5)). Tampering here — disabling the workflow,
+  # silencing the cron, removing the `administration: read` permission,
+  # or rewriting the run step to swallow the verifier's exit code —
+  # would silently revoke the in-repo signal that detects operator-side
+  # Ruleset weakening. Without this signal, an attacker who compromises
+  # the maintainer's GitHub session can disable the Master Ruleset,
+  # bypass Welle C, and Atlas would have no in-repo evidence the
+  # defence has been weakened.
+  ".github/workflows/verify-branch-protection.yml"
   ".github/workflows/verify-tag-signatures.yml"
   ".github/workflows/verify-trust-root-mutations.yml"
   ".github/workflows/wasm-publish.yml"
@@ -110,9 +120,22 @@ PROTECTED_SURFACE=(
   # operator with the required key). Added in V1.18 Welle B (2)
   # post-review (security M-1).
   "crates/atlas-trust-core/src/anchor.rs"
+  # Pinned canonical form of the "Master trust-root protection"
+  # Repository Ruleset — the comparison target for
+  # `tools/verify-master-ruleset.sh` (V1.18 Welle B (5)). An attacker
+  # who could mutate this file unsigned could "re-pin" the verifier to
+  # accept a weakened live Ruleset (e.g. with `bypass_actors`
+  # populated, or `enforcement: disabled`), making the drift detector
+  # fail-open silently while the defence is gone.
+  "tools/expected-master-ruleset.json"
   "tools/setup-tag-signing.sh"
   "tools/test-tag-signatures.sh"
   "tools/test-trust-root-mutations.sh"
+  # Verifier script for the "Master trust-root protection" Ruleset
+  # state (V1.18 Welle B (5)). Same threat model as
+  # `verify-trust-root-mutations.sh` itself: a silent rewrite to skip
+  # the diff or always-exit-0 would null the operator-side defence.
+  "tools/verify-master-ruleset.sh"
   "tools/verify-tag-signatures.sh"
   "tools/verify-trust-root-mutations.sh"
 )

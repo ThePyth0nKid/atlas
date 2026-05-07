@@ -42,6 +42,12 @@
 # This file (mutating CODEOWNERS could remove review requirements).
 /.github/CODEOWNERS @ThePyth0nKid
 
+# Branch-protection / Repository-Ruleset state verifier workflow
+# (V1.18 Welle B (5)). Detects operator-side Ruleset weakening that
+# would silently un-bind the Welle C in-repo gate. Tampering here
+# silences the drift detector itself.
+/.github/workflows/verify-branch-protection.yml @ThePyth0nKid
+
 # Tag-signing enforcement workflow (V1.17 Welle B).
 /.github/workflows/verify-tag-signatures.yml @ThePyth0nKid
 
@@ -59,6 +65,12 @@
 # root for Sigstore-path verification.
 /crates/atlas-trust-core/src/anchor.rs @ThePyth0nKid
 
+# Pinned canonical form of the "Master trust-root protection" Ruleset
+# (V1.18 Welle B (5)). Comparison target for verify-master-ruleset.sh.
+# An attacker mutating this could "re-pin" the verifier to accept a
+# weakened live Ruleset, making the drift detector fail-open silently.
+/tools/expected-master-ruleset.json @ThePyth0nKid
+
 # Tag-signing setup helper (could be modified to weaken key-type
 # allow-list checks).
 /tools/setup-tag-signing.sh @ThePyth0nKid
@@ -68,6 +80,11 @@
 # the harness signal honest.
 /tools/test-tag-signatures.sh @ThePyth0nKid
 /tools/test-trust-root-mutations.sh @ThePyth0nKid
+
+# Master Ruleset state verifier (V1.18 Welle B (5)). A silent rewrite
+# to skip the diff or always-exit-0 would null the operator-side
+# defence. Same threat model as verify-trust-root-mutations.sh itself.
+/tools/verify-master-ruleset.sh @ThePyth0nKid
 
 # Tag-signing verifier (could be modified to skip verification).
 /tools/verify-tag-signatures.sh @ThePyth0nKid

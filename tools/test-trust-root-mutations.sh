@@ -532,10 +532,18 @@ PARITY_TMPFILE="$(mktemp -t atlas-parity.XXXXXX)"
   # Extract protected paths from the script: lines inside either the
   # PROTECTED_SURFACE=( ... ) or PROTECTED_PREFIXES=( ... ) block that
   # look like quoted paths.
+  #
+  # Comment lines inside the block (`# ...`) are skipped — they are
+  # documentary prose explaining why a given path is in the surface,
+  # and can legitimately contain double-quoted strings (e.g. cited
+  # field names like `"SIGSTORE_REKOR_V1.pem"` or Ruleset names like
+  # `"Master trust-root protection"`). Without this skip, the harness
+  # mis-parses those quoted fragments as bogus surface entries.
   awk '
     /^PROTECTED_SURFACE=\(/ { in_block = 1; next }
     /^PROTECTED_PREFIXES=\(/ { in_block = 1; next }
     in_block && /^\)/ { in_block = 0; next }
+    in_block && /^[[:space:]]*#/ { next }
     in_block {
       # Extract content between double quotes.
       if (match($0, /"[^"]+"/)) {
