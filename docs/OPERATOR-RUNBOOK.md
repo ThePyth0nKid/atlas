@@ -2859,15 +2859,51 @@ CODEOWNERS review — same gate as every other trust-root surface.
 
 ### What the workflow needs
 
-The workflow uses `secrets.GITHUB_TOKEN` with the
-`administration: read` permission requested explicitly. Reading
-Repository Rulesets via the REST API requires this permission;
-without it, `gh api` returns 403 and the verifier exits 2.
+Reading Repository Rulesets via the GitHub REST API requires the
+`administration: read` permission. **`GITHUB_TOKEN` does NOT
+support this scope at the workflow level** — listing it under
+`permissions:` makes the workflow file invalid and the run fails
+with "0 jobs / workflow file issue" before any step executes.
+This was the bug that necessitated the V1.18 Welle B (5)
+follow-up.
 
-If the workflow ever begins exiting 2 with a 403 message, GitHub
-has revoked or renamed the `administration` permission scope for
-`GITHUB_TOKEN` — switch to a fine-grained PAT with the same scope
-stored as a repository secret.
+The workflow therefore expects a fine-grained Personal Access
+Token (PAT) stored as a repository secret named
+`RULESET_VERIFY_TOKEN`. If the secret is not configured, the
+verifier still executes but exits 2 with a "could not list
+rulesets" diagnostic — explicit failure pointing here.
+
+#### One-time PAT setup
+
+```
+1. github.com → Settings → Developer settings → Personal access
+   tokens → Fine-grained tokens → "Generate new token".
+2. Token name: "atlas-ruleset-verify" (or similar).
+3. Expiration: pick a cadence you'll remember to rotate
+   (90 days recommended; max 1 year).
+4. Resource owner: ThePyth0nKid (your account).
+5. Repository access: "Only select repositories" → atlas.
+6. Permissions:
+     Repository permissions → Administration: Read-only
+     (no other permission required — minimum scope).
+7. Generate token. Copy the token value (visible only once).
+8. github.com/ThePyth0nKid/atlas → Settings → Secrets and
+   variables → Actions → "New repository secret".
+9. Name: RULESET_VERIFY_TOKEN. Value: paste the token. Save.
+10. Verify: Actions → verify-branch-protection → "Run workflow".
+    Expect green within ~30 seconds.
+```
+
+#### PAT rotation calendar
+
+The PAT expires per the cadence chosen at setup. Add a calendar
+reminder at expiration_minus_14_days. The renewal recipe is
+identical to the one-time setup above — generate a new token,
+update the `RULESET_VERIFY_TOKEN` secret value (do NOT add a
+second secret; overwrite). The `verify-branch-protection`
+workflow will start exiting 2 once the old token expires; the
+nightly cron is the operator's safety net for forgotten
+rotations.
 
 ### Workflow CI status reading
 
@@ -2875,7 +2911,7 @@ stored as a repository secret.
 |---|---|
 | Green (exit 0) — daily cron + post-push | The Ruleset matches the pin. The Welle C gate is correctly bound. No action needed. |
 | Red (exit 1) — drift detected | The live Ruleset differs from the pin. The unified diff in the run logs shows the difference. See "When the verifier fires red" below. |
-| Red (exit 2) — lookup error | Either the Ruleset by name "Master trust-root protection" no longer exists, or `jq`/`gh` is missing on the runner, or the token lacks `administration: read`. Either way: investigate before next merge to master. |
+| Red (exit 2) — lookup error | One of: (a) the `RULESET_VERIFY_TOKEN` secret is missing or expired (most common — see "One-time PAT setup" / "PAT rotation calendar" below); (b) the Ruleset named "Master trust-root protection" no longer exists; (c) `jq`/`gh` is missing on the runner. Investigate before next merge to master. |
 
 ### When the verifier fires red
 
@@ -3018,6 +3054,7 @@ git commit -m 'chore(v1.x): re-pin master ruleset after <change-description>'
 |---|---|---|
 | Workflow red with `'Master trust-root protection' (id=N) drifts from pinned configuration` | Live Ruleset differs from `tools/expected-master-ruleset.json` | See "When the verifier fires red" above. |
 | Workflow red with `no Repository Ruleset named '...' found` | Ruleset deleted (or renamed) | See "Recovering from 'exit 2 — Ruleset not found'" above. |
-| Workflow red with `could not list rulesets on ...` | Token lacks `administration: read` permission | Confirm the workflow `permissions:` block includes `administration: read`. If GitHub has revoked this for `GITHUB_TOKEN`, switch to a fine-grained PAT. |
+| Workflow red with `could not list rulesets on ...` | `RULESET_VERIFY_TOKEN` PAT secret missing or expired | Set up / renew the PAT per "One-time PAT setup" / "PAT rotation calendar" above. |
+| Workflow run shows "0 jobs / 0s / workflow file issue" | Workflow YAML invalid (e.g., re-introduced `administration: read` under `permissions:` — GITHUB_TOKEN does not support it) | Revert the offending workflow edit. The valid scopes for `GITHUB_TOKEN` are listed at the GitHub Actions automatic-token doc; `administration` is not among them. |
 | Workflow red with `jq is required` or `gh CLI is required` | Runner image regression | Pin the runner image (e.g. `ubuntu-22.04` instead of `ubuntu-latest`) until the upstream restores tooling. |
 | Workflow green but the Ruleset is obviously weakened | Pinned file `tools/expected-master-ruleset.json` was tampered with to match the weakened state | This requires a signed commit by an `allowed_signer` plus CODEOWNERS review (the file is in `PROTECTED_SURFACE`). If observed, treat as compromise of an SSH signing key — rotate immediately. Audit recent `tools/expected-master-ruleset.json` history. |
