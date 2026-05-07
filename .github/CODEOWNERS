@@ -65,6 +65,15 @@
 # root for Sigstore-path verification.
 /crates/atlas-trust-core/src/anchor.rs @ThePyth0nKid
 
+# Integration bridge between `anchor.rs` and the gated fixture subtree
+# (V1.18 Welle B (6)). This is the only test that loads a fixture from
+# disk — gating prevents a "new unprotected fixture directory" bypass
+# where an attacker adds a second load_fixture() call reading from an
+# ungated path, then later rotates `anchor.rs` against a co-rotated
+# fixture there. Closes the MEDIUM finding from the Welle B (6)
+# parallel security review.
+/crates/atlas-trust-core/tests/sigstore_golden.rs @ThePyth0nKid
+
 # Pinned canonical form of the "Master trust-root protection" Ruleset
 # (V1.18 Welle B (5)). Comparison target for verify-master-ruleset.sh.
 # An attacker mutating this could "re-pin" the verifier to accept a
@@ -103,3 +112,21 @@
 # verifier script.
 # ----------------------------------------------------------------------
 /.github/actions/verify-wasm-pin-check/ @ThePyth0nKid
+
+# ----------------------------------------------------------------------
+# Sigstore golden test fixtures (V1.18 Welle B (6)).
+#
+# Input to the `sigstore_golden` integration test that verifies the
+# pinned `SIGSTORE_REKOR_V1.pem` (in `crates/atlas-trust-core/src/
+# anchor.rs`) against a captured live checkpoint signature. Without
+# this gate, an attacker who controls a maintainer PAT could silently
+# swap the fixture (without touching `anchor.rs`) and mask a future
+# PEM-rotation attack: the rotated attacker-controlled key would
+# still verify the rotated attacker-controlled fixture, and the
+# golden test would still pass. Gating the subtree closes that gap;
+# the fixture-and-pin co-mutation surface is now uniformly trust-
+# rooted. Mirror of PROTECTED_PREFIXES in the verifier script. Closes
+# carry-forward LOW finding 5 from the V1.18 Welle B (2) post-merge
+# security review.
+# ----------------------------------------------------------------------
+/crates/atlas-trust-core/tests/fixtures/ @ThePyth0nKid
