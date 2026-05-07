@@ -2809,3 +2809,215 @@ after a downstream auditor finds historical anchors no longer verify.
 | `cross-version-anchor-compat.sh` fails on a `checkpoint_signature_invalid` for a prior-version fixture | PEM rotation without multi-key support — see the table above | Hold the rotation; open follow-on ADR; do NOT ship until multi-key is designed |
 | `verify-trust-root-mutations` fails on the PR | Commit was not signed by a key in the prior trust root | Re-sign with a `.github/allowed_signers` key, or first add the new key in a prior PR signed by an existing trusted key (§14 recipe) |
 | Pinned PEM no longer matches the Sigstore Foundation announcement | Source-of-truth drift OR Foundation announcement was updated mid-rotation | Re-fetch the announcement; `diff` against the diff hunk; if Foundation revised its publication, re-cut the rotation against the latest revision |
+
+---
+
+## 16. Branch-protection-state verifier (V1.18 Welle B (5))
+
+§14 documents the **operator action** that pins the Welle C in-repo
+trust-root-mutation gate to the master branch: a Repository Ruleset
+named "Master trust-root protection" with a specific shape (no
+`bypass_actors`, `enforcement: active`, the Welle C status check
+required, signed-commits required, force-push + deletion blocked,
+CODEOWNERS review required).
+
+§16 documents the **automated verifier** that detects when that
+Ruleset silently regresses — operator misclick in the Settings UI,
+out-of-band API PATCH, ruleset replaced with a weaker one of the
+same name, ruleset disabled "for a moment" and forgotten.
+
+### Why a separate verifier exists
+
+The Welle C in-repo gate ONLY binds because the Master Ruleset pins
+six load-bearing properties (full list in §14):
+
+  1. `enforcement: active`
+  2. `bypass_actors: []` (no admin-bypass)
+  3. `required_status_checks` includes `"Verify trust-root-modifying commits"`
+  4. `pull_request.require_code_owner_review: true`
+  5. `required_signatures` rule present
+  6. `non_fast_forward` + `deletion` rules present
+
+If any of these silently regress, the Welle C gate stops being
+load-bearing **without any commit landing in the repo**. There is
+no in-repo signal that defence-in-depth has been weakened.
+`tools/verify-master-ruleset.sh` + `.github/workflows/verify-branch-
+protection.yml` IS that signal.
+
+### Defence shape
+
+| Component | Role |
+|---|---|
+| `tools/expected-master-ruleset.json` | Pinned canonical form of the Ruleset, normalised (volatile fields stripped, rules sorted by `type`, `allowed_merge_methods` sorted). The comparison target. |
+| `tools/verify-master-ruleset.sh` | Looks up the Ruleset by name on the configured owner/repo, fetches details, normalises with the same `jq` pipeline that produced the pin, diffs against the expected file. |
+| `.github/workflows/verify-branch-protection.yml` | Runs the verifier on three triggers: nightly cron (drift detection on a cadence), push to master (drift detection on the heartbeat of normal merges), `workflow_dispatch` (on-demand re-check after a deliberate change). |
+
+All three files are in `PROTECTED_SURFACE` (see
+`tools/verify-trust-root-mutations.sh`). Mutating any of them
+requires an SSH-signed commit by an `allowed_signer` plus
+CODEOWNERS review — same gate as every other trust-root surface.
+
+### What the workflow needs
+
+The workflow uses `secrets.GITHUB_TOKEN` with the
+`administration: read` permission requested explicitly. Reading
+Repository Rulesets via the REST API requires this permission;
+without it, `gh api` returns 403 and the verifier exits 2.
+
+If the workflow ever begins exiting 2 with a 403 message, GitHub
+has revoked or renamed the `administration` permission scope for
+`GITHUB_TOKEN` — switch to a fine-grained PAT with the same scope
+stored as a repository secret.
+
+### Workflow CI status reading
+
+| CI run state | Interpretation |
+|---|---|
+| Green (exit 0) — daily cron + post-push | The Ruleset matches the pin. The Welle C gate is correctly bound. No action needed. |
+| Red (exit 1) — drift detected | The live Ruleset differs from the pin. The unified diff in the run logs shows the difference. See "When the verifier fires red" below. |
+| Red (exit 2) — lookup error | Either the Ruleset by name "Master trust-root protection" no longer exists, or `jq`/`gh` is missing on the runner, or the token lacks `administration: read`. Either way: investigate before next merge to master. |
+
+### When the verifier fires red
+
+1. **Open the failed workflow run** and read the unified diff. The
+   diff shows expected (pinned) on the `-` side, actual (live) on
+   the `+` side.
+
+2. **Triage the drift:**
+
+   * **Unintentional drift** — operator made a settings change that
+     wasn't supposed to weaken the defence (e.g. accidentally
+     removed a rule, accidentally added a bypass actor, accidentally
+     toggled enforcement to "Evaluate"). Fix: revert the Ruleset to
+     the pinned state via Settings → Rules → Rulesets → "Master
+     trust-root protection". Re-run `verify-branch-protection`
+     workflow via `workflow_dispatch` to confirm the revert; expect
+     green.
+   * **Intentional drift** — operator made a deliberate change that
+     should be the new normal (e.g. promoted to multi-maintainer
+     and raised `required_approving_review_count` from 0 to 1). Fix:
+     re-pin `tools/expected-master-ruleset.json` to match the new
+     live state, in an SSH-signed commit. Re-run the verifier;
+     expect green.
+   * **Suspected compromise** — the drift was not authored by any
+     known operator action and weakens the defence (e.g. a
+     `bypass_actors` entry pointing at an unfamiliar GitHub
+     account, enforcement disabled, the Welle C status check
+     removed, the Ruleset renamed or deleted entirely). Treat as
+     a security incident. Steps:
+       a. **Do not merge anything to master** until the Ruleset is
+          restored.
+       b. Restore the Ruleset to the pinned state via Settings →
+          Rules → Rulesets.
+       c. Audit GitHub's audit log for `repository_ruleset.update`
+          and `repository_ruleset.destroy` events — these surface
+          the actor, timestamp, and changed fields.
+       d. Rotate the suspected-compromised credential (PAT, SSH
+          signing key, or GitHub session) and re-run all
+          allowlist-touching workflows post-rotation.
+       e. Document the incident in the maintainer logbook.
+
+3. **Re-run the workflow** via Actions → verify-branch-protection
+   → "Run workflow" to confirm the fix held.
+
+### Recovering from "exit 2 — Ruleset not found"
+
+This is a CRITICAL defence-down state. The Welle C in-repo gate is
+unbound. Recovery:
+
+```
+1. Open Settings → Rules → Rulesets in the GitHub UI.
+2. Click "New ruleset → New branch ruleset".
+3. Name: exactly "Master trust-root protection" (the verifier
+   matches by name, not by id).
+4. Apply the configuration documented in §14 → "Modern-Rulesets
+   equivalent" (the pinned canonical form).
+5. Save.
+6. Trigger the verifier via Actions → verify-branch-protection
+   → "Run workflow". Expect green.
+```
+
+### Re-pinning after a legitimate Ruleset change
+
+When a deliberate change to the Ruleset is the new normal (e.g.
+adding a maintainer, raising approval count, deleting and
+recreating the Ruleset to fix a misconfiguration), the pinned file
+**and** the `EXPECTED_RULESET_ID` constant in
+`tools/verify-master-ruleset.sh` must be updated in lockstep:
+
+  * Shape change only (rules / parameters / bypass_actors edited
+    in-place, same Ruleset id) → re-pin only
+    `tools/expected-master-ruleset.json`.
+  * Delete-and-recreate (new id minted, even if shape identical) →
+    re-pin BOTH `tools/expected-master-ruleset.json` (in case
+    shape also changed) AND `EXPECTED_RULESET_ID` in
+    `tools/verify-master-ruleset.sh`.
+
+Both files are in `PROTECTED_SURFACE`, so the re-pin commit must
+be SSH-signed by an `allowed_signer` and pass CODEOWNERS review.
+
+Recipe:
+
+```bash
+# 1. Make the Ruleset change in the GitHub Settings UI.
+
+# 2. Fetch the live Ruleset.
+gh api -H "Accept: application/vnd.github+json" \
+  repos/ThePyth0nKid/atlas/rulesets/$(gh api repos/ThePyth0nKid/atlas/rulesets \
+    | jq -r '.[] | select(.name == "Master trust-root protection") | .id') \
+  > /tmp/ruleset-live.json
+
+# 3. Run the same normalisation jq pipeline as the verifier.
+#    *** MIRROR WARNING ***
+#    This pipeline MUST stay byte-equivalent to the one in
+#    tools/verify-master-ruleset.sh. If you change one, change
+#    both in the same commit. Future improvement: have this
+#    recipe invoke `tools/verify-master-ruleset.sh --dump-pin`
+#    instead of duplicating the pipeline.
+jq -S '
+  del(.id, .node_id, .source, .created_at, .updated_at, ._links, .current_user_can_bypass)
+  | .rules |= (
+      sort_by(.type)
+      | map(
+          if (.parameters? | type) == "object" then
+            .parameters |= (
+              (if (.allowed_merge_methods? | type) == "array" then
+                .allowed_merge_methods |= sort
+              else . end)
+              | (if (.required_status_checks? | type) == "array" then
+                .required_status_checks |= (
+                  map(del(.integration_id?))
+                  | sort_by(.context)
+                )
+              else . end)
+            )
+          else . end
+        )
+    )
+' /tmp/ruleset-live.json > tools/expected-master-ruleset.json
+
+# 4. Confirm the diff matches your intent. If it shows fields you
+#    did NOT mean to change, the Ruleset is in a state you didn't
+#    author — STOP and triage as a possible compromise.
+git diff tools/expected-master-ruleset.json
+
+# 5. SSH-sign + commit (PROTECTED_SURFACE write requires it).
+git add tools/expected-master-ruleset.json
+git commit -m 'chore(v1.x): re-pin master ruleset after <change-description>'
+
+# 6. Push, open PR, merge.
+
+# 7. Confirm the verifier is green post-merge:
+#    Actions → verify-branch-protection → wait for the post-push
+#    run to complete green.
+```
+
+### Failure modes
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Workflow red with `'Master trust-root protection' (id=N) drifts from pinned configuration` | Live Ruleset differs from `tools/expected-master-ruleset.json` | See "When the verifier fires red" above. |
+| Workflow red with `no Repository Ruleset named '...' found` | Ruleset deleted (or renamed) | See "Recovering from 'exit 2 — Ruleset not found'" above. |
+| Workflow red with `could not list rulesets on ...` | Token lacks `administration: read` permission | Confirm the workflow `permissions:` block includes `administration: read`. If GitHub has revoked this for `GITHUB_TOKEN`, switch to a fine-grained PAT. |
+| Workflow red with `jq is required` or `gh CLI is required` | Runner image regression | Pin the runner image (e.g. `ubuntu-22.04` instead of `ubuntu-latest`) until the upstream restores tooling. |
+| Workflow green but the Ruleset is obviously weakened | Pinned file `tools/expected-master-ruleset.json` was tampered with to match the weakened state | This requires a signed commit by an `allowed_signer` plus CODEOWNERS review (the file is in `PROTECTED_SURFACE`). If observed, treat as compromise of an SSH signing key — rotate immediately. Audit recent `tools/expected-master-ruleset.json` history. |
