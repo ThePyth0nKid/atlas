@@ -243,5 +243,6 @@ This decision is fully reversible. Adoption work is prepared (§5), upstream tra
 |------------|--------------------------------------------------------|---------|
 | 2026-05-06 | ADR-Atlas-006 opened. Initial status: Tracking.        | —       |
 | 2026-05-06 | V1.18 Welle B (2): §5.1 registry-pattern refactor shipped (`feat(v1.18/welle-b): anchor.rs RekorIssuer registry refactor`). | §5.1 status flipped to DONE. Reduces Trigger B (Rekor v2) adoption work from ~1 week to ~3–4 days. No verification semantics changed. |
+| 2026-05-06 | V1.18 Welle B (4): §5.2 inline-pin-update protocol shipped (`docs(v1.18/welle-b): OPERATOR-RUNBOOK §15 inline-pin-update protocol + SECURITY-NOTES scope-k → ADR-006 forward link`, commit `2171b75`). | §5.2 status flipped to DONE. OPERATOR-RUNBOOK §15 added (8-step recipe + 7-item PR review checklist + cross-version-anchor compatibility test + failure-modes table). SECURITY-NOTES scope-k → ADR-006 forward link added (closes V1.18 Welle A MED parking). CONSUMER-RUNBOOK §10.6 closure step 4 now references §15 concretely. |
 
 (Future quarterly refreshes append rows here.)

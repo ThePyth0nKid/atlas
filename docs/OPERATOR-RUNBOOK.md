@@ -2519,20 +2519,40 @@ regeneration, cross-version-anchor compatibility — was implicit.
 this section as the canonical operator path for closing a Trigger-C
 incident on the consumer side.
 
+> ⚠️ **Recipe-text caveat — read BEFORE executing any step below.**
+> OPERATOR-RUNBOOK.md (this file) is itself NOT in `PROTECTED_SURFACE`
+> and is not gated by §14's cryptographic verifier. The integrity of
+> the §15 recipe text relies on normal branch-protection + CODEOWNERS
+> reviewer scrutiny on every docs PR — *not* on the trust-root mutation
+> gate. An attacker who rewrote §15 mid-incident to point operators at
+> a malicious key would still hit §14 when trying to land that key in
+> `anchor.rs`, but a vigilant reviewer is required to catch the rewrite
+> of the recipe itself before it misleads an in-incident operator. **An
+> operator following §15 during an actual rotation event SHOULD verify
+> the recipe text against the V1.18 Welle B (4) snapshot (commit
+> `2171b75`, plus any later `docs(v1.18/welle-b-N-followup)` commits
+> visible in `git log -- docs/OPERATOR-RUNBOOK.md`) before executing.**
+> Treat §15 edits in any future PR with the same scrutiny as a
+> `PROTECTED_SURFACE` edit, even though the cryptographic gate does not
+> apply to it.
+
 ### When this protocol fires
 
-| Trigger | Source | Pin fields touched |
-|---|---|---|
-| Sigstore Rekor v1 root ceremony (key rotation) | Sigstore Foundation post-mortem or planned ceremony announcement | `SIGSTORE_REKOR_V1.pem` (the PEM body changes; `name`/`origin` stay) |
-| Active-shard rotation (new tree-ID promoted) | Sigstore Rekor operations channel — new logIndex range, prior shard frozen | `SIGSTORE_REKOR_V1.active_tree_id` + prepend the new tree-ID at `tree_id_roster[0]`, push the prior active to index 1 |
-| Historical-shard discovery (a missing shard surfaces during an audit) | Independent discovery; cross-checked against rekor-monitor or the Sigstore Foundation public statement | `tree_id_roster` (append the historical shard, preserving index 0 = active) |
-| Rekor v2 launch (ADR-006 Trigger B) | Rekor v2 GA + npm trust root update | New `SIGSTORE_REKOR_V2: RekorIssuer` static + extend `REKOR_ISSUERS = &[&SIGSTORE_REKOR_V1, &SIGSTORE_REKOR_V2]` (per-issuer registry shape from V1.18 Welle B (2)) |
-| Second issuer joining (ADR-006 Trigger A/D) | Sigstore Foundation federation announcement OR Atlas-side compliance requirement | New `RekorIssuer` static + `REKOR_ISSUERS` slice extension (same shape as Rekor v2) |
+| Trigger | Source | Pin fields touched | Verification bar |
+|---|---|---|---|
+| **Planned** Sigstore Rekor v1 root ceremony (scheduled key rotation) | Sigstore Foundation planned-ceremony announcement (≥7 days advance notice typical) | `SIGSTORE_REKOR_V1.pem` (the PEM body changes; `name`/`origin` stay) | Standard: cite the foundation announcement in the PR body. Cross-check optional but recommended (announcement + bundled `trusted_root.json` in next npm release). |
+| **Emergency / unscheduled** PEM rotation (out-of-schedule key rotation, e.g. post-incident or compromise response) | Sigstore Foundation post-mortem OR security-advisory issuance | `SIGSTORE_REKOR_V1.pem` (same field shape as planned ceremony) | **Mandatory two-source minimum.** An out-of-schedule rotation has fewer corroboration channels than a planned ceremony — require BOTH the foundation post-mortem URL AND ≥1 independent corroboration (≥2 maintainer accounts on different platforms confirming the new key fingerprint, or a published GitHub security advisory under `sigstore/rekor`). Cite both in the PR body. Do NOT rotate on a single-source signal. |
+| Active-shard rotation (new tree-ID promoted) | Sigstore Rekor operations channel — new logIndex range, prior shard frozen | `SIGSTORE_REKOR_V1.active_tree_id` + prepend the new tree-ID at `tree_id_roster[0]`, push the prior active to index 1 | Standard: cite operations-channel post; cross-check the new shard's first logIndex appears AFTER prior shard's last logIndex (see PR review row "Fixture freshness on PEM AND shard rotation"). |
+| Historical-shard discovery (a missing shard surfaces during an audit) | Independent discovery; cross-checked against rekor-monitor or the Sigstore Foundation public statement | `tree_id_roster` (append the historical shard, preserving index 0 = active) | Standard: cite the discovery source + a fixture proving the historical shard's anchors verify under the existing pinned PEM. |
+| Rekor v2 launch (ADR-006 Trigger B) | Rekor v2 GA + npm trust root update | New `SIGSTORE_REKOR_V2: RekorIssuer` static + extend `REKOR_ISSUERS = &[&SIGSTORE_REKOR_V1, &SIGSTORE_REKOR_V2]` (per-issuer registry shape from V1.18 Welle B (2)) | Standard + ADR-006 amendment in the same PR (see paragraph below). |
+| Second issuer joining (ADR-006 Trigger A/D) | Sigstore Foundation federation announcement OR Atlas-side compliance requirement | New `RekorIssuer` static + `REKOR_ISSUERS` slice extension (same shape as Rekor v2) | Standard + ADR-006 amendment in the same PR. |
 
-The first three are routine rotations within the existing Rekor v1
-trust scope; the last two are full ADR-006 adoption events and require
-a follow-on ADR amendment in the same PR (§5 → §6 transition: pin
-update lands together with the design that justifies it).
+The first four are routine rotations within the existing Rekor v1
+trust scope (the planned-vs-emergency split changes only the
+verification bar, not the pin-edit shape); the last two are full
+ADR-006 adoption events and require a follow-on ADR amendment in the
+same PR (§5 → §6 transition: pin update lands together with the design
+that justifies it).
 
 ### Pre-edit verification
 
@@ -2562,10 +2582,16 @@ Expected outputs (V1.18 baseline):
 ### Step-by-step pin update
 
 ```bash
-# 1. Branch from a known-clean master.
+# 1. Branch from a known-clean master. Branch name uses the
+#    chore(...) prefix because rotating SIGSTORE_REKOR_V1 is a
+#    PROTECTED_SURFACE source-file edit (anchor.rs), not a docs change
+#    — keep the branch prefix and the conventional-commit prefix below
+#    in step 7 in lockstep so an auditor reading either can derive the
+#    other. ROTATION_ID is operator-chosen — recommend YYYYMMDD or
+#    a short incident reference (e.g. `2026-05-12` or `sigstore-pmi-042`).
 git checkout master
 git pull --ff-only
-git checkout -b "docs(v1.18/welle-x)/sigstore-pin-update-${ROTATION_ID}"
+git checkout -b "chore(v1.x/welle-x)/sigstore-pin-update-${ROTATION_ID}"
 
 # 2. Edit the SIGSTORE_REKOR_V1 static in
 #    crates/atlas-trust-core/src/anchor.rs. Change ONLY the field(s)
@@ -2656,10 +2682,10 @@ above cannot catch on their own:
 | Review item | What it catches | How to verify |
 |---|---|---|
 | Source-of-truth match | The new pin matches the cited Sigstore Foundation announcement byte-for-byte (PEM, tree-ID magnitude, origin string) | Open the cited URL; copy the field; `diff` against the diff hunk |
-| Single-field discipline | Only the trigger's field changed; no opportunistic edits to `name`/`origin`/other fields | Eyeball the diff — every line outside the documented field is suspect |
+| Single-field discipline | Only the trigger's field changed; no opportunistic edits to `name`/`origin`/other fields; no homoglyph / zero-width / RTL-override character smuggled into another field's value | **Mandatory:** run `git diff HEAD~1 -- crates/atlas-trust-core/src/anchor.rs \| cat -A` (or `git diff … \| od -c \| less`) and review the output. Rendered diff views (web UI, IDE) suppress non-printing and visually-confusable characters; an attacker who controls the operator's editor can present a one-field diff that is actually a two-field diff. The cryptographic gate (§14) validates the commit signature, not the content delta — only a byte-level diff catches this class. Eyeballing the rendered diff alone is insufficient. |
 | Test arm parity | `rekor_issuer_rosters_are_pinned`'s `"sigstore-rekor-v1"` match arm changed in lockstep with the static | Diff hunks must include both `anchor.rs` static AND the test arm |
 | Index-0 invariant on shard rotation | After rotation, `tree_id_roster[0] == active_tree_id` | The test enforces this — but a reviewer should still see it explicit in the diff |
-| Fixture freshness on PEM rotation | A new fixture was captured AFTER the new key was active on the production log | `fetched_at_unix` in the fixture > the announced rotation timestamp |
+| Fixture freshness on PEM AND shard rotation | A new fixture was captured AFTER the rotation event reached the production log: for PEM rotation, after the new key was activated; for shard rotation, after the prior shard was frozen AND the new shard had landed at least one hashedrekord entry | `fetched_at_unix` in the fixture > the announced rotation timestamp. **For shard rotation:** additionally cross-check that the new shard's first hashedrekord logIndex appears AFTER the prior shard's last logIndex in the Sigstore Foundation operations channel (or in `rekor-monitor` output if maintained). A fixture captured during the shard-overlap window can validate against both shards and mask a half-completed rotation. |
 | ADR cross-reference | The PR description links the Sigstore source AND ADR-006 (and adds an ADR amendment if Trigger A/B/D fired) | PR body must contain both URLs |
 | Cross-version-anchor compat | `cross-version-anchor-compat.sh` PASS log attached to the PR | CI artifact OR pasted output in PR body |
 
@@ -2667,19 +2693,9 @@ A PR that fails any of these MUST be requested-changes, NOT
 approved-with-comment. The PROTECTED_SURFACE gate (§14) is the
 cryptographic last line of defence for the source-code pin in
 `crates/atlas-trust-core/src/anchor.rs` — reviewer rigour is the
-load-bearing one for the rotation as a whole.
-
-> **Recipe-text caveat:** OPERATOR-RUNBOOK.md (this file) is itself
-> NOT in `PROTECTED_SURFACE` and is not gated by §14's cryptographic
-> verifier. The integrity of the §15 recipe text relies on
-> normal branch-protection + CODEOWNERS reviewer scrutiny on every
-> docs PR — *not* on the trust-root mutation gate. An attacker who
-> rewrote §15 mid-incident to point operators at a malicious key
-> would still hit §14 when trying to land that key in `anchor.rs`,
-> but a vigilant reviewer is required to catch the rewrite of the
-> recipe itself before it misleads an in-incident operator. Treat
-> §15 edits with the same scrutiny as a `PROTECTED_SURFACE` edit
-> even though the cryptographic gate does not apply to it.
+load-bearing one for the rotation as a whole. (The §15 recipe-text
+caveat at the top of this section reminds why reviewer rigour cannot
+be substituted by the cryptographic gate for the runbook itself.)
 
 ### Golden-fixture regeneration
 
