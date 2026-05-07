@@ -256,6 +256,128 @@ ACTUAL_RAW="$(
 }
 
 # ----------------------------------------------------------------------
+# 2a-pre. JSON shape pre-flight.
+#
+# `gh api` exits 0 on any HTTP-200 response, including bodies that are
+# valid JSON but not a ruleset object — most notably GitHub's habit of
+# returning HTTP 200 with a `{"message":"..."}` error envelope on
+# certain auth edge cases. Without this pre-flight, the field-presence
+# guard at 2a would treat a non-object body as "bypass_actors absent"
+# and emit the PAT-scope-insufficient diagnostic when the actual cause
+# is a different API state (e.g. detail endpoint denied while listing
+# endpoint succeeded). Same problem for an empty `ACTUAL_RAW` (jq
+# exits non-zero on invalid input, the `has(...)` test returns "" and
+# is `!= "true"`).
+#
+# Reported as code-review finding M-1 in the V1.18 Welle B (7) review.
+# ----------------------------------------------------------------------
+ACTUAL_TYPE="$(printf '%s' "${ACTUAL_RAW}" | jq -r 'type' 2>/dev/null || echo "invalid")"
+if [ "${ACTUAL_TYPE}" != "object" ]; then
+  echo "FAIL: ruleset fetch returned non-object JSON (type=${ACTUAL_TYPE:-empty})" >&2
+  echo "" >&2
+  echo "      The GitHub REST API returned HTTP 200 with a body that is not" >&2
+  echo "      a ruleset object. Most likely an error envelope (e.g." >&2
+  echo "      {\"message\":\"Not Found\"}) returned with HTTP 200 instead of" >&2
+  echo "      the expected 404 status." >&2
+  echo "" >&2
+  echo "      Inspect the response manually:" >&2
+  echo "        gh api repos/${OWNER}/${REPO}/rulesets/${RULESET_ID}" >&2
+  echo "" >&2
+  echo "      This is distinct from the PAT-scope-insufficient diagnostic" >&2
+  echo "      below: that fires when the body IS a ruleset object but is" >&2
+  echo "      field-restricted; this fires when the body is not a ruleset" >&2
+  echo "      object at all." >&2
+  exit 2
+fi
+
+# ----------------------------------------------------------------------
+# 2a. PAT-scope guard: bypass_actors field-presence hardfail.
+#
+# V1.18 Welle B (7) — closes the carry-forward UX finding from the
+# Welle B (5) follow-up (PR #18 post-merge observation).
+#
+# The `bypass_actors` field is load-bearing. Its value (`[]` in the
+# pinned canonical) is the structural defence against silent admin
+# bypass that THIS verifier exists to confirm: an admin adding
+# themselves as a bypass actor would be exactly the silent-disable
+# attack that closes carry-forward MEDIUM finding 6 from V1.18 Welle
+# B (2)'s post-merge security review.
+#
+# GitHub API field-visibility differs by token scope:
+#   * fine-grained PAT with `Repository administration: read` →
+#     response contains the `bypass_actors` field.
+#   * default GITHUB_TOKEN (workflow-level) → response omits the
+#     `bypass_actors` field entirely.
+# (At time of writing the difference is 14 vs 13 top-level keys, but
+# that count is an observed internal implementation detail — GitHub
+# has historically added fields silently — not a normative API
+# contract. The field-PRESENCE test is the stable signal.)
+#
+# Degradation behaviour if GitHub changes visibility for GITHUB_TOKEN:
+#   * Field becomes present with the REAL value — the diff pipeline
+#     downstream catches any non-canonical content (`bypass_actors:
+#     null`, `bypass_actors: [<entries>]`) as drift. Safe.
+#   * Field becomes present with an INCORRECT `bypass_actors: []`
+#     masking real entries — verifier exits 0 on a weakened ruleset.
+#     Unsafe, but requires both a visibility change AND an API bug
+#     simultaneously, which is implausible as a unilateral platform
+#     change. Tracked as accepted-risk; revisit if GitHub publishes a
+#     normative API contract for ruleset visibility. Reported as
+#     security-review finding M-A in the V1.18 Welle B (7) review.
+#
+# Without this guard, a workflow running under the GITHUB_TOKEN
+# fallback (operator has not yet configured the
+# `RULESET_VERIFY_TOKEN` repo secret per OPERATOR-RUNBOOK §16 PAT
+# setup recipe) reaches the diff pipeline and produces a confusing
+# shape-diff: `bypass_actors` shows as "missing in live" even though
+# the live Ruleset is correctly configured. The diagnostic does not
+# point at the ACTUAL cause (PAT scope), and an operator unfamiliar
+# with the field-visibility quirk could waste hours chasing a
+# non-existent ruleset drift.
+#
+# Field-presence (not field-value) is the correct test: bypass_actors
+# is REQUIRED to be present in any properly-scoped response. If it's
+# absent, the verifier cannot answer its central question
+# ("is bypass_actors empty?") regardless of the actual Ruleset state,
+# so the correct response is exit 2 ("I cannot tell"), not exit 1
+# ("drift detected"). The existing diff pipeline downstream still
+# catches the case where bypass_actors IS present but contains
+# entries — that's a real silent-admin-bypass attack and surfaces as
+# a clear value-diff with the attacker's actor entry visible.
+#
+# This guard runs BEFORE the normalisation pipeline (which `del()`s
+# nothing about bypass_actors and leaves it intact for the diff). The
+# ordering matters: a field that's missing-in-input cannot be
+# normalised into existence.
+# ----------------------------------------------------------------------
+HAS_BYPASS_ACTORS="$(printf '%s' "${ACTUAL_RAW}" | jq -r 'has("bypass_actors")')"
+if [ "${HAS_BYPASS_ACTORS}" != "true" ]; then
+  echo "FAIL: PAT scope insufficient — live Ruleset response missing 'bypass_actors' field" >&2
+  echo "" >&2
+  echo "      The bypass_actors field is load-bearing: bypass_actors=[] is the" >&2
+  echo "      structural defence against silent admin bypass that this verifier" >&2
+  echo "      exists to confirm. Without field-level visibility, the verifier" >&2
+  echo "      cannot answer its central question." >&2
+  echo "" >&2
+  echo "      Likely cause: the workflow is running under the default GITHUB_TOKEN" >&2
+  echo "      (which omits the bypass_actors field from ruleset responses; only" >&2
+  echo "      a fine-grained PAT with 'Repository administration: read' scope" >&2
+  echo "      surfaces it) instead of a properly-scoped RULESET_VERIFY_TOKEN PAT" >&2
+  echo "      secret." >&2
+  echo "" >&2
+  echo "      Resolution: configure RULESET_VERIFY_TOKEN per docs/OPERATOR-RUNBOOK.md" >&2
+  echo "      §16 → 'One-time PAT setup'. The verifier will then have the field-" >&2
+  echo "      level visibility it needs to perform its job, and the next workflow" >&2
+  echo "      run will show pass-or-real-drift instead of this scope-insufficient" >&2
+  echo "      signal." >&2
+  echo "" >&2
+  echo "      This is NOT a Ruleset drift signal. The live Ruleset state is" >&2
+  echo "      indeterminate from this script's vantage point until the PAT is" >&2
+  echo "      configured." >&2
+  exit 2
+fi
+
+# ----------------------------------------------------------------------
 # 3. Normalise.
 #
 # *** MIRROR WARNING ***
