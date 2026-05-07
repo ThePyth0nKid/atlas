@@ -55,12 +55,27 @@
 #
 # Permissions:
 #
-#   * contents: read       — to checkout the repo (and read the
-#                            pinned expected file).
-#   * administration: read — required by GitHub to read Repository
-#                            Rulesets via the REST API. Without
-#                            this, gh api will return 403 and the
-#                            verifier exits 2.
+#   * contents: read — to checkout the repo (and read the pinned
+#                      expected file).
+#
+# Reading Repository Rulesets via the REST API requires the
+# `administration: read` permission. **GITHUB_TOKEN does NOT support
+# `administration` as a value in the workflow-level `permissions:`
+# block** — the validator rejects the workflow file as invalid (run
+# fails with "0 jobs / workflow file issue" before any step
+# executes; this was the post-merge bug fixed in the V1.18 Welle B
+# (5) follow-up). The valid GITHUB_TOKEN permission scopes are
+# enumerated at:
+#   https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication
+# `administration` is not among them.
+#
+# Resolution: use a fine-grained Personal Access Token (PAT) stored
+# as the repository secret `RULESET_VERIFY_TOKEN` with exactly one
+# scope: "Repository administration: read". The verifier step
+# below selects this secret if present and falls back to
+# GITHUB_TOKEN otherwise — the fallback will exit 2 with a clear
+# "could not list rulesets" diagnostic that points the operator at
+# the secret-setup recipe in OPERATOR-RUNBOOK.md §16.
 #
 # Trust posture: SHA-pinned `actions/checkout` (not the mutable
 # `@v4` tag). Same rationale as verify-tag-signatures.yml + verify-
@@ -79,7 +94,6 @@ on:
 
 permissions:
   contents: read
-  administration: read
 
 # Serialise overlapping runs (cron + push collisions) without
 # discarding any drift signal.
@@ -125,9 +139,17 @@ jobs:
       # ThePyth0nKid/atlas inside the script; we set them explicitly
       # from the workflow's GITHUB_REPOSITORY so a fork's CI verifies
       # the fork's own ruleset, not the upstream's.
+      #
+      # GH_TOKEN selection: prefer RULESET_VERIFY_TOKEN (a
+      # fine-grained PAT with `Repository administration: read`)
+      # because GITHUB_TOKEN cannot be granted that scope at the
+      # workflow level (see top-of-file comment). If the secret is
+      # not configured, the verifier still runs but exits 2 with a
+      # "could not list rulesets" diagnostic — explicit failure that
+      # surfaces the missing secret rather than silently passing.
       - name: Verify Master ruleset matches pinned configuration
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.RULESET_VERIFY_TOKEN || secrets.GITHUB_TOKEN }}
           ATLAS_OWNER: ${{ github.repository_owner }}
           ATLAS_REPO: ${{ github.event.repository.name }}
         run: bash tools/verify-master-ruleset.sh
