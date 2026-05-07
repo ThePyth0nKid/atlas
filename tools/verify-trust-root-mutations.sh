@@ -137,6 +137,20 @@ PROTECTED_SURFACE=(
   # "new unprotected fixture directory" bypass vector identified in
   # the V1.18 Welle B (6) parallel security review (MEDIUM finding).
   "crates/atlas-trust-core/tests/sigstore_golden.rs"
+  # Cross-version-anchor compatibility verifier (V1.18 Welle B (8)).
+  # Load-bearing pre-merge gate referenced by OPERATOR-RUNBOOK §15
+  # step 5 + PR review item "Cross-version-anchor compat" + ADR-006
+  # §8.3 (multi-issuer interop open question). The script asserts that
+  # the working-tree pin in `crates/atlas-trust-core/src/anchor.rs`
+  # still verifies every prior-version Sigstore Rekor v1 anchor in
+  # the legacy fixture corpus. Same threat model as the other
+  # anti-drift verifiers: a silent rewrite to skip the cargo invocation,
+  # short-circuit the loop, or always-exit-0 would null the gate that
+  # forbids shipping a PEM rotation breaking historical bundle replay
+  # — exactly the regression class ADR-006 §8.3 flags as load-bearing
+  # for downstream-consumer trust. Gating modifications keeps the
+  # cross-version compat signal honest.
+  "tools/cross-version-anchor-compat.sh"
   # Pinned canonical form of the "Master trust-root protection"
   # Repository Ruleset — the comparison target for
   # `tools/verify-master-ruleset.sh` (V1.18 Welle B (5)). An attacker
