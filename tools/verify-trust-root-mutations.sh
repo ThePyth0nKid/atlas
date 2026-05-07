@@ -120,6 +120,23 @@ PROTECTED_SURFACE=(
   # operator with the required key). Added in V1.18 Welle B (2)
   # post-review (security M-1).
   "crates/atlas-trust-core/src/anchor.rs"
+  # Integration bridge between `anchor.rs` and the
+  # `crates/atlas-trust-core/tests/fixtures/` subtree (gated below in
+  # PROTECTED_PREFIXES). This file is the ONLY caller that loads a
+  # fixture from disk — `golden_traces.rs` etc. construct test data
+  # programmatically. Without gating this file, a PAT-compromised
+  # attacker could route around the fixture-subtree gate by adding a
+  # second `load_fixture()` call inside `sigstore_golden.rs` reading
+  # from a NEW unprotected directory (e.g. `tests/alt_fixtures/`),
+  # then in a separate PR rotate `anchor.rs` to an attacker key and
+  # supply the co-rotated fixture in the unprotected directory. Both
+  # PRs would pass the trust-root mutation gate because only
+  # `tests/fixtures/` is in PROTECTED_PREFIXES. By gating
+  # `sigstore_golden.rs` itself, every change to the fixture-loading
+  # path requires a trust-root signed commit — closing the
+  # "new unprotected fixture directory" bypass vector identified in
+  # the V1.18 Welle B (6) parallel security review (MEDIUM finding).
+  "crates/atlas-trust-core/tests/sigstore_golden.rs"
   # Pinned canonical form of the "Master trust-root protection"
   # Repository Ruleset — the comparison target for
   # `tools/verify-master-ruleset.sh` (V1.18 Welle B (5)). An attacker
@@ -148,7 +165,26 @@ PROTECTED_SURFACE=(
 # Layer-3 trust guarantee for every downstream consumer running the
 # action. Gating modifications closes that gap.
 PROTECTED_PREFIXES=(
+  # Composite action — rationale in the block comment above the array.
   ".github/actions/verify-wasm-pin-check/"
+  # Sigstore Rekor v1 golden fixtures — input to the `sigstore_golden`
+  # integration test, which verifies the pinned `SIGSTORE_REKOR_V1.pem`
+  # (in `crates/atlas-trust-core/src/anchor.rs`) against a captured
+  # live checkpoint signature. Without this gate, an attacker who
+  # controls a maintainer PAT could silently swap the fixture (without
+  # touching `anchor.rs`) and mask a future PEM-rotation attack: the
+  # rotated attacker-controlled key would still verify the rotated
+  # attacker-controlled fixture, and the golden test would still pass.
+  # Gating the subtree forces every fixture-mutation commit to carry
+  # an SSH signature from an allowed_signer — the same property
+  # already required for `anchor.rs` itself, so the fixture-and-pin
+  # co-mutation surface is now uniformly trust-rooted. Added in V1.18
+  # Welle B (6); closes carry-forward LOW finding 5 from the V1.18
+  # Welle B (2) post-merge security review. The cross-version-anchor
+  # compatibility test referenced by OPERATOR-RUNBOOK §15 (pre-merge
+  # gate for `anchor.rs` rotations) reads from this subtree, so the
+  # gating reinforces §15 in addition to the standalone golden test.
+  "crates/atlas-trust-core/tests/fixtures/"
 )
 
 # ----------------------------------------------------------------------
