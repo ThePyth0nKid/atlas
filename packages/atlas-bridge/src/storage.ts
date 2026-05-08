@@ -14,6 +14,7 @@ import { promises as fs } from "node:fs";
 import { basename, dirname } from "node:path";
 import { eventsLogPath, workspaceDir } from "./paths.js";
 import { AtlasEventSchema } from "./schema.js";
+import { redactPaths } from "./signer.js";
 import type { AtlasEvent } from "./types.js";
 
 export class StorageError extends Error {
@@ -56,8 +57,14 @@ export async function readAllEvents(workspaceId: string): Promise<AtlasEvent[]> 
     // Strip absolute path from user-visible error to avoid disclosing the
     // server's filesystem layout to MCP clients. Server-side logs still
     // carry the full path via the original exception.
+    //
+    // V1.19 Welle 3: route through the canonical `redactPaths` in
+    // `signer.ts`. Previously this file carried a parallel
+    // implementation (`sanitiseFsError`) with the same regex copy-pasted
+    // — a drift trap exactly like the bridge-extraction one Welle 2
+    // closed. One redactor, one place to maintain.
     throw new StorageError(
-      `failed to read ${basename(path)}: ${sanitiseFsError(e as Error)}`,
+      `failed to read ${basename(path)}: ${redactPaths((e as Error).message)}`,
     );
   }
   const lines = raw.split(/\r?\n/).filter((l) => l.trim().length > 0);
@@ -113,14 +120,4 @@ export function computeTips(events: AtlasEvent[]): string[] {
 
 export async function ensureWorkspaceDir(workspaceId: string): Promise<void> {
   await fs.mkdir(workspaceDir(workspaceId), { recursive: true });
-}
-
-/**
- * Strip absolute filesystem paths from a Node fs error message before
- * surfacing it to an MCP client. Keeps the diagnostic useful while
- * preventing layout disclosure.
- */
-function sanitiseFsError(e: Error): string {
-  return e.message.replace(/['"]?[A-Za-z]:[\\/][^\s'"]+['"]?/g, "<path>")
-    .replace(/['"]?\/[^\s'"]+['"]?/g, "<path>");
 }
