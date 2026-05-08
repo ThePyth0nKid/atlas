@@ -8,7 +8,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "wasm": "bash ../../scripts/build-wasm.sh"
+    "wasm": "bash ../../scripts/build-wasm.sh",
+    "e2e:write": "tsx scripts/e2e-write-roundtrip.ts"
   },
   "dependencies": {
     "next": "16.2.4",
@@ -16,7 +17,8 @@
     "react-dom": "19.2.4",
     "react-force-graph-2d": "^1.27.1",
     "lucide-react": "^0.474.0",
-    "clsx": "^2.1.1"
+    "clsx": "^2.1.1",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -24,6 +26,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "tailwindcss": "^4",
+    "tsx": "^4.19.0",
     "typescript": "^5"
   }
 }
