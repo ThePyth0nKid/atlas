@@ -18,11 +18,9 @@ import {
   isLosslessNumber,
   parseAnchorJson,
   stringifyAnchorJson,
-} from "../src/lib/anchor-json.js";
-import {
   AnchorEntrySchema,
   AnchorEntryArraySchema,
-} from "../src/lib/schema.js";
+} from "@atlas/bridge";
 
 let failures = 0;
 

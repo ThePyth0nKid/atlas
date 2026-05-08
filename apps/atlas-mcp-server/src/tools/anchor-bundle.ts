@@ -24,14 +24,19 @@
  * append-only log.
  */
 
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { z } from "zod";
-import { stringifyAnchorJson } from "../lib/anchor-json.js";
+import {
+  stringifyAnchorJson,
+  anchorChainPath,
+  anchorsPath,
+  anchorViaSigner,
+  type AnchorRequest,
+  ensureWorkspaceDir,
+  DEFAULT_WORKSPACE,
+} from "@atlas/bridge";
 import { exportWorkspaceBundle } from "../lib/bundle.js";
-import { anchorChainPath, anchorsPath } from "../lib/paths.js";
-import { anchorViaSigner, type AnchorRequest } from "../lib/signer.js";
-import { ensureWorkspaceDir } from "../lib/storage.js";
-import { DEFAULT_WORKSPACE } from "../lib/types.js";
 import { optionalWorkspaceIdSchema } from "./schema.js";
 import type { ToolDefinition } from "./types.js";
 
@@ -57,11 +62,25 @@ export const anchorBundleInputSchema = {
    * Validation lives in the Rust signer: `https://` is required for
    * non-loopback hosts; plaintext `http://` is gated to localhost.
    */
-  rekor_url: z.string().url().optional()
+  rekor_url: z
+    .string()
+    .url()
+    // V1.19 Welle 2 hardening: require https:// at the TS boundary so
+    // schemes like file://, javascript:, or data: that pass `z.string().url()`
+    // are rejected before they reach the Rust signer's loopback-aware
+    // gate. The Rust check remains the authoritative defence (it allows
+    // plaintext http only for loopback hosts), but narrowing here turns
+    // the TS layer from "passthrough" into "strict-https-only" so an
+    // SSRF-style abuse of non-http schemes is blocked even if the Rust
+    // parser ever loosens.
+    .refine((u) => u.startsWith("https://"), {
+      message: "rekor_url must use https:// at the MCP tool boundary",
+    })
+    .optional()
     .describe(
-      "Optional Rekor URL (e.g. https://rekor.sigstore.dev). Falls back " +
-        "to ATLAS_REKOR_URL env var; if neither is set, the in-process " +
-        "mock issuer runs.",
+      "Optional Rekor URL (e.g. https://rekor.sigstore.dev). Must be " +
+        "https://. Falls back to ATLAS_REKOR_URL env var; if neither is " +
+        "set, the in-process mock issuer runs.",
     ),
 };
 
@@ -119,7 +138,15 @@ export const anchorBundleTool: ToolDefinition<typeof anchorBundleInputSchema> = 
     // anchors.json or the new one, never a half-written file. rename(2)
     // is atomic within a single filesystem on POSIX, and ReplaceFile-like
     // on Windows when source and target share a directory.
-    const suffix = `.tmp-${process.pid}-${Date.now().toString(36)}`;
+    //
+    // V1.19 Welle 2 hardening: append crypto-grade entropy to the
+    // suffix. The previous `pid + Date.now()` combo would collide on
+    // sub-millisecond writes from the same process (the per-workspace
+    // mutex serialises events.jsonl writes but NOT anchors.json), and
+    // a collision would make one writer silently overwrite the other's
+    // tmp file mid-write. 4 random bytes is 32 bits of entropy on top
+    // of pid+ms — beyond any plausible birthday attack at this scale.
+    const suffix = `.tmp-${process.pid}-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
     const tmp = target + suffix;
     await fs.writeFile(tmp, json, "utf8");
     await fs.rename(tmp, target);

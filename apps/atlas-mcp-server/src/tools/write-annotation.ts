@@ -12,8 +12,7 @@
  */
 
 import { z } from "zod";
-import { writeSignedEvent } from "../lib/event.js";
-import { DEFAULT_WORKSPACE } from "../lib/types.js";
+import { writeSignedEvent, DEFAULT_WORKSPACE } from "@atlas/bridge";
 import { optionalWorkspaceIdSchema } from "./schema.js";
 import type { ToolDefinition } from "./types.js";
 

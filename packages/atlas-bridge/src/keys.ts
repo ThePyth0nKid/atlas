@@ -21,6 +21,7 @@
  * level in V2; this file is the only one that needs to change.
  */
 
+import { isValidWorkspaceId } from "./paths.js";
 import { deriveKeyViaSigner, derivePubkeyViaSigner } from "./signer.js";
 import { PUBKEY_BUNDLE_SCHEMA, type PubkeyBundle } from "./types.js";
 
@@ -91,11 +92,22 @@ export function perTenantKidFor(workspaceId: string): string {
   return `${PER_TENANT_KID_PREFIX}${workspaceId}`;
 }
 
-/** Return the workspace_id encoded in `kid`, or `undefined` if `kid` is not per-tenant. */
+/**
+ * Return the workspace_id encoded in `kid`, or `undefined` if `kid` is
+ * not per-tenant. The suffix is validated against `WORKSPACE_ID_PATTERN`
+ * — a kid like `atlas-anchor:--inject` must NOT round-trip to the
+ * `--derive-from-workspace` argv of `atlas-signer`, where a clap parser
+ * would mis-interpret a leading `-` as a flag rather than a positional.
+ * Rejecting structurally invalid suffixes here is the trust-boundary
+ * choke-point for any caller that reconstructs a workspace_id from a
+ * stored kid (e.g. `resolveIdentityForKid` on the per-tenant path).
+ */
 export function workspaceIdFromKid(kid: string): string | undefined {
   if (!kid.startsWith(PER_TENANT_KID_PREFIX)) return undefined;
   const suffix = kid.slice(PER_TENANT_KID_PREFIX.length);
-  return suffix.length === 0 ? undefined : suffix;
+  if (suffix.length === 0) return undefined;
+  if (!isValidWorkspaceId(suffix)) return undefined;
+  return suffix;
 }
 
 /**
@@ -191,6 +203,37 @@ export async function resolveIdentityForKid(kid: string): Promise<SignerIdentity
   if (derived.kid !== kid) {
     throw new Error(
       `derive-pubkey kid mismatch: requested ${kid}, signer returned ${derived.kid}`,
+    );
+  }
+  return {
+    role: "per-tenant",
+    secretSource: "derive-from-workspace",
+    kid: derived.kid,
+    workspaceId,
+    pubkeyB64Url: derived.pubkey_b64url,
+  };
+}
+
+/**
+ * Web-write convenience: resolve the per-tenant identity for
+ * `workspaceId` directly, without first composing a kid. Equivalent to
+ * `resolveIdentityForKid(perTenantKidFor(workspaceId))` narrowed to the
+ * per-tenant branch — separated out because the atlas-web write
+ * surface auto-derives its kid from the workspace and never accepts a
+ * caller-supplied kid, so threading a kid through the call stack would
+ * be ceremony.
+ *
+ * Always returns the per-tenant identity (or throws). Legacy SPIFFE
+ * kids are not reachable via this entry point.
+ */
+export async function resolvePerTenantIdentity(
+  workspaceId: string,
+): Promise<Extract<SignerIdentity, { role: "per-tenant" }>> {
+  const expectedKid = perTenantKidFor(workspaceId);
+  const derived = await derivePubkeyViaSigner(workspaceId);
+  if (derived.kid !== expectedKid) {
+    throw new Error(
+      `derive-pubkey kid mismatch: expected ${expectedKid}, signer returned ${derived.kid}`,
     );
   }
   return {

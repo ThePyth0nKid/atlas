@@ -12,14 +12,16 @@
  * any vault/object store with integrity guarantees on the storage tier.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { stringifyAnchorJson } from "../lib/anchor-json.js";
+import {
+  stringifyAnchorJson,
+  workspaceDir,
+  DEFAULT_WORKSPACE,
+} from "@atlas/bridge";
 import { exportWorkspaceBundle } from "../lib/bundle.js";
-import { workspaceDir } from "../lib/paths.js";
-import { DEFAULT_WORKSPACE } from "../lib/types.js";
 import { optionalWorkspaceIdSchema } from "./schema.js";
 import type { ToolDefinition } from "./types.js";
 
@@ -48,12 +50,16 @@ export const exportBundleTool: ToolDefinition<typeof exportBundleInputSchema> = 
     const args = inputZ.parse(raw);
     const workspaceId = args.workspace_id ?? DEFAULT_WORKSPACE;
     const { trace, bundle } = await exportWorkspaceBundle(workspaceId);
-    // Lossless stringify for the trace — `trace.anchors` and
-    // `trace.anchor_chain` may carry Sigstore `tree_id` values that
-    // exceed JS safe-integer range. The pubkey bundle has no such
-    // fields, so its standard `JSON.stringify` output is unchanged.
+    // V1.19 Welle 2: lossless stringify for BOTH artefacts. The trace
+    // has always needed it for Sigstore `tree_id`. The bundle has no
+    // big-integer fields today, but `bundleHash` (in lib/bundle.ts)
+    // also routes through `stringifyAnchorJson` — keeping both sites
+    // on the same stringifier means a future field added to
+    // `PubkeyBundle` cannot create a hash/file divergence where the
+    // hash matches locally but the auditor's re-canonicalisation
+    // disagrees because the on-disk bytes truncated a LosslessNumber.
     const traceJson = stringifyAnchorJson(trace, 2);
-    const bundleJson = JSON.stringify(bundle, null, 2);
+    const bundleJson = stringifyAnchorJson(bundle, 2);
     const traceSha256 = sha256Hex(traceJson);
     const bundleSha256 = sha256Hex(bundleJson);
 
@@ -68,7 +74,11 @@ export const exportBundleTool: ToolDefinition<typeof exportBundleInputSchema> = 
       // either the old or the new file — never a half-written one.
       // Auditor reading trace.json mid-export must not see a trace that
       // doesn't match the bundle.json next to it.
-      const suffix = `.tmp-${process.pid}-${Date.now().toString(36)}`;
+      //
+      // V1.19 Welle 2 hardening: append crypto-grade entropy so two
+      // concurrent exports in the same process+millisecond produce
+      // distinct tmp paths instead of silently clobbering each other.
+      const suffix = `.tmp-${process.pid}-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
       const traceTmp = tracePath + suffix;
       const bundleTmp = bundlePath + suffix;
       await fs.writeFile(traceTmp, traceJson, "utf8");

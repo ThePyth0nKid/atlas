@@ -1,34 +1,56 @@
 /**
- * High-level "write one event" pipeline.
+ * High-level "write one signed event" pipeline, consolidated for both
+ * atlas-mcp-server tools and atlas-web's POST /api/atlas/write-node.
  *
- * Tools call `writeSignedEvent`, which:
- *   1. Reads the current events.jsonl to compute current DAG tips
- *   2. Generates a fresh ULID event-id
- *   3. Spawns `atlas-signer` to produce a canonical-CBOR-signed AtlasEvent
- *   4. Appends the signed event to events.jsonl
+ * Callers invoke `writeSignedEvent`, which:
+ *   1. Resolves the signing identity (per-tenant kid auto-derived from
+ *      `workspaceId` if no `kid` is supplied; otherwise the explicit
+ *      `kid` is looked up via the legacy + per-tenant resolver).
+ *   2. Reads the current events.jsonl to compute current DAG tips
+ *      (unless explicit `parents` are passed).
+ *   3. Generates a fresh ULID event-id.
+ *   4. Spawns `atlas-signer` to produce a canonical-CBOR-signed
+ *      AtlasEvent. The per-tenant secret never crosses the subprocess
+ *      boundary; the legacy SPIFFE secret is piped via stdin (never
+ *      argv).
+ *   5. Appends the signed event to events.jsonl atomically.
  *
- * Writes are serialised per-workspace via an in-process mutex. Two
- * concurrent tool calls into the same workspace previously raced — they
- * both computed identical parents from a stale snapshot, both signed,
- * both appended — producing a *fork* in the DAG rather than a chain.
- * The verifier accepts forks (it's a DAG, not a chain) but the agent's
- * mental model "I wrote A then B builds on A" silently broke.
+ * Concurrency model: per-workspace mutex serialises writes WITHIN this
+ * Node process. Two concurrent calls into the same workspace queue
+ * behind one another so they observe each other's appended events when
+ * computing parents. Without the lock, both would compute identical
+ * parents from a stale snapshot, both would sign, both would append —
+ * producing a fork in the DAG. The verifier accepts forks (it's a
+ * DAG), but the agent's mental model "I wrote A, then B builds on A"
+ * silently breaks.
  *
- * The mutex is in-process. V2 multi-process MCP deployments need an
- * external lock service (file lock, advisory DB lock, etc.); the seam
- * is `withWorkspaceLock` and is the only place to change.
+ * Cross-PROCESS coordination (atlas-web AND atlas-mcp-server writing
+ * to the same workspace concurrently) is V2 territory — the seam is
+ * `withWorkspaceLock` and is the only place that needs to change.
+ * For V1 deployments, run one writer process per workspace.
  */
 
-import { resolveIdentityForKid } from "./keys.js";
+import { perTenantKidFor, resolveIdentityForKid } from "./keys.js";
 import { signEvent, SignerError } from "./signer.js";
 import { appendEvent, computeTips, readAllEvents } from "./storage.js";
 import type { AtlasEvent } from "./types.js";
 import { ulid } from "./ulid.js";
 
+/**
+ * Write-time arguments. `kid` is optional — when omitted, the bridge
+ * derives the canonical per-tenant kid from `workspaceId`
+ * (`atlas-anchor:{workspaceId}`). Atlas-web's web write surface relies
+ * on this auto-derivation: the route handler never accepts a caller-
+ * supplied kid because letting the browser choose its kid would
+ * un-narrow the trust boundary the per-tenant scheme exists to
+ * enforce. MCP tool callers that need to write under a specific
+ * legacy SPIFFE kid (agent / human / anchor) supply `kid` explicitly.
+ */
 export type WriteEventArgs = {
   workspaceId: string;
-  kid: string;
   payload: Record<string, unknown>;
+  /** Optional explicit kid. If omitted, the per-tenant kid for `workspaceId` is used. */
+  kid?: string;
   /** Optional explicit parents. If omitted, current DAG tips are used. */
   parents?: string[];
   /** Optional explicit timestamp. If omitted, current wall-clock UTC. */
@@ -38,6 +60,13 @@ export type WriteEventArgs = {
 export type WriteEventResult = {
   event: AtlasEvent;
   parentsUsed: string[];
+  /**
+   * The kid that actually signed this event. Identical to `args.kid`
+   * when one was supplied; otherwise the auto-derived per-tenant kid.
+   * Always present so the API response can echo it back without the
+   * caller re-deriving.
+   */
+  kid: string;
 };
 
 const workspaceLocks = new Map<string, Promise<unknown>>();
@@ -78,13 +107,16 @@ async function withWorkspaceLock<T>(workspaceId: string, fn: () => Promise<T>): 
 }
 
 /**
- * Common write path used by every signed-event MCP tool.
+ * Common write path used by every signed-event MCP tool AND by the
+ * atlas-web write surface. See module-level doc-comment for the full
+ * pipeline, locking model, and security properties.
  */
 export async function writeSignedEvent(args: WriteEventArgs): Promise<WriteEventResult> {
-  const identity = await resolveIdentityForKid(args.kid);
+  const effectiveKid = args.kid ?? perTenantKidFor(args.workspaceId);
+  const identity = await resolveIdentityForKid(effectiveKid);
   if (!identity) {
     throw new Error(
-      `unknown kid: ${args.kid}. Legacy V1 dev kids live in src/lib/keys.ts ` +
+      `unknown kid: ${effectiveKid}. Legacy V1 dev kids live in keys.ts ` +
         `(agent / human / anchor); per-tenant kids must match the shape ` +
         `'atlas-anchor:{workspace_id}'.`,
     );
@@ -102,7 +134,7 @@ export async function writeSignedEvent(args: WriteEventArgs): Promise<WriteEvent
       workspace: args.workspaceId,
       eventId,
       ts,
-      kid: args.kid,
+      kid: effectiveKid,
       parents,
       payload: args.payload,
     } as const;
@@ -119,7 +151,7 @@ export async function writeSignedEvent(args: WriteEventArgs): Promise<WriteEvent
     }
 
     await appendEvent(args.workspaceId, event);
-    return { event, parentsUsed: parents };
+    return { event, parentsUsed: parents, kid: effectiveKid };
   });
 }
 

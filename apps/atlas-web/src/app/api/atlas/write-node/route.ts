@@ -23,7 +23,7 @@
  *     keeps the web write surface narrow.
  *
  *   * Single-process locking only. The per-workspace mutex in
- *     `lib/atlas/event.ts` serialises writes within ONE Node process.
+ *     `@atlas/bridge` serialises writes within ONE Node process.
  *     Running atlas-web AND atlas-mcp-server against the same
  *     workspace concurrently can fork the DAG. The verifier accepts
  *     forks (it's a DAG) but the user's mental model breaks; deploy
@@ -50,13 +50,21 @@
  *     { ok: false, error: string }
  */
 
+// V1.19 Welle 2: register the web app's data-dir default with the
+// bridge BEFORE any other bridge call. ATLAS_DATA_DIR still wins as
+// the operator override; this only sets the dev/local fallback.
+import "@/lib/bootstrap";
+
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { writeSignedEvent } from "@/lib/atlas/event";
-import { perTenantKidFor } from "@/lib/atlas/keys";
-import { SignerError, redactPaths } from "@/lib/atlas/signer";
-import { StorageError } from "@/lib/atlas/storage";
-import { WorkspacePathError } from "@/lib/atlas/paths";
+import {
+  writeSignedEvent,
+  perTenantKidFor,
+  SignerError,
+  redactPaths,
+  StorageError,
+  WorkspacePathError,
+} from "@atlas/bridge";
 
 export const runtime = "nodejs";
 // This route spawns a child process and writes to the local
