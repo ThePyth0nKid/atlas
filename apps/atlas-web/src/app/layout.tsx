@@ -11,6 +11,7 @@ export const metadata: Metadata = {
 const NAV = [
   { href: "/", label: "Audit Readiness" },
   { href: "/graph", label: "Knowledge Graph" },
+  { href: "/write", label: "Write" },
   { href: "/compliance", label: "Compliance Lens" },
   { href: "/audit-export", label: "Audit Export" },
   { href: "/adversary-demo", label: "Adversary Demo" },
@@ -37,13 +38,15 @@ export default function RootLayout({
               </Link>
             ))}
           </nav>
-          <div className="ml-auto flex items-center gap-3 text-[12px] text-[var(--foreground-muted)]">
-            <span className="hash-chip">ws-bankhaus-hagedorn</span>
-            <span className="flex items-center gap-1">
-              <span className="trust-tick trust-tick--ok">✓</span>
-              <span>last anchor 47s ago</span>
-            </span>
-          </div>
+          {/*
+            V1.19 Welle 1: removed the hardcoded "ws-bankhaus-hagedorn"
+            chip and fake "last anchor 47s ago" indicator. They were
+            a static demo affordance that misrepresented system state
+            on every page (the chip has no relation to the workspace
+            actually being viewed; the timestamp ticked nothing). A
+            future welle wires a real workspace-selector + last-anchor
+            ticker driven by the verifier output. Until then, omit.
+          */}
         </header>
         <main className="max-w-[1280px] mx-auto px-8 py-8">{children}</main>
       </body>

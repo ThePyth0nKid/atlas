@@ -53,15 +53,25 @@ async function withWorkspaceLock<T>(workspaceId: string, fn: () => Promise<T>): 
   const next = new Promise<void>((resolve) => {
     release = resolve;
   });
-  workspaceLocks.set(workspaceId, prev.then(() => next));
+  // V1.19 Welle 1 review fix: capture the chained promise once. The
+  // previous code did `workspaceLocks.set(id, prev.then(() => next))`
+  // and later `workspaceLocks.get(id) === prev.then(() => next)` — but
+  // each `prev.then(...)` call returns a *new* Promise object, so the
+  // identity check was always false and the map grew without bound on
+  // every write. Storing the tail in a local before mutating the map
+  // makes the cleanup check actually identity-equal.
+  const tail = prev.then(() => next);
+  workspaceLocks.set(workspaceId, tail);
   try {
     await prev;
     return await fn();
   } finally {
     release();
-    if (workspaceLocks.get(workspaceId) === prev.then(() => next)) {
-      // best-effort cleanup; if a newer waiter has already replaced the
-      // entry we leave it alone.
+    // Best-effort cleanup: only delete the entry if we are still the
+    // most-recently-registered tail. A newer waiter that arrived
+    // between our `release()` and this check has already overwritten
+    // the entry; leave it for that waiter's own finally-block.
+    if (workspaceLocks.get(workspaceId) === tail) {
       workspaceLocks.delete(workspaceId);
     }
   }

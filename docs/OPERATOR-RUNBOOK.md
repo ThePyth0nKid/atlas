@@ -3092,3 +3092,145 @@ git commit -m 'chore(v1.x): re-pin master ruleset after <change-description>'
 | Workflow run shows "0 jobs / 0s / workflow file issue" | Workflow YAML invalid (e.g., re-introduced `administration: read` under `permissions:` — GITHUB_TOKEN does not support it) | Revert the offending workflow edit. The valid scopes for `GITHUB_TOKEN` are listed at the GitHub Actions automatic-token doc; `administration` is not among them. |
 | Workflow red with `jq is required` or `gh CLI is required` | Runner image regression | Pin the runner image (e.g. `ubuntu-22.04` instead of `ubuntu-latest`) until the upstream restores tooling. |
 | Workflow green but the Ruleset is obviously weakened | Pinned file `tools/expected-master-ruleset.json` was tampered with to match the weakened state | This requires a signed commit by an `allowed_signer` plus CODEOWNERS review (the file is in `PROTECTED_SURFACE`). If observed, treat as compromise of an SSH signing key — rotate immediately. Audit recent `tools/expected-master-ruleset.json` history. |
+
+## 17. atlas-web write surface — deployer security boundary (V1.19 Welle 1)
+
+V1.19 Welle 1 ships the first user-facing write path in atlas-web:
+`POST /api/atlas/write-node` and the `/write` page that feeds it. The
+route signs an event with the workspace's per-tenant Ed25519 key and
+appends it to `data/{workspace}/events.jsonl`. **The route ships
+without authentication by design.** This section documents why, what
+the deployer is responsible for, and how to verify the gate is in
+place before exposing the surface.
+
+### Why no baked-in auth
+
+Atlas's trust model is **key-based, not user-based**. Every event
+records `signature.kid`; auditors verify the signature chain (Rust
+verifier or WASM-in-browser), not a session cookie. Adding OAuth /
+Clerk / WorkOS would gate the UI but not the signer — anyone with
+network reach to the route still produces a structurally valid event
+under the workspace's per-tenant kid. The two are different concerns:
+
+* **Authentication** (who is allowed to invoke the route) is a
+  network/proxy responsibility — same layer as TLS, IP allowlist,
+  internal VPN. Different deployments want different answers
+  (Tailscale, mTLS at the edge, Cloudflare Access, an internal-only
+  route, an in-house auth provider). Atlas has no opinion.
+* **Trust** (who signed the event) is the per-tenant kid. That is
+  the only auth Atlas itself enforces, and it is enforced
+  cryptographically by the verifier — not by middleware.
+
+A baked-in auth provider would also force operators into one
+ecosystem (and couple Atlas releases to that vendor's SDK
+churn). Treating the route as "infrastructure that a deployer
+exposes deliberately" keeps the trust boundary clean.
+
+### Operator responsibilities
+
+Before exposing `/write` or `POST /api/atlas/write-node` on any
+network reachable beyond the local machine:
+
+1. **Network gate.** Put atlas-web behind an authenticating proxy.
+   Recommended starting points (any one suffices):
+   * Tailscale or another mesh VPN — only enrolled devices can reach
+     the surface at all.
+   * Cloudflare Access / IAP / mTLS at the edge — challenge in front
+     of the route.
+   * An internal-only ingress (no public DNS A record).
+   * IP allowlist on the load balancer for known operator IPs.
+2. **`ATLAS_DEV_MASTER_SEED=1` must be set in the Next.js process
+   environment** (or the wave-3 HSM trio per §3 must be configured).
+   The per-tenant signer subcommand refuses to start otherwise; the
+   route returns `500 signer: …refused — set ATLAS_DEV_MASTER_SEED=1…`
+   until the gate is opened.
+3. **Coordinate `ATLAS_DATA_DIR` if both atlas-web and
+   atlas-mcp-server run against the same workspace.** Both processes
+   honour `ATLAS_DATA_DIR`; set it identically in both, or accept the
+   default which is per-package. Concurrent writers from two processes
+   into the same workspace can fork the DAG (verifier accepts forks,
+   but the agent's mental model breaks). For V1.19 deployments, run
+   one writer process per workspace.
+4. **Decide whether `/write` belongs in your nav at all.** The atlas
+   demo ships the link in the nav; production deployments that
+   expose only the read surface should drop the link from the
+   `NAV` array in `apps/atlas-web/src/app/layout.tsx` so operators
+   never see the affordance from a public-read context.
+
+### Verifying the gate before deployment
+
+Before turning DNS toward a fresh atlas-web deployment:
+
+```bash
+# 1. From a machine NOT on the operator network, confirm the route
+#    is unreachable:
+curl -i https://atlas.example.com/api/atlas/write-node?workspace_id=test
+# Expected: connection refused, 401, 403, or some auth-challenge body.
+#           NEVER expected: 200 with {"ok":true,"kid":"atlas-anchor:test"}.
+
+# 2. From an authenticated/enrolled machine, confirm it works:
+curl -i https://atlas.example.com/api/atlas/write-node?workspace_id=test
+# Expected: 200 with the kid preview JSON.
+
+# 3. Issue a write that you can roll back if something is wrong (e.g.
+#    a sentinel workspace), and verify the on-disk events.jsonl grows
+#    by exactly one line.
+```
+
+If the first probe returns 200, **stop**. The surface is exposed.
+Take it down, add the gate, re-probe, then re-deploy.
+
+### CSRF (only relevant if you front the route with cookie-based SSO)
+
+If your network gate is a cookie-issuing SSO (Cloudflare Access,
+Okta, an in-house OIDC proxy), the browser will attach the session
+cookie on cross-origin POSTs unless explicitly told not to. Atlas
+ships no CSRF token because the route is unauthenticated at the
+application layer; the gate is your auth layer, so the gate is
+also responsible for CSRF defence:
+
+* Issue session cookies with `SameSite=Lax` (acceptable) or
+  `SameSite=Strict` (preferred) so cross-site `<form>` POSTs cannot
+  ride the operator's session.
+* If you cannot set `SameSite`, add a CSRF-token verifier at the
+  proxy (e.g. Cloudflare Workers preflight, nginx `auth_request`).
+* `WriteNodeForm` POSTs `application/json`, which triggers a CORS
+  preflight on cross-origin requests — same-origin JS is the only
+  realistic abuse vector, and `SameSite=Lax` blocks it.
+
+For non-cookie gates (mTLS, IP allowlist, mesh VPN), CSRF is
+inherently absent because there is no ambient credential a
+malicious origin can replay.
+
+### Rate-limiting
+
+The route does NOT carry a built-in rate limiter. Every authenticated
+write spawns the `atlas-signer` child process and appends to disk —
+under uncapped concurrent writes from a single client this is enough
+to saturate disk I/O on small VMs and fan out signer subprocesses.
+The deployer's network gate is also the rate-limiting layer:
+
+* Cloudflare Access / Vercel Edge / nginx `limit_req_zone` — cap
+  per-client request rate at the proxy.
+* For internal-only deployments behind Tailscale or a VPN, an
+  abusive client must already be enrolled, so a coarser cap (e.g.
+  100 req/min/IP) is usually enough.
+* If you observe bursty load, also bound the upstream client (the
+  agent or batch job calling the route) — the signer is fast but
+  not free.
+
+There is no Atlas-side fallback if the gate is missing, by design:
+the route is a thin signer-spawn path and adding middleware here
+would couple Atlas releases to a specific limiter library and
+deployment topology.
+
+### Failure modes specific to the write surface
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `POST` returns `500 signer: …refused — opt in via ATLAS_DEV_MASTER_SEED…` | Per-tenant signer gate not opened in the Next.js process env | Set `ATLAS_DEV_MASTER_SEED=1` (dev/CI) or wire the wave-3 HSM trio per §3. |
+| `POST` returns `500 signer: atlas-signer binary not found` | Release build missing | `cargo build --release -p atlas-signer` from the repo root, or set `ATLAS_SIGNER_PATH`. |
+| `POST` returns `400 invalid input: workspace_id: only [a-zA-Z0-9_-], 1–128 chars` | Client sent `..` / `/` / a non-allowlisted character | Working as intended — defence in depth at the route boundary mirrors the path-traversal check in `lib/atlas/paths.ts`. |
+| Two events in the same workspace produced concurrently both have `parent_hashes: []` (forked the DAG at genesis) | Concurrent atlas-web AND atlas-mcp-server writers against the same workspace | One writer per workspace until V2 ships the cross-process lock. The verifier still accepts the trace; the issue is operational, not trust-breaking. |
+| `e2e:write` script fails at the verifier step but POSTs succeed | Stale `target/release/atlas-verify-cli` from before a verifier-format change | `cargo build --release -p atlas-verify-cli` and re-run. |
+
