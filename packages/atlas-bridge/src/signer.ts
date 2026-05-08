@@ -85,20 +85,100 @@ export class SignerError extends Error {
 }
 
 /**
- * Strip absolute filesystem paths (Windows + POSIX) from a string
- * before returning it to a web client. Defence in depth against
- * server-layout disclosure via 500-response messages. Mirrors
- * `storage.ts:sanitiseFsError` so both surfaces redact the same way.
+ * Strip absolute filesystem paths (Windows + POSIX + `file://` URLs +
+ * Windows UNC) from a string before returning it to a web client or
+ * MCP caller. Defence in depth against server-layout disclosure via
+ * 500-response messages.
+ *
+ * V1.19 Welle 3: this is the SOLE redaction implementation in the
+ * bridge. The previous parallel `storage.ts:sanitiseFsError` was
+ * collapsed into this function — both surfaces now route here, so a
+ * future tightening (or loosening) lands once and applies everywhere.
+ *
+ * Welle 3b (security-review follow-through): segment char-class
+ * widened to include `+@~=,%`, and a UNC pattern was added. The first
+ * change closes a partial-disclosure gap on `node_modules/@scope/pkg/…`
+ * stack frames and Nix-store-shaped paths (`…/glib-2.74.0+20230301/…`),
+ * where the narrower `[A-Za-z0-9._-]` class would truncate the match
+ * at `@` or `+` and leak the tail. The second change adds coverage
+ * for `\\server\share\…` paths that fs errors emit on Windows hosts
+ * mounting network shares — the prior Windows pattern required a
+ * drive letter and let UNC pass through unredacted.
+ *
+ * Recognition rules (each pattern matches absolute paths only):
+ *
+ *   1. `file://` URLs — the URL scheme leaks the full filesystem
+ *      location of an ESM-loaded module via stack traces. Matched as
+ *      a whole token so the host portion is redacted along with the
+ *      path. Stops at whitespace, quote, backtick, or `)` so a path
+ *      embedded in a stack-frame parenthetical leaves the wrapping
+ *      `(` and `)` intact.
+ *   2. Windows UNC — `\\HOST\SHARE\segment…` with ≥3 components after
+ *      the leading `\\`. Two-component (`\\HOST\SHARE`) matches are
+ *      intentionally rejected to avoid hitting comment-style markers
+ *      and escape sequences in non-path text.
+ *   3. Windows absolute — `[Drive]:[\/]segment{1,}/segment` with
+ *      ≥2 components after the drive. `C:\Users\nelso\foo.txt`
+ *      matches; `C:\foo` does NOT (single-component disclosure is
+ *      mild platform info, not layout, and matching it produces
+ *      false positives on identifiers like type signatures
+ *      `T:String`).
+ *   4. POSIX absolute — `/segment/segment{,}` with ≥2 components.
+ *      Negative lookbehind `(?<![:\w/])` excludes non-path contexts
+ *      like URLs (`https://host/api/v1`), version strings
+ *      (`HTTP/1.1`), and identifiers (`n/a`, `1/2`). The `/`
+ *      character following a `:` (URL scheme separator) or word
+ *      character (URL host) cannot start a redaction match.
+ *
+ * Segment character class — `[A-Za-z0-9._\-+@~=,%]` — covers npm scope
+ * markers (`@`), Nix-style version pluses (`+`), CSV-shaped tempdirs
+ * (`,`), URL-encoded byte markers (`%`), home-shorthand (`~`), and the
+ * ASCII alphanum + `._-` baseline. Structural delimiters (whitespace,
+ * `/`, `\`, quotes, backtick, parens) are deliberately excluded so a
+ * segment cannot eat past the path's end into surrounding diagnostic
+ * text.
+ *
+ * Trade-offs:
+ *
+ *   * Single-segment paths (`/foo`, `C:\foo`) are deliberately not
+ *     redacted. Real Node fs error messages always include at least
+ *     directory + file (`/home/user/foo.txt`, `C:\Users\…\file`),
+ *     so the trade-off pays back as far fewer false positives in
+ *     non-fs error text without losing realistic redaction.
+ *   * Paths containing whitespace (`/home/My Folder/foo`) get
+ *     partial-redacted at the first space (`<path> Folder/foo`).
+ *     Acceptable — the leaked tail without the leading
+ *     drive+username is much less informative.
+ *   * Relative paths (`./foo/bar.ts`, `../workspace/events.jsonl`)
+ *     are not matched. They expose only filenames, not absolute
+ *     layout — outside the threat model this function defends.
  *
  * NOT applied automatically to `SignerError.stderr` — the field is
  * preserved verbatim for server-side logging and operator diagnostics.
  * Web callers MUST pass the propagated stderr through this before
  * forwarding to the client.
  */
+const PATH_SEGMENT = "[A-Za-z0-9._\\-+@~=,%]+";
+const FILE_URL_PATTERN = /file:\/\/\/?[^\s'"`)]+/g;
+const UNC_PATH_PATTERN = new RegExp(
+  `\\\\\\\\${PATH_SEGMENT}(?:\\\\${PATH_SEGMENT}){2,}`,
+  "g",
+);
+const WINDOWS_PATH_PATTERN = new RegExp(
+  `[A-Za-z]:[\\\\/](?:${PATH_SEGMENT}[\\\\/]){1,}${PATH_SEGMENT}`,
+  "g",
+);
+const POSIX_PATH_PATTERN = new RegExp(
+  `(?<![:\\w/])\\/(?:${PATH_SEGMENT}\\/){1,}${PATH_SEGMENT}`,
+  "g",
+);
+
 export function redactPaths(s: string): string {
   return s
-    .replace(/['"]?[A-Za-z]:[\\/][^\s'"]+['"]?/g, "<path>")
-    .replace(/['"]?\/[^\s'"]+['"]?/g, "<path>");
+    .replace(FILE_URL_PATTERN, "<path>")
+    .replace(UNC_PATH_PATTERN, "<path>")
+    .replace(WINDOWS_PATH_PATTERN, "<path>")
+    .replace(POSIX_PATH_PATTERN, "<path>");
 }
 
 /**

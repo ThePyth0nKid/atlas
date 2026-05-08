@@ -13,7 +13,8 @@
     "dev": "tsx src/index.ts",
     "smoke": "tsx scripts/smoke.ts",
     "test:anchor-json": "tsx scripts/test-anchor-json.ts",
-    "test": "tsx scripts/test-anchor-json.ts",
+    "test:redact-paths": "tsx scripts/test-redact-paths.ts",
+    "test": "tsx scripts/test-anchor-json.ts && tsx scripts/test-redact-paths.ts",
     "lint": "tsc -p tsconfig.lint.json"
   },
   "dependencies": {
