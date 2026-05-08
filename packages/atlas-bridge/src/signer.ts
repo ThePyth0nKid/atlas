@@ -16,6 +16,21 @@
  *
  * Secret material is passed via stdin, never via argv. argv values are
  * world-readable in `/proc/<pid>/cmdline` and `ps aux`.
+ *
+ * V1.19 Welle 1 atlas-web hardenings, now consolidated into the bridge:
+ *
+ *   * Child-process timeout (default `SIGN_TIMEOUT_MS = 30_000`, `DERIVE_TIMEOUT_MS = 5_000`).
+ *     A wedged signer must not hold an HTTP connection open indefinitely.
+ *     On timeout we kill the child and reject with a `SignerError`.
+ *   * Stdout cap (`STDOUT_CAP_BYTES = 512 * 1024`). A buggy or compromised
+ *     signer must not be able to exhaust the Node heap by streaming
+ *     arbitrary bytes before close. 512 KB is well above any realistic
+ *     AtlasEvent JSON output (events are < 4 KB) and small enough that
+ *     overrun is a clear bug, not a legitimate edge case.
+ *   * `redactPaths(s)` strips absolute filesystem paths from a string —
+ *     defence in depth against server-layout disclosure via a 500 body.
+ *     Web callers MUST run any propagated stderr through this before
+ *     forwarding to the client.
  */
 
 import { spawn } from "node:child_process";
@@ -69,6 +84,44 @@ export class SignerError extends Error {
   }
 }
 
+/**
+ * Strip absolute filesystem paths (Windows + POSIX) from a string
+ * before returning it to a web client. Defence in depth against
+ * server-layout disclosure via 500-response messages. Mirrors
+ * `storage.ts:sanitiseFsError` so both surfaces redact the same way.
+ *
+ * NOT applied automatically to `SignerError.stderr` — the field is
+ * preserved verbatim for server-side logging and operator diagnostics.
+ * Web callers MUST pass the propagated stderr through this before
+ * forwarding to the client.
+ */
+export function redactPaths(s: string): string {
+  return s
+    .replace(/['"]?[A-Za-z]:[\\/][^\s'"]+['"]?/g, "<path>")
+    .replace(/['"]?\/[^\s'"]+['"]?/g, "<path>");
+}
+
+/**
+ * V1.19 Welle 1: bound child-process resource usage. See module-level
+ * doc-comment for the rationale.
+ */
+const STDOUT_CAP_BYTES = 512 * 1024;
+// V1.19 Welle 2 hardening: stderr is also capped to avoid an unbounded
+// heap allocation if a wedged or compromised signer streams diagnostics
+// at line rate for the whole timeout window. 64 KB is generous for any
+// human-readable signer error chain (the Rust signer's longest message
+// today is ~600 bytes).
+const STDERR_CAP_BYTES = 64 * 1024;
+const SIGN_TIMEOUT_MS = 30_000;
+const DERIVE_TIMEOUT_MS = 5_000;
+
+export const __signerLimitsForTest = {
+  STDOUT_CAP_BYTES,
+  STDERR_CAP_BYTES,
+  SIGN_TIMEOUT_MS,
+  DERIVE_TIMEOUT_MS,
+};
+
 export async function signEvent(args: SignArgs): Promise<AtlasEvent> {
   const bin = resolveOrThrow();
 
@@ -87,13 +140,6 @@ export async function signEvent(args: SignArgs): Promise<AtlasEvent> {
   // HKDF and the secret never crosses this subprocess boundary.
   // `secretHex` is the legacy SPIFFE-kid path; the hex is piped via
   // stdin (never argv) to keep it out of the OS process listing.
-  //
-  // Narrow via the discriminated union directly. The pre-V1.10-warm-up
-  // form used a boolean `isDerive` flag plus `as string` casts because
-  // the boolean alone does not propagate type information into the
-  // branches. Hoisting the test into a proper `if` lets TS narrow
-  // `args.deriveFromWorkspace` to `string` in the truthy branch and
-  // `args.secretHex` to `string` in the falsy branch with no casts.
   let argv: string[];
   let stdin: string | undefined;
   if (args.deriveFromWorkspace !== undefined) {
@@ -104,7 +150,10 @@ export async function signEvent(args: SignArgs): Promise<AtlasEvent> {
     stdin = args.secretHex;
   }
 
-  const { stdout, stderr, code } = await runProcess(bin, argv, stdin);
+  const { stdout, stderr, code } = await runProcess(bin, argv, {
+    stdin,
+    timeoutMs: SIGN_TIMEOUT_MS,
+  });
 
   if (code !== 0) {
     throw new SignerError(
@@ -155,7 +204,10 @@ export async function signEvent(args: SignArgs): Promise<AtlasEvent> {
  */
 export async function bundleHashViaSigner(bundleJson: string): Promise<string> {
   const bin = resolveOrThrow();
-  const { stdout, stderr, code } = await runProcess(bin, ["bundle-hash"], bundleJson);
+  const { stdout, stderr, code } = await runProcess(bin, ["bundle-hash"], {
+    stdin: bundleJson,
+    timeoutMs: SIGN_TIMEOUT_MS,
+  });
   if (code !== 0) {
     throw new SignerError(
       `atlas-signer bundle-hash exited with code ${code}: ${stderr.trim() || "(no stderr)"}`,
@@ -245,11 +297,10 @@ export async function anchorViaSigner(
   if (options.chainPath !== undefined) {
     argv.push("--chain-path", options.chainPath);
   }
-  const { stdout, stderr, code } = await runProcess(
-    bin,
-    argv,
-    JSON.stringify(batch),
-  );
+  const { stdout, stderr, code } = await runProcess(bin, argv, {
+    stdin: JSON.stringify(batch),
+    timeoutMs: SIGN_TIMEOUT_MS,
+  });
   if (code !== 0) {
     throw new SignerError(
       `atlas-signer anchor exited with code ${code}: ${stderr.trim() || "(no stderr)"}`,
@@ -307,6 +358,7 @@ export async function deriveKeyViaSigner(workspaceId: string): Promise<DerivedId
   const { stdout, stderr, code } = await runProcess(
     bin,
     ["derive-key", "--workspace", workspaceId],
+    { timeoutMs: DERIVE_TIMEOUT_MS },
   );
   if (code !== 0) {
     throw new SignerError(
@@ -356,6 +408,7 @@ export async function derivePubkeyViaSigner(workspaceId: string): Promise<Derive
   const { stdout, stderr, code } = await runProcess(
     bin,
     ["derive-pubkey", "--workspace", workspaceId],
+    { timeoutMs: DERIVE_TIMEOUT_MS },
   );
   if (code !== 0) {
     throw new SignerError(
@@ -400,7 +453,10 @@ export async function derivePubkeyViaSigner(workspaceId: string): Promise<Derive
  */
 export async function chainExportViaSigner(jsonlContent: string): Promise<AnchorChain> {
   const bin = resolveOrThrow();
-  const { stdout, stderr, code } = await runProcess(bin, ["chain-export"], jsonlContent);
+  const { stdout, stderr, code } = await runProcess(bin, ["chain-export"], {
+    stdin: jsonlContent,
+    timeoutMs: SIGN_TIMEOUT_MS,
+  });
   if (code !== 0) {
     throw new SignerError(
       `atlas-signer chain-export exited with code ${code}: ${stderr.trim() || "(no stderr)"}`,
@@ -444,24 +500,110 @@ function resolveOrThrow(): string {
 }
 
 type ProcResult = { stdout: string; stderr: string; code: number };
+type RunProcessOptions = { stdin?: string; timeoutMs: number };
 
-function runProcess(bin: string, argv: string[], stdin?: string): Promise<ProcResult> {
+/**
+ * Spawn `bin` with `argv`, optionally piping `opts.stdin` into the
+ * child's stdin. Resolves with the captured stdout/stderr/exit-code on
+ * close; rejects with a `SignerError` on timeout or stdout overflow.
+ *
+ * The exit-code branch is intentionally NOT a rejection here — every
+ * caller wraps a non-zero exit with subcommand-specific context (which
+ * subcommand, what argv shape) before throwing. The two synthetic
+ * `SignerError` rejections from this function (`timed out`, `stdout
+ * exceeded`) carry their own context and short-circuit those wrappers.
+ *
+ * `stdin` is preserved (unused on the per-tenant derive paths) so
+ * future surfaces that DO need to pipe a secret inherit the safe
+ * pattern by default. argv must NEVER carry secret material —
+ * `/proc/<pid>/cmdline` is world-readable on Linux and shows up in
+ * `ps` output universally.
+ */
+function runProcess(
+  bin: string,
+  argv: string[],
+  opts: RunProcessOptions,
+): Promise<ProcResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(bin, argv, { stdio: ["pipe", "pipe", "pipe"] });
-    const out: Buffer[] = [];
-    const err: Buffer[] = [];
-    child.stdout.on("data", (b: Buffer) => out.push(b));
-    child.stderr.on("data", (b: Buffer) => err.push(b));
-    child.on("error", reject);
-    child.on("close", (code) => {
-      resolve({
-        stdout: Buffer.concat(out).toString("utf8"),
-        stderr: Buffer.concat(err).toString("utf8"),
-        code: code ?? -1,
-      });
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let settled = false;
+    const settle = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {
+        // best-effort kill; the close handler may still fire later
+      }
+      settle(() =>
+        reject(
+          new SignerError(`atlas-signer timed out after ${opts.timeoutMs}ms`),
+        ),
+      );
+    }, opts.timeoutMs);
+
+    child.stdout.on("data", (c: Buffer) => {
+      stdoutBytes += c.byteLength;
+      if (stdoutBytes > STDOUT_CAP_BYTES) {
+        try {
+          child.kill();
+        } catch {
+          // noop — child may have already exited
+        }
+        settle(() =>
+          reject(
+            new SignerError(
+              `atlas-signer stdout exceeded ${STDOUT_CAP_BYTES} bytes`,
+            ),
+          ),
+        );
+        return;
+      }
+      stdoutChunks.push(c);
     });
-    if (stdin !== undefined) {
-      child.stdin.end(stdin, "utf8");
+    child.stderr.on("data", (c: Buffer) => {
+      stderrBytes += c.byteLength;
+      if (stderrBytes > STDERR_CAP_BYTES) {
+        try {
+          child.kill();
+        } catch {
+          // noop — child may have already exited
+        }
+        settle(() =>
+          reject(
+            new SignerError(
+              `atlas-signer stderr exceeded ${STDERR_CAP_BYTES} bytes`,
+            ),
+          ),
+        );
+        return;
+      }
+      stderrChunks.push(c);
+    });
+    child.on("error", (e) =>
+      settle(() => reject(new SignerError(`failed to spawn signer: ${e.message}`))),
+    );
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settle(() =>
+        resolve({
+          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stderr: Buffer.concat(stderrChunks).toString("utf8"),
+          code: code ?? -1,
+        }),
+      );
+    });
+    if (opts.stdin !== undefined) {
+      child.stdin.end(opts.stdin, "utf8");
     } else {
       child.stdin.end();
     }

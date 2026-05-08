@@ -36,6 +36,7 @@ on:
       - 'crates/atlas-trust-core/**'
       - 'crates/atlas-verify-cli/**'
       - 'apps/atlas-mcp-server/**'
+      - 'packages/atlas-bridge/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'pnpm-lock.yaml'
@@ -49,6 +50,7 @@ on:
       - 'crates/atlas-trust-core/**'
       - 'crates/atlas-verify-cli/**'
       - 'apps/atlas-mcp-server/**'
+      - 'packages/atlas-bridge/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
       - 'pnpm-lock.yaml'
@@ -215,9 +217,25 @@ jobs:
         # order.
         run: echo "ATLAS_SIGNER_PATH=$GITHUB_WORKSPACE/target/release/atlas-signer" >> "$GITHUB_ENV"
 
-      - name: Install MCP-server dependencies
+      - name: Install workspace dependencies (bridge + MCP-server)
+        # V1.19 Welle 2: install at the workspace root so pnpm wires
+        # `@atlas/bridge: workspace:*` for the MCP-server consumer.
+        # Installing only inside `apps/atlas-mcp-server` would still
+        # symlink the workspace package, but the bridge's `dist/`
+        # (which `package.json` `exports` points to) wouldn't exist
+        # yet, and `tsc -p tsconfig.json` would fail with TS2307
+        # "Cannot find module '@atlas/bridge'".
         run: pnpm install --frozen-lockfile
-        working-directory: apps/atlas-mcp-server
+
+      - name: Build @atlas/bridge (TypeScript)
+        # V1.19 Welle 2: bridge must be built BEFORE the MCP-server
+        # build because the MCP-server's `tsc` resolves `@atlas/bridge`
+        # via the package's `exports` field (`./dist/index.js`,
+        # `./dist/index.d.ts`). The bridge has no source-condition
+        # export today (deliberately — keeps the source/dist boundary
+        # explicit so smoke tests exercise the shipped artefact). This
+        # step is the single point of order-dependence in the lane.
+        run: pnpm --filter @atlas/bridge build
 
       - name: Build MCP-server (TypeScript)
         run: pnpm build

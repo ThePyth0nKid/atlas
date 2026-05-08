@@ -15,15 +15,20 @@
  * if the smoke fails, run `cargo test -p atlas-trust-core` first.
  */
 
+import "../src/bootstrap.js";
 import { spawnSync } from "node:child_process";
 import { existsSync, promises as fs, rmSync } from "node:fs";
 import { join } from "node:path";
-import { stringifyAnchorJson } from "../src/lib/anchor-json.js";
+import {
+  stringifyAnchorJson,
+  writeSignedEvent,
+  perTenantKidFor,
+  TEST_IDENTITIES,
+  resolveSignerBinary,
+  workspaceDir,
+  repoRoot,
+} from "@atlas/bridge";
 import { exportWorkspaceBundle } from "../src/lib/bundle.js";
-import { writeSignedEvent } from "../src/lib/event.js";
-import { perTenantKidFor, TEST_IDENTITIES } from "../src/lib/keys.js";
-import { resolveSignerBinary, workspaceDir } from "../src/lib/paths.js";
-import { repoRoot } from "../src/lib/paths.js";
 import { anchorBundleTool } from "../src/tools/anchor-bundle.js";
 
 const WORKSPACE = "ws-mcp-smoke";

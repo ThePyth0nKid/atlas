@@ -16,20 +16,25 @@
 
 import { promises as fs } from "node:fs";
 import { basename } from "node:path";
-import { parseAnchorJson } from "./anchor-json.js";
-import { buildBundleForWorkspace } from "./keys.js";
-import { anchorChainPath, anchorsPath } from "./paths.js";
-import { AnchorEntryArraySchema } from "./schema.js";
-import { bundleHashViaSigner, chainExportViaSigner } from "./signer.js";
-import { readAllEvents, computeTips } from "./storage.js";
 import {
+  parseAnchorJson,
+  buildBundleForWorkspace,
+  anchorChainPath,
+  anchorsPath,
+  AnchorEntryArraySchema,
+  bundleHashViaSigner,
+  chainExportViaSigner,
+  readAllEvents,
+  computeTips,
+  redactPaths,
+  stringifyAnchorJson,
   SCHEMA_VERSION,
   type AnchorChain,
   type AnchorEntry,
   type AtlasEvent,
   type AtlasTrace,
   type PubkeyBundle,
-} from "./types.js";
+} from "@atlas/bridge";
 
 export type ExportedBundle = {
   trace: AtlasTrace;
@@ -97,7 +102,14 @@ async function readAnchors(workspaceId: string): Promise<AnchorEntry[]> {
     raw = await fs.readFile(path, "utf8");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw new Error(`failed to read ${basename(path)}: ${(e as Error).message}`);
+    // V1.19 Welle 2 hardening: redactPaths so Node fs error messages
+    // (which on some platforms include the absolute path) cannot leak
+    // the server's filesystem layout to the MCP client when the
+    // top-level handler in `src/index.ts` ferries this `e.message`
+    // back to the caller as a tool error.
+    throw new Error(
+      `failed to read ${basename(path)}: ${redactPaths((e as Error).message)}`,
+    );
   }
   let parsed: unknown;
   try {
@@ -148,25 +160,35 @@ async function readAnchorChain(workspaceId: string): Promise<AnchorChain | undef
   // above any plausible operational ceiling. Failing here is operator-
   // visible (the export errors loudly) rather than crashing the Node
   // process or the spawned signer with OOM.
+  //
+  // V1.19 Welle 2 hardening: open the file FIRST, then stat-via-fd and
+  // read-via-fd on the same descriptor. This eliminates the
+  // stat→read TOCTOU window where a concurrent writer (Sigstore-path
+  // anchor batch arriving mid-export) could grow the file past the
+  // ceiling between the two syscalls. fstat on the open fd is bound to
+  // the same inode as the subsequent readFile.
   const MAX_CHAIN_FILE_BYTES = 50 * 1024 * 1024;
-  let stat: import("node:fs").Stats;
+  let fh: import("node:fs/promises").FileHandle;
   try {
-    stat = await fs.stat(path);
+    fh = await fs.open(path, "r");
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw new Error(`failed to stat ${basename(path)}: ${(e as Error).message}`);
-  }
-  if (stat.size === 0) return undefined;
-  if (stat.size > MAX_CHAIN_FILE_BYTES) {
     throw new Error(
-      `${basename(path)} is ${stat.size} bytes, exceeds the ${MAX_CHAIN_FILE_BYTES}-byte ceiling`,
+      `failed to open ${basename(path)}: ${redactPaths((e as Error).message)}`,
     );
   }
   let raw: string;
   try {
-    raw = await fs.readFile(path, "utf8");
-  } catch (e) {
-    throw new Error(`failed to read ${basename(path)}: ${(e as Error).message}`);
+    const stat = await fh.stat();
+    if (stat.size === 0) return undefined;
+    if (stat.size > MAX_CHAIN_FILE_BYTES) {
+      throw new Error(
+        `${basename(path)} is ${stat.size} bytes, exceeds the ${MAX_CHAIN_FILE_BYTES}-byte ceiling`,
+      );
+    }
+    raw = await fh.readFile("utf8");
+  } finally {
+    await fh.close();
   }
   if (raw.trim().length === 0) return undefined;
   return chainExportViaSigner(raw);
@@ -181,6 +203,15 @@ async function readAnchorChain(workspaceId: string): Promise<AnchorChain | undef
  * the same `deterministic_hash` path the verifier runs at compare time.
  */
 export async function bundleHash(bundle: PubkeyBundle): Promise<string> {
-  const json = JSON.stringify(bundle);
+  // V1.19 Welle 2 hardening: route through the lossless stringifier
+  // even though `PubkeyBundle` carries no big-integer fields today.
+  // If a future bundle field uses `LosslessNumber` (e.g. a TUF-style
+  // timestamp expiry), `JSON.stringify` would silently truncate it
+  // here — and the on-disk `bundle.json` (also written via
+  // JSON.stringify in `export-bundle.ts`) would match locally, but
+  // the Rust verifier would re-canonicalise from the auditor's copy
+  // and see a divergent value. Pinning both writers on
+  // `stringifyAnchorJson` eliminates the trap by construction.
+  const json = stringifyAnchorJson(bundle);
   return bundleHashViaSigner(json);
 }

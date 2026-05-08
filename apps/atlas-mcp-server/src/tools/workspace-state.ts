@@ -8,8 +8,7 @@
  */
 
 import { z } from "zod";
-import { computeTips, readAllEvents } from "../lib/storage.js";
-import { DEFAULT_WORKSPACE } from "../lib/types.js";
+import { computeTips, readAllEvents, DEFAULT_WORKSPACE } from "@atlas/bridge";
 import { optionalWorkspaceIdSchema } from "./schema.js";
 import type { ToolDefinition } from "./types.js";
 

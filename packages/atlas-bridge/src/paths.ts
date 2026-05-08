@@ -1,14 +1,27 @@
 /**
  * Path resolution that survives different invocation modes.
  *
- * The MCP server can be launched from:
- *   - `pnpm dev` (cwd = apps/atlas-mcp-server)
- *   - `node dist/index.js` after build (cwd = anywhere)
- *   - Claude Desktop config (cwd = wherever Claude launched from)
+ * The bridge can be loaded from:
+ *   - atlas-mcp-server: `pnpm dev` (cwd = apps/atlas-mcp-server) or
+ *     `node dist/index.js` after build (cwd = anywhere) or Claude
+ *     Desktop config (cwd = wherever Claude launched from).
+ *   - atlas-web: a Next.js server route handler running under
+ *     `next dev` (cwd = apps/atlas-web) or compiled production output.
  *
  * We resolve everything relative to *this file's location* on disk,
- * not relative to cwd. Override paths via env vars if you need to
- * isolate dev data, or to point at a different signer binary.
+ * not relative to cwd. After tsc, `import.meta.url` points at
+ * `packages/atlas-bridge/dist/paths.js`; under `tsx` or Next's
+ * `transpilePackages` it points at `packages/atlas-bridge/src/paths.ts`.
+ * Both `dist/` and `src/` are exactly one level under the bridge root,
+ * so the same `..` walk works.
+ *
+ * The bridge intentionally does NOT bake in an app-specific data
+ * directory default — its package root is shared across consumers.
+ * The MCP server stores per-developer data under
+ * `apps/atlas-mcp-server/data/`; atlas-web defaults to
+ * `apps/atlas-web/data/`. Each consumer calls `setDefaultDataDir()`
+ * at startup with its preferred location, and `ATLAS_DATA_DIR` still
+ * wins as the operator override.
  */
 
 import { fileURLToPath } from "node:url";
@@ -16,10 +29,10 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { existsSync } from "node:fs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-// src/lib/ → src/ → apps/atlas-mcp-server/
-const PACKAGE_ROOT = resolve(HERE, "..", "..");
-// apps/atlas-mcp-server/ → apps/ → repo root
-const REPO_ROOT = resolve(PACKAGE_ROOT, "..", "..");
+// {dist|src}/ → packages/atlas-bridge/
+const BRIDGE_ROOT = resolve(HERE, "..");
+// packages/atlas-bridge/ → packages/ → repo root
+const REPO_ROOT = resolve(BRIDGE_ROOT, "..", "..");
 
 /**
  * Allowlist of legal workspace-id characters. Tight on purpose — workspace
@@ -41,8 +54,42 @@ export class WorkspacePathError extends Error {
   }
 }
 
+let configuredDefaultDataDir: string | null = null;
+
+/**
+ * Register a process-wide default data directory. The env var
+ * `ATLAS_DATA_DIR` always wins; this fallback only takes effect when
+ * the env var is unset. Each consumer (atlas-mcp-server, atlas-web)
+ * calls this once at startup with its app-local default so two apps
+ * sharing the bridge do not silently collide on the same data dir.
+ *
+ * If neither the env var nor a configured default is present,
+ * `dataDir()` falls back to `<repo-root>/data` — useful for ad-hoc
+ * scripts (e.g. `tsx` smoke runs) that import the bridge directly.
+ */
+export function setDefaultDataDir(dir: string): void {
+  // V1.19 Welle 2 hardening: refuse to silently clobber a previously
+  // registered default. Two consumers in the same process configuring
+  // different data dirs is a misconfiguration that would otherwise
+  // result in whichever bootstrap module ran last winning, with no
+  // operator-visible signal. Idempotent calls (same dir twice) are
+  // permitted because Node's module cache makes them benign — the
+  // bootstrap module re-evaluation on hot-reload is the realistic
+  // case here. Set ATLAS_DATA_DIR to override at the env layer.
+  if (configuredDefaultDataDir !== null && configuredDefaultDataDir !== dir) {
+    throw new Error(
+      `setDefaultDataDir called twice with different values: ` +
+        `first "${configuredDefaultDataDir}", now "${dir}". ` +
+        `Use ATLAS_DATA_DIR to override at the env layer.`,
+    );
+  }
+  configuredDefaultDataDir = dir;
+}
+
 export function dataDir(): string {
-  return process.env.ATLAS_DATA_DIR ?? join(PACKAGE_ROOT, "data");
+  if (process.env.ATLAS_DATA_DIR) return process.env.ATLAS_DATA_DIR;
+  if (configuredDefaultDataDir !== null) return configuredDefaultDataDir;
+  return join(REPO_ROOT, "data");
 }
 
 /**
@@ -106,12 +153,24 @@ let cachedSignerBinary: string | null | undefined = undefined;
  * Returns null if none exist; the caller surfaces a friendly error. The
  * result is memoised — the binary location does not change at runtime
  * and `existsSync` should not appear in every signed-write hot path.
+ *
+ * V1.19 Welle 1 web hardening: the env-var override is verified with
+ * `existsSync` BEFORE caching. A misconfigured `ATLAS_SIGNER_PATH`
+ * previously surfaced as a generic spawn ENOENT on the first signer
+ * call and never recovered (the cache pinned the bad path semantically),
+ * forcing a process restart. Caching only after a successful existsSync
+ * makes the next request fall through to the workspace candidates.
  */
 export function resolveSignerBinary(): string | null {
   if (cachedSignerBinary !== undefined) return cachedSignerBinary;
   if (process.env.ATLAS_SIGNER_PATH) {
-    cachedSignerBinary = process.env.ATLAS_SIGNER_PATH;
-    return cachedSignerBinary;
+    if (existsSync(process.env.ATLAS_SIGNER_PATH)) {
+      cachedSignerBinary = process.env.ATLAS_SIGNER_PATH;
+      return cachedSignerBinary;
+    }
+    // Fall through to workspace candidates rather than failing hard —
+    // operator may have set an old path; release/debug builds remain
+    // a useful fallback.
   }
   const exe = process.platform === "win32" ? ".exe" : "";
   const candidates = [

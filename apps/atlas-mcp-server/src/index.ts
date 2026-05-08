@@ -24,6 +24,7 @@
  * or auto-discovered under `target/release/`. See lib/paths.ts.
  */
 
+import "./bootstrap.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { TOOL_REGISTRY } from "./tools/index.js";

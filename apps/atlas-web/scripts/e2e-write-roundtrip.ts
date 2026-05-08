@@ -82,7 +82,7 @@ async function main(): Promise<void> {
 
   // 1. Sanity: signer + verifier present (otherwise the test is
   //    asserting on a stale binary location instead of behaviour).
-  const { resolveSignerBinary, repoRoot } = await import("../src/lib/atlas/paths");
+  const { resolveSignerBinary, repoRoot } = await import("@atlas/bridge");
   const signer = resolveSignerBinary();
   if (!signer) {
     fail(
@@ -164,7 +164,7 @@ async function main(): Promise<void> {
   // 4. Storage check — events.jsonl must have exactly two lines, each
   //    a structurally valid AtlasEvent (the storage layer's reader
   //    re-validates with Zod, so a bad write would have raised here).
-  const { readAllEvents } = await import("../src/lib/atlas/storage");
+  const { readAllEvents } = await import("@atlas/bridge");
   const stored = await readAllEvents(WORKSPACE);
   if (stored.length !== 2) {
     fail(`expected 2 events on disk, got ${stored.length}`);
@@ -180,9 +180,7 @@ async function main(): Promise<void> {
   const { exportWorkspaceBundle } = await import(
     "../../atlas-mcp-server/src/lib/bundle"
   );
-  const { stringifyAnchorJson } = await import(
-    "../../atlas-mcp-server/src/lib/anchor-json"
-  );
+  const { stringifyAnchorJson } = await import("@atlas/bridge");
   const { trace, bundle } = await exportWorkspaceBundle(WORKSPACE);
   if (trace.events.length !== 2) {
     fail(`exporter saw ${trace.events.length} events; expected 2`);

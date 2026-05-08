@@ -97,9 +97,16 @@ jobs:
         # anchor-bundle.ts), not by a Cargo feature.
         run: cargo build --release -p atlas-signer -p atlas-verify-cli
 
-      - name: Install MCP-server dependencies
+      - name: Install workspace dependencies (bridge + MCP-server)
+        # V1.19 Welle 2: install at the workspace root so pnpm wires
+        # `@atlas/bridge: workspace:*`. See hsm-wave3-smoke.yml for
+        # the full rationale; the bridge has no source-condition
+        # export, so its `dist/` must be built before any consumer's
+        # `tsc` runs.
         run: pnpm install --frozen-lockfile
-        working-directory: apps/atlas-mcp-server
+
+      - name: Build @atlas/bridge (TypeScript)
+        run: pnpm --filter @atlas/bridge build
 
       - name: Build MCP-server (TypeScript)
         run: pnpm build
