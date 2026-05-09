@@ -9,7 +9,8 @@
     "start": "next start",
     "lint": "next lint",
     "wasm": "bash ../../scripts/build-wasm.sh",
-    "e2e:write": "tsx scripts/e2e-write-roundtrip.ts"
+    "e2e:write": "tsx scripts/e2e-write-roundtrip.ts",
+    "e2e:edge-cases": "tsx scripts/e2e-write-edge-cases.ts"
   },
   "dependencies": {
     "@atlas/bridge": "workspace:*",
