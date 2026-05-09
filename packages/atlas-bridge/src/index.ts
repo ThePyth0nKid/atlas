@@ -134,4 +134,5 @@ export {
 } from "./anchor-json.js";
 
 // ---------- ULID ----------
-export { ulid } from "./ulid.js";
+export type { UlidState, RandomSource } from "./ulid.js";
+export { ulid, createUlid, nextUlid } from "./ulid.js";
