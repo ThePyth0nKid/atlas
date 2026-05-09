@@ -84,6 +84,15 @@ export const dynamic = "force-dynamic";
  */
 const REQUEST_BODY_MAX_BYTES = 256 * 1024;
 
+/**
+ * Frozen test-only export of the request-body cap (V1.19 Welle 8,
+ * mirroring the Welle 7 redactPath constants pattern). Lets
+ * `scripts/e2e-write-edge-cases.ts` assert the boundary by shared
+ * identity instead of duplicating the literal — closes the source/
+ * test drift seam at compile time.
+ */
+export const __REQUEST_BODY_MAX_BYTES_FOR_TEST = REQUEST_BODY_MAX_BYTES;
+
 const WORKSPACE_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 const NODE_KIND = z.enum(["dataset", "model", "inference", "document", "other"]);
 
