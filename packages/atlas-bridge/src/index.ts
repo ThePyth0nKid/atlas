@@ -45,6 +45,7 @@ export {
   anchorChainPath,
   resolveSignerBinary,
   repoRoot,
+  __signerBinaryCacheForTest,
 } from "./paths.js";
 
 // ---------- Identity + key derivation ----------
