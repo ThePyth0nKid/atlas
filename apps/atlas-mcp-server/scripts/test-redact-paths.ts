@@ -52,7 +52,12 @@ function expectRedacted(name: string, input: string): void {
   // older narrow check.
   const SEG = "[A-Za-z0-9._\\-+@~=,%]+";
   const winLeak = new RegExp(`[A-Za-z]:[\\\\/]${SEG}[\\\\/]${SEG}`);
-  const posixLeak = new RegExp(`(?<![:\\w/])\\/${SEG}\\/${SEG}`);
+  // Mirror the signer.ts POSIX_PATH_PATTERN lookbehind exactly so the
+  // leak detector tracks the source-of-truth pattern. V1.19 Welle 6
+  // added the `.` exclusion so dotted-relative paths don't trigger a
+  // false-positive leak when surfaced in redacted output (they pass
+  // through verbatim by design and are not absolute-layout disclosure).
+  const posixLeak = new RegExp(`(?<![.:\\w/])\\/${SEG}\\/${SEG}`);
   const uncLeak = new RegExp(`\\\\\\\\${SEG}\\\\${SEG}\\\\${SEG}`);
   check(
     name,
@@ -129,6 +134,30 @@ expectRedacted(
   "EACCES: permission denied, open '\\\\FILESERVER\\atlas\\workspace\\events.jsonl'",
 );
 
+// V1.19 Welle 6 — pin that ABSOLUTE paths containing dotfile segments
+// (`.cache/`, `.config/`, `.git/`) still redact. The Welle 6 lookbehind
+// addition `(?<![.:\w/])` only suppresses redaction when `.` is the
+// character DIRECTLY preceding the matched leading `/`. In an absolute
+// path like `/home/user/.cache/foo`, the matched `/` (before `home`) is
+// preceded by whitespace, NOT by `.`. A future regression that
+// over-tightens the lookbehind to also exclude any `.` mid-path would
+// break this pin.
+
+expectRedacted(
+  "POSIX absolute with dotfile segment — .cache",
+  "ENOENT: open '/home/user/.cache/atlas/keystore'",
+);
+
+expectRedacted(
+  "POSIX absolute with dotfile segment — .config",
+  "could not read /home/user/.config/atlas/key",
+);
+
+expectRedacted(
+  "POSIX absolute with dotfile segment — .git refs",
+  "EACCES: open '/home/user/repo/.git/refs/heads/master'",
+);
+
 // ─── Negative: non-paths must pass through unchanged ───────────────────
 
 expectUnchanged(
@@ -184,6 +213,47 @@ expectUnchanged(
 expectUnchanged(
   "Node module specifier",
   "Error at Object.openSync (node:fs:603:3)",
+);
+
+// V1.19 Welle 6 — dotted-relative paths (`./` and `../`) must pass
+// through verbatim. They expose only filenames, not absolute layout, so
+// they're outside the threat model. The prior pattern partial-redacted
+// them to operator-hostile `.<path>` / `..<path>` shapes; the lookbehind
+// addition `(?<![.:\w/])` closes that.
+
+expectUnchanged(
+  "POSIX dotted-relative — single dot",
+  "loaded ./scripts/build.js successfully",
+);
+
+expectUnchanged(
+  "POSIX dotted-relative — double dot",
+  "open ../workspace/events.jsonl",
+);
+
+expectUnchanged(
+  "POSIX dotted-relative — deep parent traversal",
+  "import from ../../packages/atlas-bridge/src/foo.ts",
+);
+
+expectUnchanged(
+  "POSIX dotted-relative — embedded in error message",
+  "Error at ./scripts/build.js:42 — unexpected token",
+);
+
+expectUnchanged(
+  "POSIX dotted-relative — quoted",
+  "open './data/events.jsonl' for read",
+);
+
+expectUnchanged(
+  "POSIX bare relative — no leading dot",
+  "compiled src/lib/atlas/storage.ts in 1.2s",
+);
+
+expectUnchanged(
+  "POSIX bare relative — multi-segment",
+  "tsc found packages/atlas-bridge/src/index.ts unused",
 );
 
 // ─── Specific output — make sure surrounding context is preserved ──────

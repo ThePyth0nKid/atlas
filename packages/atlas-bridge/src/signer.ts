@@ -124,11 +124,18 @@ export class SignerError extends Error {
  *      false positives on identifiers like type signatures
  *      `T:String`).
  *   4. POSIX absolute — `/segment/segment{,}` with ≥2 components.
- *      Negative lookbehind `(?<![:\w/])` excludes non-path contexts
+ *      Negative lookbehind `(?<![.:\w/])` excludes non-path contexts
  *      like URLs (`https://host/api/v1`), version strings
  *      (`HTTP/1.1`), and identifiers (`n/a`, `1/2`). The `/`
- *      character following a `:` (URL scheme separator) or word
- *      character (URL host) cannot start a redaction match.
+ *      character following a `:` (URL scheme separator), word
+ *      character (URL host), or `.` (relative-path prefix
+ *      `./foo/bar`, `../workspace/x`) cannot start a redaction
+ *      match — V1.19 Welle 6 added the `.` exclusion so dotted
+ *      relative paths pass through verbatim instead of being
+ *      partial-redacted to operator-hostile `.<path>` /
+ *      `..<path>` shapes (the prior pattern matched the leading
+ *      `/` and emitted a fragment that no longer round-tripped to
+ *      a usable path for diagnostics).
  *
  * Segment character class — `[A-Za-z0-9._\-+@~=,%]` — covers npm scope
  * markers (`@`), Nix-style version pluses (`+`), CSV-shaped tempdirs
@@ -169,7 +176,7 @@ const WINDOWS_PATH_PATTERN = new RegExp(
   "g",
 );
 const POSIX_PATH_PATTERN = new RegExp(
-  `(?<![:\\w/])\\/(?:${PATH_SEGMENT}\\/){1,}${PATH_SEGMENT}`,
+  `(?<![.:\\w/])\\/(?:${PATH_SEGMENT}\\/){1,}${PATH_SEGMENT}`,
   "g",
 );
 
