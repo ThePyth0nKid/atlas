@@ -166,6 +166,7 @@ export class SignerError extends Error {
  * forwarding to the client.
  */
 const PATH_SEGMENT = "[A-Za-z0-9._\\-+@~=,%]+";
+const POSIX_PATH_LOOKBEHIND = "(?<![.:\\w/])";
 const FILE_URL_PATTERN = /file:\/\/\/?[^\s'"`)]+/g;
 const UNC_PATH_PATTERN = new RegExp(
   `\\\\\\\\${PATH_SEGMENT}(?:\\\\${PATH_SEGMENT}){2,}`,
@@ -176,9 +177,38 @@ const WINDOWS_PATH_PATTERN = new RegExp(
   "g",
 );
 const POSIX_PATH_PATTERN = new RegExp(
-  `(?<![.:\\w/])\\/(?:${PATH_SEGMENT}\\/){1,}${PATH_SEGMENT}`,
+  `${POSIX_PATH_LOOKBEHIND}\\/(?:${PATH_SEGMENT}\\/){1,}${PATH_SEGMENT}`,
   "g",
 );
+
+/**
+ * Source-of-truth bridge → test export of the raw POSIX_PATH_PATTERN
+ * building blocks. The test (`apps/atlas-mcp-server/scripts/
+ * test-redact-paths.ts`) imports both to construct its `expectRedacted`
+ * leak-detector regex from the same strings the source uses. Without
+ * this seam the test had two physically-separate copies of the same
+ * literals and could silently drift if a future char-class or
+ * lookbehind change updated only one side. V1.19 Welle 7 introduced
+ * this seam after Welle 6 surfaced the drift hazard during the
+ * lookbehind tightening (the test-side `posixLeak` regex had to be
+ * hand-updated in lockstep with the source pattern).
+ *
+ * SECURITY: these are non-secret regex literals. Exporting them widens
+ * no auth surface; the worst-case misuse is a downstream caller
+ * constructing a regex slightly differently than `redactPaths` does
+ * internally, which is the caller's responsibility, not a bridge bug.
+ */
+// `Object.freeze` prevents an importer from mutating the surface
+// (e.g., a supply-chain-compromised dependency overwriting
+// `PATH_SEGMENT` to weaken a downstream test's leak detector). The
+// runtime `POSIX_PATH_PATTERN` is closed over the local `const`
+// values at module-load time and is unaffected either way; the freeze
+// is defence-in-depth on the exported view alone. Welle 7
+// security-review L-1.
+export const __redactPathConstantsForTest = Object.freeze({
+  PATH_SEGMENT,
+  POSIX_PATH_LOOKBEHIND,
+});
 
 export function redactPaths(s: string): string {
   return s
