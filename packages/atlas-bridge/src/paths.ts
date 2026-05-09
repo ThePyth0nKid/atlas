@@ -142,7 +142,35 @@ export function anchorChainPath(workspaceId: string): string {
   return join(workspaceDir(workspaceId), "anchor-chain.jsonl");
 }
 
-let cachedSignerBinary: string | null | undefined = undefined;
+/**
+ * V1.19 Welle 4 hardening: the resolved binary path is cached with a
+ * 60-second TTL rather than process-long. Long-running consumers
+ * (Claude Desktop's MCP host, the production atlas-web Next.js server,
+ * Vercel/Cloudflare workers) can outlive an operator-driven binary
+ * swap by hours or days. The pre-Welle-4 process-long cache pinned a
+ * stale path until restart — every subsequent sign call ENOENT'd until
+ * the operator noticed and bounced the host. The TTL bounds that drift
+ * window without re-introducing the per-write `existsSync` cost the
+ * original cache existed to avoid: at most one filesystem probe per
+ * minute per process, regardless of write rate.
+ *
+ * Both positive and negative results are TTL'd. Negative caching means
+ * an operator who runs `cargo build --release` after the process
+ * started sees the new binary picked up within 60s without restart.
+ */
+const SIGNER_BINARY_CACHE_TTL_MS = 60_000;
+
+interface SignerBinaryCacheEntry {
+  readonly path: string | null;
+  readonly expiresAt: number;
+}
+
+let signerBinaryCache: SignerBinaryCacheEntry | null = null;
+
+// Clock-injection seam for deterministic TTL tests. Production callers
+// always observe `Date.now`; only `__signerBinaryCacheForTest.setClock`
+// mutates this, and the helper restores it on `restoreClock`.
+let signerCacheNow: () => number = Date.now;
 
 /**
  * Resolve the `atlas-signer` binary. Preference order:
@@ -150,24 +178,45 @@ let cachedSignerBinary: string | null | undefined = undefined;
  *   2. target/release/atlas-signer{.exe} (release build)
  *   3. target/debug/atlas-signer{.exe} (dev build)
  *
- * Returns null if none exist; the caller surfaces a friendly error. The
- * result is memoised — the binary location does not change at runtime
- * and `existsSync` should not appear in every signed-write hot path.
+ * Returns null if none exist; the caller surfaces a friendly error.
  *
- * V1.19 Welle 1 web hardening: the env-var override is verified with
- * `existsSync` BEFORE caching. A misconfigured `ATLAS_SIGNER_PATH`
- * previously surfaced as a generic spawn ENOENT on the first signer
- * call and never recovered (the cache pinned the bad path semantically),
- * forcing a process restart. Caching only after a successful existsSync
- * makes the next request fall through to the workspace candidates.
+ * Caching: results are cached with a 60-second TTL — see
+ * `SIGNER_BINARY_CACHE_TTL_MS` above for rationale. Within the TTL
+ * window the cached value is returned with no syscalls; after expiry
+ * the resolution rebuilds from scratch, which also re-reads
+ * `ATLAS_SIGNER_PATH` so env-var rotations take effect within one TTL.
+ *
+ * V1.19 Welle 1 web hardening (preserved through Welle 4): the env-var
+ * override is verified with `existsSync` BEFORE caching. A
+ * misconfigured `ATLAS_SIGNER_PATH` falls through to the workspace
+ * candidates rather than pinning a bad path that ENOENTs every sign.
  */
 export function resolveSignerBinary(): string | null {
-  if (cachedSignerBinary !== undefined) return cachedSignerBinary;
+  const now = signerCacheNow();
+  if (signerBinaryCache !== null && signerBinaryCache.expiresAt > now) {
+    return signerBinaryCache.path;
+  }
+  const resolved = doResolveSignerBinary();
+  signerBinaryCache = {
+    path: resolved,
+    expiresAt: now + SIGNER_BINARY_CACHE_TTL_MS,
+  };
+  return resolved;
+}
+
+function doResolveSignerBinary(): string | null {
   if (process.env.ATLAS_SIGNER_PATH) {
-    if (existsSync(process.env.ATLAS_SIGNER_PATH)) {
-      cachedSignerBinary = process.env.ATLAS_SIGNER_PATH;
-      return cachedSignerBinary;
-    }
+    // V1.19 Welle 4 hardening: resolve to absolute BEFORE existsSync +
+    // cache. The TTL means the resolved path is reused for up to 60s;
+    // if a relative path were stored and the long-running process
+    // changed cwd in the meantime (process.chdir, or a worker thread
+    // with a different inherited cwd), the cached probe and the later
+    // spawn would resolve against different bases. existsSync itself
+    // is cwd-relative — the absolute resolve closes that gap and
+    // makes the cache value carry the same meaning across the whole
+    // TTL window regardless of cwd drift.
+    const abs = resolve(process.env.ATLAS_SIGNER_PATH);
+    if (existsSync(abs)) return abs;
     // Fall through to workspace candidates rather than failing hard —
     // operator may have set an old path; release/debug builds remain
     // a useful fallback.
@@ -178,14 +227,31 @@ export function resolveSignerBinary(): string | null {
     join(REPO_ROOT, "target", "debug", `atlas-signer${exe}`),
   ];
   for (const path of candidates) {
-    if (existsSync(path)) {
-      cachedSignerBinary = path;
-      return path;
-    }
+    if (existsSync(path)) return path;
   }
-  cachedSignerBinary = null;
   return null;
 }
+
+/**
+ * Test-only seam for the signer-binary cache. Production code MUST NOT
+ * call these — the cache is a pure optimisation and the TTL constant
+ * is part of the operational contract documented above. Exported so
+ * the cache-behaviour test (`scripts/test-signer-binary-cache.ts`)
+ * can drive cache state and a synthetic clock without sleeping or
+ * relying on real wall-time.
+ */
+export const __signerBinaryCacheForTest = {
+  TTL_MS: SIGNER_BINARY_CACHE_TTL_MS,
+  reset(): void {
+    signerBinaryCache = null;
+  },
+  setClock(fn: () => number): void {
+    signerCacheNow = fn;
+  },
+  restoreClock(): void {
+    signerCacheNow = Date.now;
+  },
+};
 
 export function repoRoot(): string {
   return REPO_ROOT;

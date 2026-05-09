@@ -14,7 +14,8 @@
     "smoke": "tsx scripts/smoke.ts",
     "test:anchor-json": "tsx scripts/test-anchor-json.ts",
     "test:redact-paths": "tsx scripts/test-redact-paths.ts",
-    "test": "tsx scripts/test-anchor-json.ts && tsx scripts/test-redact-paths.ts",
+    "test:signer-cache": "tsx scripts/test-signer-binary-cache.ts",
+    "test": "tsx scripts/test-anchor-json.ts && tsx scripts/test-redact-paths.ts && tsx scripts/test-signer-binary-cache.ts",
     "lint": "tsc -p tsconfig.lint.json"
   },
   "dependencies": {
