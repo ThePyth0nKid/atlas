@@ -25,7 +25,7 @@
  * is `pnpm run test:redact-paths` + non-zero exit.
  */
 
-import { redactPaths } from "@atlas/bridge";
+import { redactPaths, __redactPathConstantsForTest } from "@atlas/bridge";
 
 let failures = 0;
 
@@ -42,22 +42,23 @@ function expectEqual(name: string, got: string, want: string): void {
   check(name, got === want, `\n    got:  ${JSON.stringify(got)}\n    want: ${JSON.stringify(want)}`);
 }
 
+// V1.19 Welle 7: source-of-truth bridge → test seam. Both `SEG` and
+// the POSIX lookbehind are imported from `@atlas/bridge` rather than
+// duplicated here. Pre-Welle-7 each lived as a separate string literal
+// in this file and could silently drift from `signer.ts` on a future
+// char-class or lookbehind change. The seam closes the drift hazard.
+const SEG = __redactPathConstantsForTest.PATH_SEGMENT;
+const POSIX_LB = __redactPathConstantsForTest.POSIX_PATH_LOOKBEHIND;
+
 function expectRedacted(name: string, input: string): void {
   const got = redactPaths(input);
   // Postcondition is intentionally strict: not only must `<path>`
   // appear, but no path-shaped substring may survive in the output.
-  // The wider segment class mirrors signer.ts so that a partial match
-  // that leaks part of a real path (e.g. truncating at `@scope`)
-  // would FAIL this assertion instead of slipping through on the
-  // older narrow check.
-  const SEG = "[A-Za-z0-9._\\-+@~=,%]+";
+  // The detector regexes are constructed from the same `SEG` and
+  // `POSIX_LB` strings the source uses, so a future change to either
+  // propagates here automatically.
   const winLeak = new RegExp(`[A-Za-z]:[\\\\/]${SEG}[\\\\/]${SEG}`);
-  // Mirror the signer.ts POSIX_PATH_PATTERN lookbehind exactly so the
-  // leak detector tracks the source-of-truth pattern. V1.19 Welle 6
-  // added the `.` exclusion so dotted-relative paths don't trigger a
-  // false-positive leak when surfaced in redacted output (they pass
-  // through verbatim by design and are not absolute-layout disclosure).
-  const posixLeak = new RegExp(`(?<![.:\\w/])\\/${SEG}\\/${SEG}`);
+  const posixLeak = new RegExp(`${POSIX_LB}\\/${SEG}\\/${SEG}`);
   const uncLeak = new RegExp(`\\\\\\\\${SEG}\\\\${SEG}\\\\${SEG}`);
   check(
     name,
@@ -72,6 +73,50 @@ function expectRedacted(name: string, input: string): void {
 function expectUnchanged(name: string, input: string): void {
   expectEqual(name, redactPaths(input), input);
 }
+
+// ─── Welle 7 — bridge constants seam contract ────────────────────────
+//
+// Pin the shape of the imported constants so a future bridge edit that
+// accidentally renames or restructures `__redactPathConstantsForTest`
+// fails this file at module-load rather than at a downstream regex
+// constructor where the error message would be opaque. Also pin that
+// the lookbehind contains the `.` exclusion (Welle 6 contract): if a
+// future contributor reverts that change, this assertion catches it
+// before any positive/negative redaction case runs.
+
+check(
+  "bridge SEG constant is non-empty regex char-class string",
+  typeof SEG === "string" && SEG.length > 0 && SEG.includes("A-Za-z"),
+  `got: ${JSON.stringify(SEG)}`,
+);
+check(
+  "bridge POSIX_PATH_LOOKBEHIND contains `.` exclusion (Welle 6 contract)",
+  typeof POSIX_LB === "string" && POSIX_LB.startsWith("(?<!") && POSIX_LB.includes("."),
+  `got: ${JSON.stringify(POSIX_LB)}`,
+);
+// Welle 7 security-review M-2: exact-equality "golden" pins that turn
+// any future change to either constant into an intentional test
+// update. The structural checks above catch coarse renames; these
+// catch silent char-class widening (e.g. inserting `\s` into SEG)
+// that the structural smoke tests would miss.
+expectEqual(
+  "bridge SEG constant exact-equality golden pin",
+  SEG,
+  "[A-Za-z0-9._\\-+@~=,%]+",
+);
+expectEqual(
+  "bridge POSIX_PATH_LOOKBEHIND exact-equality golden pin",
+  POSIX_LB,
+  "(?<![.:\\w/])",
+);
+// L-1 follow-through: pin that the export object is frozen so a
+// future contributor cannot accidentally remove `Object.freeze` and
+// re-introduce the mutability hazard documented in security review.
+check(
+  "bridge __redactPathConstantsForTest is Object.frozen (Welle 7 L-1 contract)",
+  Object.isFrozen(__redactPathConstantsForTest),
+  `got: isFrozen=${Object.isFrozen(__redactPathConstantsForTest)}`,
+);
 
 // ─── Positive: realistic fs / signer error shapes MUST redact ──────────
 

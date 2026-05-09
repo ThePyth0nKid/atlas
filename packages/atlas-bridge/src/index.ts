@@ -93,6 +93,7 @@ export {
   derivePubkeyViaSigner,
   chainExportViaSigner,
   __signerLimitsForTest,
+  __redactPathConstantsForTest,
 } from "./signer.js";
 
 // ---------- JSONL storage ----------
