@@ -126,6 +126,17 @@ pub enum TrustError {
         alg: String,
     },
 
+    /// V1.19 Welle 9: trace events failed the strict-linear-chain shape
+    /// check under `--require-strict-chain`. `msg` names which property
+    /// failed (zero/multiple genesis, multi-parent event, sibling-fork,
+    /// self-reference). Distinct variant — auditor tooling can switch on
+    /// `StrictChainViolation` rather than parse the human-readable text.
+    #[error("strict-chain violation: {msg}")]
+    StrictChainViolation {
+        /// human-readable description of which strict-chain property failed
+        msg: String,
+    },
+
     /// Generic deserialization error.
     #[error("deserialization error: {0}")]
     Deserialize(String),

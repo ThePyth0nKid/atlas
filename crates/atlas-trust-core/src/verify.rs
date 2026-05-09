@@ -13,7 +13,7 @@ use crate::anchor::{
 use crate::cose::build_signing_input;
 use crate::ed25519::verify_signature;
 use crate::error::TrustResult;
-use crate::hashchain::{check_event_hashes, check_parent_links, compute_tips};
+use crate::hashchain::{check_event_hashes, check_parent_links, check_strict_chain, compute_tips};
 use crate::per_tenant::per_tenant_kid_for;
 use crate::pubkey_bundle::PubkeyBundle;
 use crate::trace_format::{AnchorChain, AnchorEntry, AnchorKind, AtlasTrace};
@@ -33,7 +33,10 @@ use crate::witness::{
 /// `anchor_chain` continue to verify), strict mode requires the chain.
 /// V1.9 adds per-tenant-keys strictness: legacy SPIFFE kids pass lenient,
 /// strict mode requires every event to be signed by a workspace-derived
-/// kid of shape `atlas-anchor:{workspace_id}`.
+/// kid of shape `atlas-anchor:{workspace_id}`. V1.13 wave C-2 adds witness-
+/// threshold strictness. V1.19 Welle 9 adds strict-linear-chain: lenient
+/// accepts forked DAGs; strict requires single-genesis, single-parent,
+/// no-fork shape (the operator-facing single-writer-invariant boundary).
 #[derive(Debug, Clone, Default)]
 pub struct VerifyOptions {
     /// If true, every `trace.dag_tips` entry must have a matching
@@ -92,6 +95,34 @@ pub struct VerifyOptions {
     /// repeating one valid signature N times under a single
     /// commissioned key cannot satisfy a threshold of N.
     pub require_witness_threshold: usize,
+
+    /// V1.19 Welle 9: if true, the trace's events MUST form a strict
+    /// linear chain: exactly one genesis event, every non-genesis
+    /// event has exactly one parent, and no event is referenced as a
+    /// parent by more than one other event (no sibling-fork DAG, no
+    /// DAG-merge).
+    ///
+    /// Default false — Atlas is fundamentally a DAG and forks are
+    /// valid wire shape (the canonical example: a single workspace
+    /// served by both `atlas-web` and `atlas-mcp-server`, where the
+    /// per-workspace mutex in `@atlas/bridge` only serialises within
+    /// one Node process — multi-process writers can fork the DAG
+    /// while still producing a structurally valid trace). Strict mode
+    /// is for operators who deploy exactly one writer per workspace
+    /// and want to detect operational misconfiguration where a second
+    /// writer accidentally appears.
+    ///
+    /// Trust-trade-off note: same lenient/strict shape as
+    /// `require_per_tenant_keys`, `require_anchors`,
+    /// `require_anchor_chain`, and `require_witness_threshold`.
+    /// Lenient mode accepts forked DAGs as honest concurrent-writer
+    /// state; strict mode is the real boundary for the
+    /// "single-writer invariant". Auditors who need that property
+    /// must opt in via `--require-strict-chain` on the verifier CLI.
+    /// Mirrors the `parents[0] === stored[i-1].event_hash` oracle in
+    /// V1.19 Welle 8 [C.6] but at the verifier surface instead of
+    /// the write site.
+    pub require_strict_chain: bool,
 }
 
 /// Full verification result, suitable for showing in a UI / CLI.
@@ -234,12 +265,20 @@ pub fn verify_trace_with(
 
     // 3. Recompute event hashes (workspace_id is bound into the signing-input
     //    so cross-workspace replay produces a hash mismatch here).
-    match check_event_hashes(&trace.workspace_id, &trace.events) {
-        Ok(()) => evidence.push(VerifyEvidence {
-            check: "event-hashes".to_string(),
-            ok: true,
-            detail: format!("{} events, all hashes recomputed-match", trace.events.len()),
-        }),
+    //
+    // Welle 9 review-fix (CR-HIGH-1 / SR-M-3): track success in a bool
+    // so the optional strict-chain check at section 5a can refuse to
+    // produce a misleading `ok: true` evidence row over events whose
+    // hashes are tampered or duplicated.
+    let event_hashes_ok = match check_event_hashes(&trace.workspace_id, &trace.events) {
+        Ok(()) => {
+            evidence.push(VerifyEvidence {
+                check: "event-hashes".to_string(),
+                ok: true,
+                detail: format!("{} events, all hashes recomputed-match", trace.events.len()),
+            });
+            true
+        }
         Err(e) => {
             let msg = format!("hash mismatch: {e}");
             errors.push(msg.clone());
@@ -248,8 +287,9 @@ pub fn verify_trace_with(
                 ok: false,
                 detail: msg,
             });
+            false
         }
-    }
+    };
 
     // 4. Verify each event's Ed25519 signature.
     //    Pre-flight checks: alg field MUST be EdDSA, ts MUST be RFC 3339.
@@ -335,12 +375,22 @@ pub fn verify_trace_with(
     }
 
     // 5. Parent-link integrity
-    match check_parent_links(&trace.events) {
-        Ok(()) => evidence.push(VerifyEvidence {
-            check: "parent-links".to_string(),
-            ok: true,
-            detail: "all parent_hashes resolved within trace".to_string(),
-        }),
+    //
+    // Welle 9 review-fix (CR-HIGH-1 / SR-M-3): track success in a bool
+    // so the optional strict-chain check at section 5a can gate on it.
+    // `check_strict_chain`'s formal proof of "linear chain" depends on
+    // every parent reference resolving — if parent-links failed, the
+    // strict-chain check would be evaluating chain-shape over a graph
+    // with dangling nodes and could produce a misleading `ok: true`.
+    let parent_links_ok = match check_parent_links(&trace.events) {
+        Ok(()) => {
+            evidence.push(VerifyEvidence {
+                check: "parent-links".to_string(),
+                ok: true,
+                detail: "all parent_hashes resolved within trace".to_string(),
+            });
+            true
+        }
         Err(e) => {
             let msg = format!("dangling parent: {e}");
             errors.push(msg.clone());
@@ -349,6 +399,74 @@ pub fn verify_trace_with(
                 ok: false,
                 detail: msg,
             });
+            false
+        }
+    };
+
+    // 5a. Strict-chain shape (V1.19 Welle 9, strict-mode only).
+    //
+    // Lenient mode (default): forks, DAG-merges, multiple genesis
+    // events, and multiple tips are all accepted. This is the right
+    // default — Atlas is a DAG, and the route.rs threat model
+    // explicitly permits multi-process writers (which fork the DAG)
+    // until V2 ships an external lock.
+    //
+    // Strict mode (`opts.require_strict_chain = true`): the events
+    // MUST form a strict linear chain. Exactly one genesis, every
+    // non-genesis event has exactly one parent, no event referenced
+    // as a parent by more than one other event. This is the operator-
+    // facing security boundary for the single-writer invariant: any
+    // deployment where a second writer accidentally appears (e.g.
+    // `atlas-web` AND `atlas-mcp-server` against the same workspace
+    // simultaneously) produces a sibling-fork DAG that lenient mode
+    // accepts but strict mode rejects with a structured error.
+    //
+    // Welle 9 review-fix (CR-HIGH-1 / SR-M-3): gate on the upstream
+    // event-hashes AND parent-links checks both passing. Without that
+    // gate, a tampered or dangling-parent trace could fail those
+    // checks (correctly setting `valid=false`) while ALSO producing a
+    // green `strict-chain: ok` evidence row over the structurally
+    // broken graph — a misleading audit trail. When preflight failed,
+    // emit an explicit "skipped" evidence row so an auditor reading
+    // the JSON sees the gap rather than absence.
+    //
+    // Mirrors the `parents[0] === stored[i-1].event_hash` oracle in
+    // V1.19 Welle 8 [C.6] (`apps/atlas-web/scripts/e2e-write-edge-cases.ts`)
+    // but lifts the property into the trust pipeline so auditors can
+    // enforce it across the full verification surface, not just at
+    // the write site. Positioned at 5a (immediately after parent-links)
+    // because both checks are structural shape properties of the event
+    // graph; adjacency in the evidence list reflects logical adjacency.
+    if opts.require_strict_chain {
+        if !event_hashes_ok || !parent_links_ok {
+            evidence.push(VerifyEvidence {
+                check: "strict-chain".to_string(),
+                ok: false,
+                detail: "skipped: preflight (event-hashes / parent-links) failed; \
+                    strict-chain shape cannot be soundly evaluated over a structurally \
+                    broken graph"
+                    .to_string(),
+            });
+        } else {
+            match check_strict_chain(&trace.events) {
+                Ok(()) => evidence.push(VerifyEvidence {
+                    check: "strict-chain".to_string(),
+                    ok: true,
+                    detail: format!(
+                        "{} event(s) form a strict linear chain (1 genesis, 1 parent per non-genesis event, no sibling-fork, no self-reference)",
+                        trace.events.len(),
+                    ),
+                }),
+                Err(e) => {
+                    let msg = e.to_string();
+                    errors.push(msg.clone());
+                    evidence.push(VerifyEvidence {
+                        check: "strict-chain".to_string(),
+                        ok: false,
+                        detail: msg,
+                    });
+                }
+            }
         }
     }
 
