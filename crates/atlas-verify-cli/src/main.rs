@@ -80,6 +80,24 @@ enum Command {
         /// `--require-per-tenant-keys`.
         #[arg(long, default_value_t = 0)]
         require_witness: usize,
+
+        /// V1.19 Welle 9 strict mode: the trace's events must form a
+        /// strict linear chain — exactly one genesis, every non-
+        /// genesis event has exactly one parent, no event referenced
+        /// as a parent by more than one other event (no sibling-fork
+        /// DAG, no DAG-merge). Defaults to false because Atlas is
+        /// fundamentally a DAG and forks are valid wire shape under
+        /// multi-process-writer deployments.
+        ///
+        /// Trust note: this is the operator-facing security boundary
+        /// for the single-writer invariant. Enable it on traces from
+        /// deployments where you expect exactly one writer per
+        /// workspace; a sibling-fork DAG then surfaces as a structured
+        /// failure rather than silently passing as "valid DAG". Mirrors
+        /// the `parents[0] === stored[i-1].event_hash` oracle in V1.19
+        /// Welle 8 [C.6] but at the verifier surface.
+        #[arg(long)]
+        require_strict_chain: bool,
     },
 }
 
@@ -95,12 +113,14 @@ fn main() -> ExitCode {
             require_anchors,
             require_anchor_chain,
             require_witness,
+            require_strict_chain,
         } => {
             let opts = VerifyOptions {
                 require_per_tenant_keys,
                 require_anchors,
                 require_anchor_chain,
                 require_witness_threshold: require_witness,
+                require_strict_chain,
             };
             match run_verify_trace(&trace, &pubkey_bundle, &output, &opts) {
                 Ok(true) => ExitCode::from(0),
@@ -142,7 +162,8 @@ fn print_human(outcome: &atlas_trust_core::verify::VerifyOutcome, opts: &VerifyO
     let any_strict = opts.require_per_tenant_keys
         || opts.require_anchors
         || opts.require_anchor_chain
-        || opts.require_witness_threshold > 0;
+        || opts.require_witness_threshold > 0
+        || opts.require_strict_chain;
     let strict_tag = if any_strict { " (strict mode)" } else { "" };
     if outcome.valid {
         println!("  \u{2713} VALID — all checks passed{strict_tag}");
@@ -169,6 +190,9 @@ fn print_human(outcome: &atlas_trust_core::verify::VerifyOutcome, opts: &VerifyO
                 "require_witness={}",
                 opts.require_witness_threshold,
             ));
+        }
+        if opts.require_strict_chain {
+            flags.push("require_strict_chain".to_string());
         }
         println!("  Strict flags: {}", flags.join(", "));
     }
