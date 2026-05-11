@@ -9,14 +9,17 @@
 #
 # Trigger surface — explicit + auditable:
 #
-#   * `workflow_dispatch` — manual run for build-pipeline dry-run
-#     verification (e.g. confirming the build pipeline works on a
-#     branch before tagging). V1.17 Welle B made dispatch
-#     publish-incapable: the publish step's `if:` only matches
-#     tag-push, so dispatch always behaves as a dry-run regardless
-#     of the `dry_run` input. The input is preserved for
-#     backwards-compat with prior tooling but no longer changes
-#     publish behaviour.
+#   * `workflow_dispatch` — manual run for either (a) build-pipeline
+#     dry-run verification on a branch before tagging (default
+#     `dry_run: true`), or (b) operator-explicit re-fire on an
+#     already-signed tag if the original tag-push publish was skipped
+#     (V1.19 Welle 14a — fired with `--ref vX.Y.Z -f dry_run=false`).
+#     V1.17 Welle B made dispatch publish-incapable for the branch
+#     case; V1.19 Welle 14a re-enables it strictly for the
+#     dispatch-from-tag case — the signed-tag check (first step) and
+#     the publish gate (further down) both require a tag ref, so
+#     dispatch from a branch still cannot publish. See those steps'
+#     `if:` clauses for the precise conditions.
 #   * `push: tags: ['v*']` — automated publish on signed-tag push.
 #     The tag name MUST match a release tag (`v1.14.0`, `v1.14.1`, …)
 #     AND the tag MUST be cryptographically signed by an SSH key in
@@ -83,6 +86,18 @@ permissions:
   # both gated by branch / tag protection rules in repo settings.
   contents: write
   id-token: write
+
+# V1.19 Welle 14a: serialize runs against the same ref so a second
+# workflow_dispatch fire (e.g. operator clicks "Run workflow" twice
+# quickly) can't race the first into a confusing npm 409. Two
+# simultaneous publishes for the same version are npm-side blocked
+# anyway, but the queue surfaces a clean "queued" status instead of
+# a red second run. cancel-in-progress: false because cancelling mid-
+# publish would leave the package in an unknown state (e.g. pkg-web
+# published but pkg-node not, or post-publish verification missed).
+concurrency:
+  group: wasm-publish-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build-and-publish:
@@ -158,7 +173,16 @@ jobs:
       # the threat model.
       - name: Verify tag signature (V1.17 Welle B)
         id: verify-tag
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        # V1.19 Welle 14a: also run on workflow_dispatch when the dispatched
+        # ref is a tag (e.g. `gh workflow run wasm-publish.yml --ref v1.0.0
+        # -f dry_run=false`). This keeps the V1.17 Welle B trust posture
+        # intact — the signed-tag check still gates the publish — while
+        # allowing operator-explicit re-fire on an already-signed tag if
+        # the original tag-push publish was skipped (e.g. NPM_TOKEN not yet
+        # configured at first push). Dispatch on a branch ref (no tag)
+        # still skips this step and falls into the dry-run / no-publish
+        # path because the publish-gate further down requires a tag ref.
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v'))
         # `unset ATLAS_ALLOWED_SIGNERS` is belt-and-suspenders against
         # a future workflow edit (or a compromised dependency action)
         # that writes to $GITHUB_ENV to redirect the trust root. The
@@ -373,25 +397,40 @@ jobs:
             crates/atlas-verify-wasm/pkg-node/*.tgz
           retention-days: 14
 
-      # Publish gate — defence-in-depth across three independent
+      # Publish gate — defence-in-depth across four independent
       # checks, all of which must pass for an `npm publish` to fire:
       #
-      #   1. The trigger is a `push` from a `refs/tags/v*` tag —
-      #      release publishes ONLY happen via signed-tag push. Earlier
-      #      versions also accepted `workflow_dispatch` with
-      #      `dry_run=false` from master; V1.17 Welle B removed that
-      #      path because it bypassed the new tag-signature gate
-      #      entirely (a maintainer / compromised PAT with `actions:
-      #      write` could trigger dispatch on any master commit and
-      #      ship without ever creating a signed tag). Dispatch is
-      #      still useful for build-pipeline dry-runs (default
-      #      `dry_run: true`); it just no longer fires the publish.
+      #   1. The trigger is EITHER:
+      #      (a) a `push` from a `refs/tags/v*` tag — the canonical
+      #          release publish path; or
+      #      (b) a `workflow_dispatch` with `dry_run=false` AND the
+      #          dispatched ref is a `refs/tags/v*` tag (V1.19 Welle 14a).
+      #          This is the operator-explicit re-fire path for cases
+      #          where the original tag-push publish was skipped (e.g.
+      #          NPM_TOKEN not configured at first push, transient npm
+      #          registry error). Dispatch on a branch ref (no tag) is
+      #          NOT a publish path — the publish step's `if:` requires
+      #          a tag ref. This preserves V1.17 Welle B's trust posture:
+      #          a maintainer / compromised PAT with `actions: write`
+      #          still cannot publish from master, only from a signed
+      #          tag — and the first-step `Verify tag signature` gate
+      #          (now also running on dispatch-from-tag) authenticates
+      #          the tag BEFORE this publish step runs.
       #   2. `NPM_TOKEN` is present (fork PRs and unauthorised manual
       #      runs have no token and skip cleanly with exit 0).
       #   3. The job-level `id-token: write` permission is granted
       #      (defaults to off via the workflow-level
       #      `permissions: contents: read`), enabling OIDC-signed
       #      provenance via `npm publish --provenance`.
+      #   4. On the dispatch path only: `!inputs.dry_run` must be true
+      #      (i.e. operator explicitly set `dry_run: false` in the
+      #      workflow_dispatch form). Tag-push doesn't populate
+      #      `inputs.*` at all, but the `||` structure means the
+      #      `!inputs.dry_run` sub-expression is only evaluated on the
+      #      dispatch arm — short-circuit on the push arm bypasses it
+      #      entirely. So the gate admits both (push,tag) AND
+      #      (dispatch,tag,!dry_run) without `inputs.*` ever being read
+      #      on the push path.
       #
       # On the `push` path, the `on:` trigger already restricts to
       # `tags: ['v*']`, so `github.ref` is guaranteed to start with
@@ -399,7 +438,9 @@ jobs:
       # check that still fires correctly if someone later relaxes the
       # `on:` filter. The first-step `tools/verify-tag-signatures.sh`
       # (V1.17 Welle B) gate guarantees the tag is signed by an
-      # `.github/allowed_signers` key BEFORE this publish step runs.
+      # `.github/allowed_signers` key BEFORE this publish step runs —
+      # this holds for both tag-push and dispatch-from-tag paths
+      # (V1.19 Welle 14a extended the verify-tag step's `if:`).
       #
       # The publish targets BOTH the web and node builds under the
       # same package name. The web build is the canonical default
@@ -410,13 +451,15 @@ jobs:
       # iteration may merge both into a single package with
       # conditional exports — out of scope for V1.14.
       - name: Publish to npm
-        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        id: publish
+        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          set -eu
+          set -euo pipefail
           if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
             echo "NPM_TOKEN secret not set — skipping publish."
+            echo "did_publish=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
           # `--provenance` (npm >=9.5) attaches an OIDC-signed
@@ -433,6 +476,81 @@ jobs:
           cd "${GITHUB_WORKSPACE}"
           cd crates/atlas-verify-wasm/pkg-node
           npm publish --access public --provenance --tag node
+          echo "did_publish=true" >> "${GITHUB_OUTPUT}"
+
+      # V1.19 Welle 14a — post-publish assertion (security-reviewer F-4 closing).
+      #
+      # The publish step exits 0 on missing NPM_TOKEN (silent skip — the
+      # V1.17 Welle B defence-in-depth design). Without this assertion,
+      # a release could be marked "shipped" while the npm package is
+      # absent. This step verifies the published version actually
+      # propagated to the npm registry. Skips if the publish step
+      # itself skipped (NPM_TOKEN missing).
+      #
+      # `npm view` queries the registry directly (not the local cache);
+      # a brief sleep absorbs registry replication latency. If the
+      # version doesn't match what we just published, the workflow
+      # fails red and the release-shipped signal is correctly negative.
+      - name: Verify npm publish landed (V1.19 Welle 14a)
+        if: steps.publish.outputs.did_publish == 'true'
+        run: |
+          set -euo pipefail
+          # Derive expected version from the BUILT artifact, not from
+          # the monorepo root package.json. `wasm-pack build` writes
+          # `pkg-{web,node}/package.json` with the version derived from
+          # the Cargo manifest — that IS the version that was published.
+          # Reading it from the artifact eliminates any drift between
+          # workspace-root package.json (npm tooling manifest, private,
+          # never published) and the Cargo workspace version (the
+          # canonical source of the published version). Per Welle 14a
+          # review HIGH-1 / Q5b.
+          EXPECTED_VERSION="$(node -p "require('./crates/atlas-verify-wasm/pkg-node/package.json').version")"
+          PACKAGE_NAME="${NPM_PACKAGE_SCOPE}/${NPM_PACKAGE_NAME}"
+          echo "Verifying ${PACKAGE_NAME}@${EXPECTED_VERSION} on npm registry..."
+          # Allow up to ~60s for npm registry replication. Most publishes
+          # propagate within 5-10s; allow margin for edge cases.
+          # Loop structure: break on success, fall through to post-loop
+          # check on exhaustion. Avoids brittle sentinel-equality check
+          # that would silently disappear if MAX_ATTEMPTS were edited
+          # without updating the sentinel. Per Welle 14a review HIGH-2.
+          MAX_ATTEMPTS=6
+          ATTEMPT_DELAY=10
+          ACTUAL_VERSION=""
+          for i in $(seq 1 "${MAX_ATTEMPTS}"); do
+            sleep "${ATTEMPT_DELAY}"
+            ACTUAL_VERSION="$(npm view "${PACKAGE_NAME}" version --silent 2>/dev/null || echo "")"
+            if [ "${ACTUAL_VERSION}" = "${EXPECTED_VERSION}" ]; then
+              echo "✓ ${PACKAGE_NAME}@${EXPECTED_VERSION} visible on registry (attempt ${i}/${MAX_ATTEMPTS})"
+              break
+            fi
+            echo "Attempt ${i}/${MAX_ATTEMPTS}: registry returned '${ACTUAL_VERSION}', expected '${EXPECTED_VERSION}' — waiting ${ATTEMPT_DELAY}s..."
+          done
+          if [ "${ACTUAL_VERSION}" != "${EXPECTED_VERSION}" ]; then
+            echo "::error::npm publish (latest dist-tag) did not propagate within $((MAX_ATTEMPTS * ATTEMPT_DELAY))s. Expected '${EXPECTED_VERSION}', got '${ACTUAL_VERSION}'"
+            exit 1
+          fi
+          # Also assert package metadata is well-formed. `npm view`
+          # surfaces `dist.signatures` (npm's automation-token signing) but
+          # SLSA provenance is in `_attestations` on the registry side —
+          # accessible via the audit signatures endpoint. We don't fail
+          # closed on provenance-missing here because the SLSA L3 signal
+          # is verified by downstream consumers via `npm audit signatures`,
+          # not produced by us. `dist.tarball` existence is the sanity
+          # check that the package metadata landed correctly.
+          npm view "${PACKAGE_NAME}@${EXPECTED_VERSION}" dist.tarball --silent
+          # The publish step publishes TWO packages: pkg-web at the
+          # default `latest` dist-tag and pkg-node at the `node` dist-tag.
+          # The version-loop above only checks `latest`. Verify the
+          # `node` dist-tag also resolves to the same version (post-
+          # publish-step partial-success guard). Per Welle 14a review
+          # MEDIUM (CR #6).
+          NODE_TAG_VERSION="$(npm view "${PACKAGE_NAME}@node" version --silent 2>/dev/null || echo "")"
+          if [ "${NODE_TAG_VERSION}" != "${EXPECTED_VERSION}" ]; then
+            echo "::error::npm 'node' dist-tag mismatch. Expected '${EXPECTED_VERSION}', got '${NODE_TAG_VERSION}'"
+            exit 1
+          fi
+          echo "✓ ${PACKAGE_NAME}@node dist-tag → ${NODE_TAG_VERSION}"
+          echo "✓ npm publish verification complete (latest + node dist-tags)"
 
       # V1.15 Welle B — Backup distribution channel via GitHub Releases.
       #
