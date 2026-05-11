@@ -64,7 +64,16 @@ permissions:
   contents: read
 
 jobs:
-  playwright:
+  # Job ID is `atlas-web-playwright` (not `playwright`) so the
+  # check-run name surfaces as `atlas-web-playwright` — matching the
+  # master ruleset's required_status_checks context. V1.19 Welle 12
+  # fixup of a Welle 11 misalignment: the workflow `name` field is
+  # `atlas-web-playwright` but the original job ID was `playwright`,
+  # and GitHub's check-run name comes from the job ID (workflow name
+  # is only used in display contexts). The ruleset patch in Welle 11
+  # required `atlas-web-playwright` as the context, which would have
+  # been unreachable forever without this rename.
+  atlas-web-playwright:
     runs-on: ubuntu-latest
     # Single concurrency group per ref so a force-push or rebase
     # cancels the in-flight run rather than racing two test workers
