@@ -206,9 +206,25 @@ async function main(): Promise<void> {
     );
   }
   log("verify", verifierBin);
-  const r = spawnSync(verifierBin, ["verify-trace", tracePath, "-k", bundlePath], {
-    encoding: "utf8",
-  });
+  // V1.19 Welle 10: `--require-strict-chain` is the verifier-side gate for
+  // the single-writer-per-workspace invariant shipped in V1.19 Welle 9
+  // (atlas-trust-core::hashchain::check_strict_chain). The atlas-mcp-server
+  // smoke writes events sequentially via `writeSignedEvent` against a single
+  // workspace, which structurally produces a strict linear chain
+  // (1 genesis + N-1 single-parent events, no sibling-fork, no self-reference).
+  // Flipping this on here turns the property into a CI gate across three
+  // lanes: `hsm-wave3-smoke` (PR-trigger on signer/verifier/MCP changes),
+  // `sigstore-rekor-nightly` (daily live-Sigstore lane), and local
+  // `pnpm smoke`. If a future refactor accidentally introduces a fork-DAG
+  // shape — e.g. parallel writes that lose mutex serialisation, a parent-
+  // pointer regression in writeSignedEvent — the smoke goes red with a
+  // structured `TrustError::StrictChainViolation` diagnostic naming the
+  // failing property + offending event_id.
+  const r = spawnSync(
+    verifierBin,
+    ["verify-trace", tracePath, "-k", bundlePath, "--require-strict-chain"],
+    { encoding: "utf8" },
+  );
   if (r.error) fail(`verifier spawn failed: ${r.error.message}`);
   process.stdout.write(r.stdout);
   if (r.stderr) process.stderr.write(r.stderr);
@@ -223,6 +239,35 @@ async function main(): Promise<void> {
   // exercising the anchor path.
   if (!/anchor\(s\) verified against pinned log keys/.test(r.stdout)) {
     fail(`verifier did not report anchor evidence. stdout above.`);
+  }
+  // V1.19 Welle 10: strict-chain evidence row must be present AND
+  // marked ok (✓). Guards against two regression classes:
+  //   (a) `--require-strict-chain` silently dropped (e.g. flag renamed
+  //       in a future SemVer-major bump without updating this call
+  //       site) — verifier would pass on the lenient default and the
+  //       CI gate would be cosmetic.
+  //   (b) strict-chain check fired but returned error while overall
+  //       outcome stayed valid: true (impossible under current verify.rs
+  //       gating but a future refactor could introduce that asymmetry).
+  // The regex pins both the evidence-row check label (`strict-chain`)
+  // and the happy-path detail prose ("strict linear chain"). The leading
+  // `✓` is the explicit ok=true marker emitted by print_human; without
+  // it the regex would match a ✗ failure row whose detail happened to
+  // echo back the prose. The Strict flags line pin below provides the
+  // companion structured anchor (snake-case flag identifier from the
+  // CLI's flags vec, not narrative prose).
+  if (!/✓ strict-chain — \d+ event\(s\) form a strict linear chain/.test(r.stdout)) {
+    fail(
+      `V1.19 Welle 10: verifier did not report strict-chain evidence — ` +
+        `--require-strict-chain may have been silently dropped or returned ` +
+        `non-ok. stdout above.`,
+    );
+  }
+  if (!/Strict flags:[^\n]*require_strict_chain/.test(r.stdout)) {
+    fail(
+      `V1.19 Welle 10: require_strict_chain missing from Strict flags line — ` +
+        `--require-strict-chain may have been silently dropped`,
+    );
   }
 
   // 7. V1.9 per-tenant smoke. Same shape as steps 2–6 but driven by a
@@ -286,9 +331,30 @@ async function main(): Promise<void> {
   // has — running this leg in lenient mode would silently accept a
   // future regression that emitted a legacy SPIFFE kid for a workspace
   // that should have been per-tenant. Strict mode rejects that, here.
+  //
+  // V1.19 Welle 10: `--require-strict-chain` added alongside V1.9
+  // `--require-per-tenant-keys` so both auditor-facing strict gates are
+  // exercised in this leg. The per-tenant smoke writes exactly one event
+  // (genesis-only); strict-chain on a 1-event trace pins property (2) of
+  // V1.19 Welle 9 (per `crates/atlas-trust-core/src/hashchain.rs::check_strict_chain`
+  // doc-comment) — exactly one genesis — and property (1) (non-empty).
+  // Properties (3) single-parent, (4) sibling-fork, and (5) self-reference
+  // degenerate trivially for a 1-event genesis (the per-event loops never
+  // execute over an empty `parent_hashes`). The per-event property (5)
+  // self-reference case is exercised at the lib level by
+  // `hashchain::strict_chain_self_reference_fails` rather than at the
+  // smoke surface — adding a self-referential fixture here would require
+  // forging an event_hash, which is cryptographically infeasible.
   const ptVerify = spawnSync(
     verifierBin,
-    ["verify-trace", ptTracePath, "-k", ptBundlePath, "--require-per-tenant-keys"],
+    [
+      "verify-trace",
+      ptTracePath,
+      "-k",
+      ptBundlePath,
+      "--require-per-tenant-keys",
+      "--require-strict-chain",
+    ],
     { encoding: "utf8" },
   );
   if (ptVerify.error) fail(`v1.9 verifier spawn failed: ${ptVerify.error.message}`);
@@ -300,6 +366,37 @@ async function main(): Promise<void> {
   }
   if (!/strict mode/.test(ptVerify.stdout)) {
     fail("v1.9 strict-mode advertisement missing — verifier may be running in lenient mode");
+  }
+  // V1.19 Welle 10: both strict flags must be surfaced in the `Strict
+  // flags:` line. Anti-drift: if a future SemVer-major renames a flag,
+  // the dropped flag goes undetected by `/strict mode/` (which matches
+  // the header banner, not the specific flag set). The two pins below
+  // are anchored to the `Strict flags:` prefix to avoid vacuous passes
+  // where the bare flag name happens to appear elsewhere in stdout
+  // (e.g. echoed in a clap error or a future error-diagnostic body).
+  // The `[^\n]*` between prefix and identifier is order-tolerant —
+  // either flag may appear first in the join.
+  if (!/Strict flags:[^\n]*require_per_tenant_keys/.test(ptVerify.stdout)) {
+    fail(
+      "V1.9 require_per_tenant_keys missing from Strict flags line — flag may have been renamed",
+    );
+  }
+  if (!/Strict flags:[^\n]*require_strict_chain/.test(ptVerify.stdout)) {
+    fail(
+      "V1.19 Welle 10: require_strict_chain missing from Strict flags line — " +
+        "--require-strict-chain may have been silently dropped",
+    );
+  }
+  // V1.19 Welle 10: strict-chain evidence row must be present and ok
+  // for the per-tenant leg too (symmetry with step 6). 1-event genesis
+  // → "1 event(s) form a strict linear chain (...)". Defence-in-depth
+  // against the (currently-impossible) refactor where check_strict_chain
+  // returns error but overall outcome.valid stays true.
+  if (!/✓ strict-chain — \d+ event\(s\) form a strict linear chain/.test(ptVerify.stdout)) {
+    fail(
+      `V1.19 Welle 10: per-tenant leg did not report strict-chain ok=true evidence — ` +
+        `check_strict_chain may have errored while outcome.valid stayed true. stdout above.`,
+    );
   }
   log("v1.9-done", `✓ per-tenant trace verifies for ${WORKSPACE_PT} (strict mode)`);
 
