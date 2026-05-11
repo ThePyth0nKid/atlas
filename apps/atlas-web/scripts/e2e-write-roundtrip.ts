@@ -202,12 +202,53 @@ async function main(): Promise<void> {
   await fs.writeFile(bundlePath, JSON.stringify(bundle, null, 2), "utf8");
   log("export", `${tracePath}`);
 
-  // 6. Verifier — strict mode (--require-per-tenant-keys) so the
-  //    smoke fails closed if a future regression silently emitted a
-  //    legacy SPIFFE kid for the workspace.
+  // 6. Verifier — strict mode (--require-per-tenant-keys +
+  //    --require-strict-chain) so the smoke fails closed if a future
+  //    regression either silently emitted a legacy SPIFFE kid for the
+  //    workspace OR produced a sibling-fork DAG instead of the single-
+  //    writer linear chain.
+  //
+  // V1.19 Welle 12 carry-forward (Welle 10 contract symmetry): the
+  // atlas-mcp-server smoke turned `--require-strict-chain` on across
+  // its three lanes in Welle 10. This e2e is the atlas-web symmetric
+  // pair — same gate, same anti-drift assertions, same prose anchor.
+  // The 2-event WORKSPACE leg is structurally guaranteed linear by the
+  // per-workspace mutex in `writeSignedEvent` (route.ts § "Mutex"); any
+  // future regression breaking that serialisation (multi-process
+  // writer, broken mutex, race in tip computation) would surface a
+  // sibling-fork DAG that the verifier now catches as a structured
+  // `TrustError::StrictChainViolation` instead of silently passing as
+  // "valid DAG".
+  //
+  // Anti-drift assertions mirror smoke.ts (apps/atlas-mcp-server):
+  //   - evidence-row pin: leading "✓" distinguishes happy-path from
+  //     "✗ strict-chain — strict chain violation: ..."; count + prose
+  //     pin the print_human evidence rendering.
+  //   - flag-name pin: anchored to "Strict flags:" prefix to prevent
+  //     vacuous pass if the bare identifier "require_strict_chain"
+  //     appears elsewhere in stdout (e.g. echoed in a future clap
+  //     error body). Order-tolerant `[^\n]*` between prefix and
+  //     identifier reflects that `flags.join(", ")` ordering is not
+  //     stable across re-orderings of the flags vec in print_human.
+  //
+  // Structural note: smoke.ts step-6 runs ONLY `--require-strict-chain`
+  // (one flag, one identifier pin). This e2e is the step-7 analogue:
+  // both `--require-per-tenant-keys` (Welle 1) and `--require-strict-
+  // chain` (Welle 12) are active, so the `Strict flags:` line carries
+  // both identifiers in either order. The two flag-name pins below
+  // mirror smoke.ts step-7's two-flag block exactly; the apparent
+  // asymmetry with step-6 is intentional — different lanes test
+  // different combined-flag surfaces.
   const r = spawnSync(
     verifier,
-    ["verify-trace", tracePath, "-k", bundlePath, "--require-per-tenant-keys"],
+    [
+      "verify-trace",
+      tracePath,
+      "-k",
+      bundlePath,
+      "--require-per-tenant-keys",
+      "--require-strict-chain",
+    ],
     { encoding: "utf8" },
   );
   if (r.error) fail(`verifier spawn failed: ${r.error.message}`);
@@ -220,7 +261,16 @@ async function main(): Promise<void> {
   if (!/strict mode/.test(r.stdout)) {
     fail(`strict-mode advertisement missing — verifier may be running lenient`);
   }
-  log("verify", `✓ VALID (strict per-tenant)`);
+  if (!/✓ strict-chain — \d+ event\(s\) form a strict linear chain/.test(r.stdout)) {
+    fail(`strict-chain evidence row missing — Welle 12 anti-drift assertion`);
+  }
+  if (!/Strict flags:[^\n]*require_strict_chain/.test(r.stdout)) {
+    fail(`Strict flags line missing 'require_strict_chain' — Welle 12 anti-drift assertion`);
+  }
+  if (!/Strict flags:[^\n]*require_per_tenant_keys/.test(r.stdout)) {
+    fail(`Strict flags line missing 'require_per_tenant_keys' — Welle 1 anti-drift assertion`);
+  }
+  log("verify", `✓ VALID (strict per-tenant + strict-chain)`);
 
   cleanup();
   log("done", "✓ atlas-web write-surface round-trip OK");
