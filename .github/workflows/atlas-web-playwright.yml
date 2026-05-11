@@ -52,6 +52,12 @@ on:
       # to satisfy the required check). ~7 min CI per handoff PR is
       # acceptable cost (rare PRs, one per welle).
       - '.handoff/**'
+      # V1.19 Welle 14a workflow-PR fix: same rationale as above for
+      # PRs that only modify .github/workflows/* files. Without this,
+      # the master ruleset's required `atlas-web-playwright` cannot
+      # be satisfied on a workflow-only PR (e.g. wasm-publish.yml
+      # modifications). Rare PRs; ~7 min CI overhead is acceptable.
+      - '.github/workflows/**'
   push:
     branches:
       - master
