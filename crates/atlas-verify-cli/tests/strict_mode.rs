@@ -2,6 +2,19 @@
 //! flags (`--require-per-tenant-keys`, `--require-anchors`,
 //! `--require-anchor-chain`).
 //!
+//! V1.19 Welle 12: extended with `--require-strict-chain` happy-path
+//! coverage at the CLI surface. Negative-path coverage lives at the
+//! library layer (`crates/atlas-trust-core/src/hashchain.rs` — 9
+//! strict-chain unit tests covering empty-trace, two-genesis,
+//! zero-genesis, sibling-fork, DAG-merge, and self-reference); the CLI
+//! integration test pins only the happy path because synthesising a
+//! forked-DAG fixture would require pre-signed `event_hash` values for
+//! marginal additional coverage. The Welle-10 atlas-mcp-server smoke
+//! and the Welle-12 atlas-web `e2e-write-roundtrip.ts` both exercise
+//! the same `--require-strict-chain` codepath end-to-end against
+//! real-signed traces — three lanes plus this CLI test give the gate
+//! defence-in-depth in CI.
+//!
 //! These tests are the contract that the CLI surfaces every documented
 //! V1.9 security boundary so an auditor running the binary can actually
 //! exercise it. Pre-V1.10-warm-up, the CLI hardcoded
@@ -12,7 +25,9 @@
 //! `atlas-signer/examples/seed_bank_demo.rs`. That demo predates V1.9
 //! and signs every event with a legacy SPIFFE kid
 //! (`spiffe://atlas/agent/...`), so it is the canonical "lenient passes,
-//! strict per-tenant rejects" specimen.
+//! strict per-tenant rejects" specimen. The trace is also a 5-event
+//! linear chain (one genesis + four single-parent successors, no forks),
+//! so `--require-strict-chain` accepts it cleanly (V1.19 Welle 12).
 
 use std::process::Command;
 
@@ -164,6 +179,79 @@ fn strict_anchor_chain_rejects_chainless_trace() {
         "strict-chain verify must exit 1 when no anchor_chain present.\nstdout:\n{stdout}",
     );
     assert!(stdout.contains("INVALID"));
+}
+
+#[test]
+fn strict_chain_passes_linear_bank_trace() {
+    // V1.19 Welle 12: `--require-strict-chain` happy-path at the CLI
+    // surface. The bank-demo trace is a 5-event linear chain
+    // (1 genesis + 4 single-parent successors, no sibling-forks, no
+    // multi-genesis, no self-reference, non-empty), so the verifier
+    // accepts it under strict-chain mode and surfaces the new evidence
+    // row + Strict flags line.
+    //
+    // Pins four properties:
+    //
+    //   1. Exit code 0 — strict-chain holds on a linear trace.
+    //   2. "✓ VALID" + "strict mode" header — the run is advertised as
+    //      strict (any_strict in print_human is true).
+    //   3. "require_strict_chain" in `Strict flags:` line — the flag
+    //      is the active strict opt-in.
+    //   4. "strict-chain" evidence row with happy-path prose "form a
+    //      strict linear chain" — the evidence list contains the new
+    //      Welle-9 check line.
+    //
+    // The symmetric negative path (`require_strict_chain = true` on a
+    // sibling-fork trace) is covered exhaustively by 9 hashchain unit
+    // tests in `crates/atlas-trust-core/src/hashchain.rs`. Adding a
+    // forked-DAG CLI fixture would require pre-signed `event_hash`
+    // values whose recomputation passes `check_event_hashes` before
+    // `check_strict_chain` runs (per Welle 9 CR-1 gating). Marginal
+    // additional coverage at the CLI surface for that synthesis cost.
+    let output = Command::new(cli_bin())
+        .args([
+            "verify-trace",
+            bank_trace().to_str().expect("trace path is utf8"),
+            "--pubkey-bundle",
+            bank_bundle().to_str().expect("bundle path is utf8"),
+            "--require-strict-chain",
+        ])
+        .output()
+        .expect("failed to spawn atlas-verify-cli");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "strict-chain verify must exit 0 on linear bank trace.\nstdout:\n{stdout}\nstderr:\n{stderr}",
+    );
+    // Pin "✓ VALID" specifically — the bare substring "VALID" would
+    // also match "INVALID", and a future test-harness log line
+    // containing the word "VALID" elsewhere in stdout could pass a
+    // bare contains("VALID") check vacuously. The ✓ marker is part of
+    // the print_human happy-path contract.
+    assert!(
+        stdout.contains("\u{2713} VALID"),
+        "expected ✓ VALID in stdout; got:\n{stdout}",
+    );
+    assert!(
+        stdout.contains("strict mode"),
+        "strict-chain run must advertise strict mode in the header; got:\n{stdout}",
+    );
+    assert!(
+        stdout.contains("require_strict_chain"),
+        "strict-chain run must list 'require_strict_chain' in 'Strict flags:'; got:\n{stdout}",
+    );
+    // The strict-chain evidence row is pinned by its happy-path prose
+    // "form a strict linear chain" — that string appears ONLY in the
+    // ok-case rendering of `check_strict_chain` (the error path
+    // produces "strict-chain violation: ..." with no occurrence of
+    // "linear chain"). A bare contains("strict-chain") would match an
+    // error row too, so the tighter prose pin is the actual contract.
+    assert!(
+        stdout.contains("form a strict linear chain"),
+        "strict-chain evidence row must contain happy-path prose; got:\n{stdout}",
+    );
 }
 
 #[test]
