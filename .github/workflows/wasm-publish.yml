@@ -148,6 +148,21 @@ jobs:
       # workflow-dispatch run with no tag activity. Benefit: the
       # invariant "verify-tag never runs without its required preamble"
       # holds regardless of future trigger surface evolution.
+      # V1.19 Welle 14a (post-merge fixup): debug-print the GitHub
+      # context values the downstream `if:` expressions evaluate.
+      # Surfaces github.ref, github.ref_name, github.ref_type, and
+      # inputs.dry_run so a later failure (skipped step) can be
+      # traced to the actual context values without adding ad-hoc
+      # debug steps each time. Permanent; runtime cost is negligible.
+      - name: Print ref context (V1.19 Welle 14a diagnostic)
+        run: |
+          echo "github.event_name = ${{ github.event_name }}"
+          echo "github.ref = ${{ github.ref }}"
+          echo "github.ref_name = ${{ github.ref_name }}"
+          echo "github.ref_type = ${{ github.ref_type }}"
+          echo "github.sha = ${{ github.sha }}"
+          echo "inputs.dry_run = ${{ inputs.dry_run }}"
+
       - name: Refetch annotated tag objects
         run: git fetch --tags --force origin
 
@@ -182,7 +197,14 @@ jobs:
         # configured at first push). Dispatch on a branch ref (no tag)
         # still skips this step and falls into the dry-run / no-publish
         # path because the publish-gate further down requires a tag ref.
-        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v'))
+        #
+        # V1.19 Welle 14a post-merge fixup: switched from `startsWith(github.ref,
+        # 'refs/tags/v')` to `github.ref_type == 'tag'`. The former was unreliable
+        # for workflow_dispatch — `github.ref` evaluation on dispatch returned
+        # values that didn't match the prefix even when --ref pointed at a tag,
+        # causing both Verify-tag and Publish-to-npm to skip. `github.ref_type`
+        # is the canonical context field for this discriminator per GA docs.
+        if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag')
         # `unset ATLAS_ALLOWED_SIGNERS` is belt-and-suspenders against
         # a future workflow edit (or a compromised dependency action)
         # that writes to $GITHUB_ENV to redirect the trust root. The
@@ -452,7 +474,10 @@ jobs:
       # conditional exports — out of scope for V1.14.
       - name: Publish to npm
         id: publish
-        if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run)
+        # V1.19 Welle 14a post-merge fixup: switched from `startsWith(github.ref,
+        # 'refs/tags/v')` to `github.ref_type == 'tag'`. See `Verify tag signature`
+        # step comment for the diagnostic background.
+        if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag' && !inputs.dry_run)
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
