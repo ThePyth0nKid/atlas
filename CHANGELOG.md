@@ -17,7 +17,20 @@ The v1.0 public-API surface contract is documented in
 
 ## [Unreleased]
 
-### Added — V1.19 Welle 12 (this entry, finalised at v1.0.0 tag)
+_No unreleased changes. Next release on this line will be v1.1.0 (SemVer-minor) or v1.0.1 (SemVer-patch) depending on scope. Public-API contract per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md)._
+
+## [1.0.0] — 2026-05-11
+
+**v1.0.0 Release Summary** — Atlas's first SemVer-stable public release. The verifier crate (`atlas-trust-core`) is feature-complete across all V1.0–V1.19 trust-property increments: Ed25519 + COSE_Sign1 + deterministic CBOR + 7 base check categories (V1.0), Sigstore Rekor anchoring with pinned log-pubkey (V1.5), anchor-chain linkage (V1.7), HKDF per-tenant key derivation (V1.9), opt-in strict modes for per-tenant keys / anchors / anchor-chain / witness-threshold / strict-chain (V1.10 + V1.13 + V1.19 Welle 9), HSM-optional signing via PKCS#11 (V1.10 wave-2 + V1.12 wave-3), witness cosignature attestation (V1.13), production hosting on Cloudflare Workers (V1.16), SSH-Ed25519 tag-signing + trust-root-mutation defence (V1.17), defence-in-depth + multi-issuer Sigstore tracking (V1.18), browser-rendering UI E2E coverage with WCAG 2.1 AA a11y (V1.19 Welle 11), and the user-facing `POST /api/atlas/write-node` HTTP write surface (V1.19 Welle 1). The `@atlas-trust/verify-wasm` package on npm provides the same trust property in the browser as the native CLI. The v1.0 public-API surface contract is documented in [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md); from this release forward, any breaking change to a `Locked` item triggers a SemVer-major bump.
+
+### Added — V1.19 Welle 13 (this release)
+
+- Cargo workspace version bump 0.1.0 → 1.0.0 (single source of truth via `workspace.package.version`; all 5 crates inherit through `version.workspace = true`).
+- npm version bumps for `atlas-web`, `atlas-mcp-server`, `@atlas/bridge`, root monorepo manifest.
+- `@atlas-trust/verify-wasm@1.0.0` published to npm with SLSA L3 provenance attestation (auto-fires via `wasm-publish.yml` on signed-tag push; the published Sigstore Rekor entry is the public-trust anchor for this release).
+- Signed Git tag `v1.0.0` via the V1.17 SSH-Ed25519 path (key `SHA256:qq/VVJYpsgEdeQSLqU0QS/gKn6ohXJHio+VkzVX+4Zg`).
+
+### Added — V1.19 Welle 12 (PR #48, commit cdf89e84)
 
 - `--require-strict-chain` enabled in `apps/atlas-web/scripts/e2e-write-roundtrip.ts` round-trip (Welle 10 contract symmetric pair): atlas-web write surface now exercises the verifier-side single-writer-per-workspace gate end-to-end.
 - New evidence-row + `Strict flags:`-anchored flag-name regex assertions in atlas-web e2e (mirror Welle 10 smoke.ts anti-drift pattern).
@@ -25,9 +38,34 @@ The v1.0 public-API surface contract is documented in
 - Public-API SemVer audit: new `docs/SEMVER-AUDIT-V1.0.md` documenting every public Rust type, CLI flag, HTTP wire shape, npm export, MCP tool, on-disk format, and operator env-var with risk-tag (Locked / Locked-Behind-Flag / Internal-but-Exported / Defer-Decision).
 - This `CHANGELOG.md` consolidating the full V1.0-baseline through V1.19 Welle 12 ship history.
 
-## [0.1.0] — V1.19 Welle 11 ship state (2026-05-11)
+### Fixed — V1.19 Welle 12
 
-The v0.1.0 line represents Atlas's pre-1.0 development history. The shipped feature set is functionally v1.0-ready; v1.0.0 (forthcoming as V1.19 Welle 13) bumps version numbers and pins the SemVer contract.
+- `atlas-web-playwright.yml` job ID renamed from `playwright` to `atlas-web-playwright` so the GitHub check-run name matches the master-ruleset `required_status_checks` context (Welle-11 fallout — GitHub derives check-run names from job ID, not workflow `name`). Pre-merge fixup commit `6040ee2`.
+- `atlas-web-playwright.yml` paths filter extended with `.handoff/**` so docs-only PRs can trigger the required check (post-merge fixup commit `cb6b930`).
+
+## Security Advisories
+
+The following findings were discovered and remediated during Atlas's pre-1.0 development. Documented here for downstream CVE-prep workflows. Both findings were closed in-commit during the V1.19 Welle 9 review pass (2026-05-09, PR #42, commit e650f93); v1.0.0 is the first version with the documented audit trail.
+
+### ATLAS-2026-001 (V1.19 Welle 9 SR-H-1): Empty-trace strict-chain silent pass
+
+- **Severity:** HIGH (CVSS-equivalent: integrity / auditor-trust). Hypothetical severity for the vulnerability pattern; see "Affected" below — no public release was ever affected.
+- **Affected:** none publicly. The bug existed only in a pre-push intermediate working-tree state of the V1.19 Welle 9 implementation; the fix landed in-commit with the flag's introduction (commit `e650f93`, PR #42, both the unsquashed push `41afebc` and the squash-merge `e650f93` already include the fix). No public release contains the unfixed pattern.
+- **First safe version:** v1.0.0 (this release) is the first version with the documented audit trail. The flag itself shipped in V1.19 Welle 9 under v0.1.0 — already with the fix.
+- **Description:** An earlier draft of `check_strict_chain` used the shape `if events.len() != 1 { ... }` which would have silently passed an empty trace under strict mode. Strict mode pins five properties including "non-empty"; without this, an attacker who stripped events from a bundle could pass strict mode silently.
+- **Remediation:** `check_strict_chain` now returns `TrustError::StrictChainViolation` with the diagnostic "trace has no events (a linear chain requires at least 1 genesis event)" as the first check, before any per-event analysis.
+
+### ATLAS-2026-002 (V1.19 Welle 9 SR-H-2): Self-reference 1-cycle bypass
+
+- **Severity:** HIGH (CVSS-equivalent: integrity / auditor-trust). Hypothetical severity for the vulnerability pattern; see "Affected" below.
+- **Affected:** none publicly. Same disposition as ATLAS-2026-001: the bug existed only in a pre-push intermediate working-tree state; both the unsquashed push `41afebc` and the squash-merge `e650f93` (PR #42) already include the fix.
+- **First safe version:** v1.0.0 (this release) is the first version with the documented audit trail.
+- **Description:** A 1-event trace where the event lists its own `event_hash` as a parent (cryptographically infeasible after a successful `check_event_hashes` pass under blake3 preimage resistance, but a defence-in-depth concern when `check_strict_chain` is called standalone) would have failed with a misleading "found 0 genesis events" message instead of the structured "self-reference cycle" diagnostic.
+- **Remediation:** Self-reference check positioned FIRST among per-event checks in `check_strict_chain`, so a 1-event self-ref reports the cycle diagnostic correctly before the genesis-count check fires.
+
+## [0.1.0] — pre-1.0 development history (2026-04-27 to 2026-05-11)
+
+The v0.1.0 line represents Atlas's pre-1.0 development history across V1.0 baseline through V1.19 Welle 12. All entries below shipped under the v0.1.0 Cargo + npm version while features and trust properties were being assembled; v1.0.0 (above) is the first version with a frozen public-API contract per `docs/SEMVER-AUDIT-V1.0.md`.
 
 ### Added — V1.19 Welle 11 (PR #46, commit 8bc9d88)
 
@@ -226,4 +264,5 @@ Pre-V1.5 foundations: trace_format (`AtlasEvent`, `AtlasTrace`, `PubkeyBundle`),
 ---
 
 [Unreleased]: https://github.com/ThePyth0nKid/atlas/compare/v1.0.0...HEAD
-[0.1.0]: https://github.com/ThePyth0nKid/atlas/releases/tag/v0.1.0
+[1.0.0]: https://github.com/ThePyth0nKid/atlas/releases/tag/v1.0.0
+[0.1.0]: https://github.com/ThePyth0nKid/atlas/commits/master

@@ -43,9 +43,10 @@ test.describe("Home — Live Verifier panel", () => {
     await expect(page.getByTestId("verifier-version")).toBeVisible({
       timeout: 20_000,
     });
-    // The chip text is the crate semver string like "atlas-trust-core/0.1.0";
-    // anchor on the structural prefix, not the exact version (avoids
-    // brittle assertion drift on every cargo version bump).
+    // The chip text is the crate semver string like "atlas-trust-core/<semver>"
+    // (e.g. "atlas-trust-core/1.0.0"). Anchor on the structural prefix, not
+    // the exact version, to avoid brittle assertion drift on every cargo
+    // version bump.
     await expect(page.getByTestId("verifier-version")).toHaveText(
       /^atlas-trust-core\//,
     );
