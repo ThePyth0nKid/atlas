@@ -15,6 +15,23 @@
  * client-side hash computation. The trust property is "the server
  * signs and the verifier confirms" — anything richer here would risk
  * users believing the client computed something verifiable.
+ *
+ * V1.19 Welle 11 — frozen `data-testid` test seam.
+ * The following data-testid identifiers are pinned by the Playwright
+ * E2E suite in `apps/atlas-web/tests/e2e/write.spec.ts`. They MUST
+ * remain present and semantically equivalent across refactors:
+ *   - write-node-form        : the outer form section
+ *   - write-workspace-id     : workspace_id input
+ *   - write-kid-preview      : kid live-preview text
+ *   - write-node-kind        : kind select
+ *   - write-node-id          : node id input
+ *   - write-attributes       : attributes textarea
+ *   - write-submit           : submit button
+ *   - write-error            : error message span (only present on error)
+ *   - write-success-card     : success card (only present on success)
+ *   - write-success-event-hash, -kid, -event-id, -parents, -workspace
+ * Renaming or removing any of these without updating the spec file in
+ * the same PR turns the atlas-web-playwright CI lane red.
  */
 
 import { useState } from "react";
@@ -106,7 +123,10 @@ export function WriteNodeForm() {
   }
 
   return (
-    <section className="border border-[var(--border)] rounded-lg p-5 space-y-5">
+    <section
+      data-testid="write-node-form"
+      className="border border-[var(--border)] rounded-lg p-5 space-y-5"
+    >
       <div>
         <h2 className="font-medium">New node</h2>
         <p className="text-[13px] text-[var(--foreground-muted)] mt-1">
@@ -117,7 +137,7 @@ export function WriteNodeForm() {
         </p>
       </div>
 
-      <form onSubmit={handleSubmit} className="space-y-4">
+      <form onSubmit={handleSubmit} className="space-y-4" noValidate={false}>
         <Field label="Workspace ID" htmlFor="ws">
           <input
             id="ws"
@@ -129,11 +149,14 @@ export function WriteNodeForm() {
             onChange={(e) => setWorkspaceId(e.target.value)}
             className={inputClass}
             autoComplete="off"
+            data-testid="write-workspace-id"
           />
           <p className={hintClass}>
             Allowed: <code className="hash-chip">[a-zA-Z0-9_-]{"{1,128}"}</code>.
             Per-tenant kid:{" "}
-            <code className="hash-chip">atlas-anchor:{workspaceId || "…"}</code>
+            <code className="hash-chip" data-testid="write-kid-preview">
+              atlas-anchor:{workspaceId || "…"}
+            </code>
           </p>
         </Field>
 
@@ -145,6 +168,7 @@ export function WriteNodeForm() {
             value={kind}
             onChange={(e) => setKind(e.target.value as NodeKind)}
             className={inputClass}
+            data-testid="write-node-kind"
           >
             {NODE_KINDS.map((k) => (
               <option key={k} value={k}>
@@ -166,6 +190,7 @@ export function WriteNodeForm() {
             placeholder="e.g. dataset/customer_orders_q1_2026"
             className={inputClass}
             autoComplete="off"
+            data-testid="write-node-id"
           />
         </Field>
 
@@ -178,6 +203,7 @@ export function WriteNodeForm() {
             onChange={(e) => setAttributes(e.target.value)}
             className={`${inputClass} font-mono text-[12px]`}
             spellCheck={false}
+            data-testid="write-attributes"
           />
           <p className={hintClass}>
             JSON object. No floats — use basis-points (×10000) for fractions so
@@ -190,11 +216,16 @@ export function WriteNodeForm() {
             type="submit"
             disabled={status === "submitting"}
             className="text-[13px] font-medium border border-[var(--border)] rounded-md px-4 py-1.5 hover:bg-[var(--bg-subtle)] disabled:opacity-50 disabled:cursor-not-allowed"
+            data-testid="write-submit"
           >
             {status === "submitting" ? "Signing…" : "Sign and append"}
           </button>
           {status === "error" && (
-            <span className="text-[13px] text-[var(--accent-danger)]">
+            <span
+              className="text-[13px] text-[var(--accent-danger)]"
+              role="alert"
+              data-testid="write-error"
+            >
               {errorMsg}
             </span>
           )}
@@ -208,19 +239,26 @@ export function WriteNodeForm() {
 
 function SuccessCard({ result }: { result: SuccessResult }): React.ReactElement {
   return (
-    <div className="border border-[var(--border)] rounded-md p-4 bg-[var(--bg-subtle)] space-y-2 text-[13px]">
+    <div
+      role="status"
+      data-testid="write-success-card"
+      className="border border-[var(--border)] rounded-md p-4 bg-[var(--bg-subtle)] space-y-2 text-[13px]"
+    >
       <div className="flex items-center gap-2 font-medium text-[var(--foreground)]">
-        <span className="trust-tick trust-tick--ok">✓</span>
+        <span className="trust-tick trust-tick--ok" aria-hidden="true">
+          ✓
+        </span>
         Signed and appended
       </div>
-      <KeyValue k="workspace" v={result.workspace_id} />
-      <KeyValue k="kid" v={result.kid} />
-      <KeyValue k="event_id" v={result.event_id} />
-      <KeyValue k="event_hash" v={result.event_hash} mono />
+      <KeyValue k="workspace" v={result.workspace_id} testid="write-success-workspace" />
+      <KeyValue k="kid" v={result.kid} testid="write-success-kid" />
+      <KeyValue k="event_id" v={result.event_id} testid="write-success-event-id" />
+      <KeyValue k="event_hash" v={result.event_hash} mono testid="write-success-event-hash" />
       <KeyValue
         k="parents"
         v={result.parents.length === 0 ? "(genesis)" : result.parents.join(", ")}
         mono
+        testid="write-success-parents"
       />
       <p className="text-[12px] text-[var(--foreground-muted)] mt-2">
         Verify by running{" "}
@@ -253,17 +291,22 @@ function KeyValue({
   k,
   v,
   mono,
+  testid,
 }: {
   k: string;
   v: string;
   mono?: boolean;
+  testid?: string;
 }): React.ReactElement {
   return (
     <div className="flex gap-3">
       <span className="text-[var(--foreground-muted)] uppercase tracking-wide text-[11px] w-20 shrink-0 mt-0.5">
         {k}
       </span>
-      <span className={mono ? "font-mono text-[12px] break-all" : "break-all"}>
+      <span
+        className={mono ? "font-mono text-[12px] break-all" : "break-all"}
+        data-testid={testid}
+      >
         {v}
       </span>
     </div>
