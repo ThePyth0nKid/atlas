@@ -13,11 +13,14 @@
   --foreground-muted: #475569;    /* slate-600 */
   /* V1.19 Welle 11: WCAG 2.1 AA contrast.
    * Previous sigstore-brand green (#3fbc78) on bg-muted → ~2.5:1 (FAIL).
-   * green-700 (#15803d) on bg-muted → ~6.5:1, AA-compliant.
-   * On 15%-mix-on-white trust-tick background (~#dceee0) → ~5.4:1, AA-compliant.
+   * green-700 (#15803d) on bg-muted → ~6.5:1, but on the 15%-mix-on-white
+   * StatusBadge background Firefox rendered it as 3.93:1 (Chromium read
+   * ~5.4:1 — same color-mix() spec, slightly different gamma rounding).
+   * green-800 (#166534) on the same 15%-mix bg renders ≥4.8:1 in both
+   * engines, giving a cross-browser AA buffer.
    * Brand sigstore-green stays available via --accent-trust-brand if a
    * future marketing surface needs the lighter hue for non-text uses. */
-  --accent-trust: #15803d;        /* green-700 */
+  --accent-trust: #166534;        /* green-800 */
   --accent-trust-brand: #3fbc78;  /* sigstore-green; for non-text branding only */
   --accent-warn: #b45309;         /* amber-700 — AA on bg-muted (was amber-500 #f59e0b → fail) */
   /* V1.19 Welle 11: WCAG 2.1 AA contrast.
