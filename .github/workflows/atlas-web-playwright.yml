@@ -45,6 +45,13 @@ on:
       - 'Cargo.toml'
       - 'pnpm-lock.yaml'
       - '.github/workflows/atlas-web-playwright.yml'
+      # V1.19 Welle 12 docs-PR fix: handoff doc-only PRs must trigger
+      # this lane because the master ruleset's required_status_checks
+      # set includes `atlas-web-playwright` — without this path, the
+      # ruleset would block merging any doc-only PR (no merge-able way
+      # to satisfy the required check). ~7 min CI per handoff PR is
+      # acceptable cost (rare PRs, one per welle).
+      - '.handoff/**'
   push:
     branches:
       - master
