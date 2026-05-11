@@ -52,3 +52,10 @@ coverage/
 
 # MCP server runtime data (signed events; per-developer-machine state)
 apps/atlas-mcp-server/data/
+
+# V1.19 Welle 11 — atlas-web runtime data + Playwright artifacts
+apps/atlas-web/data/
+apps/atlas-web/test-results/
+apps/atlas-web/playwright-report/
+# TypeScript incremental build info — regenerated per build, not source
+*.tsbuildinfo

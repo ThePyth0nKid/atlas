@@ -1,5 +1,20 @@
 "use client";
 
+/**
+ * V1.19 Welle 11 — frozen `data-testid` test seam.
+ * The following data-testid identifiers are pinned by the Playwright
+ * E2E suite in `apps/atlas-web/tests/e2e/home.spec.ts`. They MUST
+ * remain present and semantically equivalent across refactors:
+ *   - live-verifier-panel    : the outer section
+ *   - verifier-status-badge  : the StatusBadge element
+ *   - verifier-version       : the verifier_version chip (when present)
+ *   - verifier-trace-meta    : workspace + events count line
+ *   - verifier-evidence      : the evidence <ul>
+ *   - verifier-error         : error message (when present)
+ * Renaming or removing any of these without updating the spec file in
+ * the same PR turns the atlas-web-playwright CI lane red.
+ */
+
 import { useEffect, useState } from "react";
 import { runVerifier, type VerifyOutcome } from "@/lib/verifier-loader";
 
@@ -50,7 +65,10 @@ export function LiveVerifierPanel() {
   }, []);
 
   return (
-    <section className="border border-[var(--border)] rounded-lg p-5 bg-[var(--bg-subtle)]">
+    <section
+      data-testid="live-verifier-panel"
+      className="border border-[var(--border)] rounded-lg p-5 bg-[var(--bg-subtle)]"
+    >
       <div className="flex items-start justify-between gap-6">
         <div>
           <h2 className="font-medium flex items-center gap-2">
@@ -63,28 +81,44 @@ export function LiveVerifierPanel() {
           </p>
         </div>
         {verifierVersion && (
-          <span className="hash-chip">{verifierVersion}</span>
+          <span className="hash-chip" data-testid="verifier-version">
+            {verifierVersion}
+          </span>
         )}
       </div>
 
       {traceMeta && (
-        <div className="mt-3 text-[13px] text-[var(--foreground-muted)]">
+        <div
+          className="mt-3 text-[13px] text-[var(--foreground-muted)]"
+          data-testid="verifier-trace-meta"
+        >
           Workspace <code className="hash-chip">{traceMeta.workspace}</code>{" "}
           · {traceMeta.events} events
         </div>
       )}
 
       {error && (
-        <div className="mt-3 text-[var(--accent-danger)] text-[13px]">
+        <div
+          className="mt-3 text-[var(--accent-danger)] text-[13px]"
+          role="alert"
+          data-testid="verifier-error"
+        >
           {error}
         </div>
       )}
 
       {outcome && (
-        <ul className="mt-4 space-y-1.5">
+        <ul className="mt-4 space-y-1.5" data-testid="verifier-evidence">
           {outcome.evidence.map((ev) => (
-            <li key={ev.check} className="flex items-start gap-2 text-[13px]">
-              <span className={`trust-tick ${ev.ok ? "trust-tick--ok" : "trust-tick--fail"}`}>
+            <li
+              key={ev.check}
+              className="flex items-start gap-2 text-[13px]"
+              data-testid={`verifier-evidence-${ev.check}`}
+            >
+              <span
+                className={`trust-tick ${ev.ok ? "trust-tick--ok" : "trust-tick--fail"}`}
+                aria-hidden="true"
+              >
                 {ev.ok ? "✓" : "✗"}
               </span>
               <span className="font-medium min-w-[150px]">{ev.check}</span>
@@ -107,6 +141,9 @@ function StatusBadge({
   if (status === "done") {
     return (
       <span
+        data-testid="verifier-status-badge"
+        data-status="done"
+        data-valid={valid ? "true" : "false"}
         className={`text-[11px] px-2 py-0.5 rounded-full ${
           valid
             ? "bg-[color-mix(in_srgb,var(--accent-trust)_15%,transparent)] text-[var(--accent-trust)]"
@@ -119,7 +156,11 @@ function StatusBadge({
   }
   if (status === "error") {
     return (
-      <span className="text-[11px] px-2 py-0.5 rounded-full bg-[color-mix(in_srgb,var(--accent-danger)_15%,transparent)] text-[var(--accent-danger)]">
+      <span
+        data-testid="verifier-status-badge"
+        data-status="error"
+        className="text-[11px] px-2 py-0.5 rounded-full bg-[color-mix(in_srgb,var(--accent-danger)_15%,transparent)] text-[var(--accent-danger)]"
+      >
         ERROR
       </span>
     );
@@ -132,7 +173,11 @@ function StatusBadge({
     error: "",
   };
   return (
-    <span className="text-[11px] px-2 py-0.5 rounded-full bg-[var(--bg-muted)] text-[var(--foreground-muted)]">
+    <span
+      data-testid="verifier-status-badge"
+      data-status={status}
+      className="text-[11px] px-2 py-0.5 rounded-full bg-[var(--bg-muted)] text-[var(--foreground-muted)]"
+    >
       {labels[status]}
     </span>
   );

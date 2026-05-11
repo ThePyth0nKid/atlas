@@ -1,0 +1,200 @@
+# V1.19 Welle 11 — Playwright UI E2E + a11y lane.
+#
+# Runs the atlas-web Playwright suite against a production-build Next
+# server. Mirrors the deployed shape of playground.atlas-trust.dev as
+# closely as a Linux CI runner allows.
+#
+# Lane covers:
+#   - `/` LiveVerifierPanel state machine + WASM-verifier round-trip
+#   - `/write` WriteNodeForm full happy-path + error-path + persistence
+#   - Axe WCAG 2.1 Level AA on both pages (initial + post-submit)
+#   - Keyboard tab-order through the write form
+#
+# Browser matrix: Chromium + Firefox. Webkit excluded — Cloudflare-
+# Workers playground has no engine-specific code path, and the +300 MB
+# binary + +5 min runtime would not buy meaningful regression coverage
+# at the v1.0 stage. Add as a nightly lane in a future welle if a
+# Webkit-specific regression is observed in the wild.
+#
+# When this lane goes red:
+#   1. Inspect uploaded artefacts (screenshots, videos, traces).
+#      `playwright show-trace <trace.zip>` reproduces the failure
+#      locally with full network + DOM history.
+#   2. Run `pnpm --filter atlas-web e2e:playwright` locally — the same
+#      command CI uses, with the same webServer pinning.
+#   3. If the failure is a data-testid drift, the fix is to restore
+#      the missing identifier in WriteNodeForm.tsx or LiveVerifierPanel.tsx
+#      (both have a "frozen data-testid test seam" JSDoc at the top).
+#   4. If the failure is a WASM-loader flake (status badge stuck on
+#      loading-wasm), the existing single retry should absorb it; if
+#      it recurs >1× per week, investigate the verifier-loader.ts
+#      bundle-resolution path.
+
+name: atlas-web-playwright
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'apps/atlas-web/**'
+      - 'packages/atlas-bridge/**'
+      - 'crates/atlas-signer/**'
+      - 'crates/atlas-trust-core/**'
+      - 'crates/atlas-verify-wasm/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/atlas-web-playwright.yml'
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - 'apps/atlas-web/**'
+      - 'packages/atlas-bridge/**'
+      - 'crates/atlas-signer/**'
+      - 'crates/atlas-trust-core/**'
+      - 'crates/atlas-verify-wasm/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/atlas-web-playwright.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  playwright:
+    runs-on: ubuntu-latest
+    # Single concurrency group per ref so a force-push or rebase
+    # cancels the in-flight run rather than racing two test workers
+    # against the same playground.
+    concurrency:
+      group: atlas-web-playwright-${{ github.ref }}
+      cancel-in-progress: true
+    env:
+      # Mirrors the smoke.ts V1.12-Scope-B2 dev-seed gate. The atlas-
+      # signer subcommand refuses the dev seed unless this var is set.
+      ATLAS_DEV_MASTER_SEED: '1'
+      # Pinned wasm-pack version. Matches wasm-publish.yml — bumping
+      # requires a human-reviewed PR. wasm-pack's bundled wasm-opt is
+      # a known footgun (see `[package.metadata.wasm-pack.profile.
+      # release].wasm-opt = false` in atlas-verify-wasm/Cargo.toml).
+      WASM_PACK_VERSION: '0.13.1'
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-05-03
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+        with:
+          workspaces: . -> target
+
+      - name: Install pnpm
+        # Version is resolved from the root package.json packageManager
+        # field (Corepack convention). See hsm-wave3-smoke.yml header
+        # for the rationale on not pinning version here.
+        uses: pnpm/action-setup@0c17529a66aca453f9227af23103ed11469b1e47 # v4.0.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Build atlas-signer (release)
+        # The write-page Playwright tests POST to /api/atlas/write-node
+        # which spawns atlas-signer. Release build mirrors production
+        # deployment shape.
+        run: cargo build --release -p atlas-signer
+
+      - name: Install pinned wasm-pack (from crates.io, --locked)
+        # Required for the home-page LiveVerifierPanel: the WASM
+        # verifier binaries live under `apps/atlas-web/public/wasm/`
+        # which is gitignored (artefact, not source). Without this
+        # step the home spec times out on `verifier-version` because
+        # the page is stuck in `loading-wasm`.
+        # Install pattern + supply-chain rationale mirrors
+        # wasm-publish.yml — cargo install --locked rebuilds from
+        # auditable Cargo.lock source, not a CDN-shipped prebuilt.
+        run: |
+          cargo install wasm-pack --version "${WASM_PACK_VERSION}" --locked
+          wasm-pack --version
+
+      - name: Build WASM verifier + copy artefacts to atlas-web/public/wasm
+        # Same script the local dev workflow uses (`pnpm wasm`). Builds
+        # `crates/atlas-verify-wasm` with `--target web` and copies the
+        # three artefacts (atlas_verify_wasm.js, .wasm, .d.ts) into
+        # `apps/atlas-web/public/wasm/`. The next.config.ts COEP/COOP
+        # headers on that path are unaffected by this step.
+        run: bash scripts/build-wasm.sh
+
+      - name: Install workspace dependencies
+        # V1.19 Welle 2: install at workspace root so pnpm wires
+        # `@atlas/bridge: workspace:*`. See hsm-wave3-smoke.yml for
+        # the full rationale.
+        run: pnpm install --frozen-lockfile
+
+      - name: Build @atlas/bridge
+        run: pnpm --filter @atlas/bridge build
+
+      - name: Build atlas-web (production)
+        # Playwright's webServer config invokes `next start` which
+        # requires a prior `next build`. Doing it here as an explicit
+        # step keeps build vs test-run timings visible in the CI log.
+        run: pnpm --filter atlas-web build
+
+      - name: Cache Playwright browser binaries
+        # ~600 MB for chromium + firefox. Cache key is keyed on the
+        # @playwright/test version in pnpm-lock.yaml — when the
+        # version bumps, the cache invalidates and re-downloads
+        # automatically. Mirrors the recommended Playwright-CI cache
+        # pattern.
+        id: playwright-cache
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright browsers
+        # `--with-deps` installs the system libraries on Ubuntu that
+        # Chromium and Firefox need. Without this the first launch in
+        # the test step fails with a cryptic missing-shared-library
+        # error. The if-condition skips the binary download when the
+        # cache hit, but always re-installs system deps (apt-get is
+        # idempotent and fast).
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            pnpm --filter atlas-web exec playwright install-deps chromium firefox
+          else
+            pnpm --filter atlas-web exec playwright install --with-deps chromium firefox
+          fi
+
+      - name: Run Playwright tests
+        # The webServer block in playwright.config.ts starts `next start`
+        # on port 3001; Playwright waits for the server to respond
+        # before kicking off tests (timeout 120s).
+        run: pnpm --filter atlas-web e2e:playwright
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: playwright-report
+          path: apps/atlas-web/playwright-report/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Upload Playwright test-results on failure
+        if: failure()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: playwright-test-results
+          path: apps/atlas-web/test-results/
+          retention-days: 14
+          if-no-files-found: ignore

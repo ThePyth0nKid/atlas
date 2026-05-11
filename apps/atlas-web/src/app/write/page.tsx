@@ -41,7 +41,10 @@ export default function WritePage() {
 
 function DeployerNotice() {
   return (
-    <section className="border border-[var(--border)] rounded-lg p-4 text-[13px] text-[var(--foreground-muted)]">
+    <section
+      data-testid="deployer-notice"
+      className="border border-[var(--border)] rounded-lg p-4 text-[13px] text-[var(--foreground-muted)]"
+    >
       <div className="font-medium text-[var(--foreground)] mb-1">
         Deployer security boundary
       </div>
