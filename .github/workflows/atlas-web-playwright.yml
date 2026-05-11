@@ -76,6 +76,11 @@ jobs:
       # Mirrors the smoke.ts V1.12-Scope-B2 dev-seed gate. The atlas-
       # signer subcommand refuses the dev seed unless this var is set.
       ATLAS_DEV_MASTER_SEED: '1'
+      # Pinned wasm-pack version. Matches wasm-publish.yml — bumping
+      # requires a human-reviewed PR. wasm-pack's bundled wasm-opt is
+      # a known footgun (see `[package.metadata.wasm-pack.profile.
+      # release].wasm-opt = false` in atlas-verify-wasm/Cargo.toml).
+      WASM_PACK_VERSION: '0.13.1'
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -105,6 +110,27 @@ jobs:
         # which spawns atlas-signer. Release build mirrors production
         # deployment shape.
         run: cargo build --release -p atlas-signer
+
+      - name: Install pinned wasm-pack (from crates.io, --locked)
+        # Required for the home-page LiveVerifierPanel: the WASM
+        # verifier binaries live under `apps/atlas-web/public/wasm/`
+        # which is gitignored (artefact, not source). Without this
+        # step the home spec times out on `verifier-version` because
+        # the page is stuck in `loading-wasm`.
+        # Install pattern + supply-chain rationale mirrors
+        # wasm-publish.yml — cargo install --locked rebuilds from
+        # auditable Cargo.lock source, not a CDN-shipped prebuilt.
+        run: |
+          cargo install wasm-pack --version "${WASM_PACK_VERSION}" --locked
+          wasm-pack --version
+
+      - name: Build WASM verifier + copy artefacts to atlas-web/public/wasm
+        # Same script the local dev workflow uses (`pnpm wasm`). Builds
+        # `crates/atlas-verify-wasm` with `--target web` and copies the
+        # three artefacts (atlas_verify_wasm.js, .wasm, .d.ts) into
+        # `apps/atlas-web/public/wasm/`. The next.config.ts COEP/COOP
+        # headers on that path are unaffected by this step.
+        run: bash scripts/build-wasm.sh
 
       - name: Install workspace dependencies
         # V1.19 Welle 2: install at workspace root so pnpm wires
