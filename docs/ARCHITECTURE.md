@@ -1876,7 +1876,7 @@ To independently verify the V1 trust property end-to-end, on any
 supported platform, with no network calls:
 
 ```bash
-git clone https://github.com/ultranova/atlas
+git clone https://github.com/ThePyth0nKid/atlas
 cd atlas
 
 # 1. Build the verifier from source
