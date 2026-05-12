@@ -10,6 +10,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod agent_did;
 pub mod anchor;
 pub mod ed25519;
 pub mod cose;
@@ -31,6 +32,7 @@ pub use verify::{VerifyOutcome, VerifyEvidence, VerifyOptions, verify_trace, ver
 pub use pubkey_bundle::PubkeyBundle;
 pub use anchor::{chain_head_for, ChainHeadHex, ANCHOR_CHAIN_DOMAIN};
 pub use per_tenant::{parse_per_tenant_kid, per_tenant_kid_for, PER_TENANT_KID_PREFIX};
+pub use agent_did::{agent_did_for, parse_agent_did, validate_agent_did, AGENT_DID_PREFIX};
 pub use witness::{
     decode_chain_head, verify_witness_against_roster, verify_witnesses_against_roster,
     witness_signing_input, WitnessFailure, WitnessFailureReason, WitnessFailureWire,

@@ -55,6 +55,22 @@ pub struct AtlasTrace {
 }
 
 /// One signed event.
+///
+/// **V2-α Welle 1 schema addition:** the optional `author_did` field
+/// names the agent instance that produced this event, as a W3C-DID of
+/// the form `did:atlas:<lowercase-hex-32-bytes>`. See `agent_did` module
+/// docstring for the full design rationale. When present, `author_did`
+/// is canonically bound into the signing input alongside `kid` (Phase 2
+/// Security H-1), providing cross-agent-replay defence in addition to
+/// V1's cross-workspace-replay defence. V1 events without `author_did`
+/// remain valid forever; V2-α events MAY carry one.
+///
+/// **Wire-compat note (by design):** the struct retains
+/// `#[serde(deny_unknown_fields)]`. A V1.0 verifier reading a V2-α
+/// event whose `author_did` field is present will reject with
+/// `unknown_field("author_did")`. This is intentional: V2 = major
+/// bump. The version bump itself is deferred to the end of the
+/// V2-α welle bundle per Welle 1 plan-doc §"Decisions".
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AtlasEvent {
@@ -76,6 +92,15 @@ pub struct AtlasEvent {
 
     /// ISO-8601 timestamp the signer claims.
     pub ts: String,
+
+    /// V2-α optional agent-DID naming the agent instance that produced
+    /// this event. Format: `did:atlas:<lowercase-hex-32-bytes>`. When
+    /// absent, the event is V1-shaped (workspace attribution only, no
+    /// agent attribution). When present, the verifier format-validates
+    /// via `agent_did::validate_agent_did` and the DID is canonically
+    /// bound into the signing input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_did: Option<String>,
 }
 
 /// Simplified V1 signature wrapper.

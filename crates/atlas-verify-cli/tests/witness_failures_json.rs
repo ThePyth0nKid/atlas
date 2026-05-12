@@ -71,7 +71,7 @@ fn build_trace_bundle(chain: Option<AnchorChain>) -> (AtlasTrace, PubkeyBundle) 
     let ts = "2026-04-27T10:00:00Z";
     let payload = serde_json::json!({"type": "node.create", "node": {"id": "n1"}});
     let signing_input =
-        build_signing_input("ws-jc", event_id, ts, "spiffe://atlas/test", &[], &payload)
+        build_signing_input("ws-jc", event_id, ts, "spiffe://atlas/test", &[], &payload, None)
             .unwrap();
     let event_hash = compute_event_hash(&signing_input);
     let sig = signing_key.sign(&signing_input);
@@ -87,6 +87,7 @@ fn build_trace_bundle(chain: Option<AnchorChain>) -> (AtlasTrace, PubkeyBundle) 
             kid: "spiffe://atlas/test".to_string(),
             sig: b64url_no_pad_encode(&sig.to_bytes()),
         },
+        author_did: None,
     };
 
     let trace = AtlasTrace {

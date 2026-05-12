@@ -164,3 +164,56 @@ V2-α Welle 1 lays the **data-model foundation** for V2's agent-agnostic shared 
 ---
 
 **End of Welle 1 Plan.** On Nelson's confirmation, implementation proceeds on this branch (`feat/v2-alpha/welle-1-agent-did-schema`) in TDD order per §"Implementation steps".
+
+---
+
+## Implementation Notes (Post-Code, 2026-05-12)
+
+### What actually shipped
+
+| Concrete | File | Lines added |
+|---|---|---|
+| `agent_did.rs` module | `crates/atlas-trust-core/src/agent_did.rs` | ~270 |
+| Re-exports + module decl | `crates/atlas-trust-core/src/lib.rs` | +2 |
+| `AtlasEvent.author_did` field + doc-comment | `crates/atlas-trust-core/src/trace_format.rs` | +25 |
+| `cose::build_signing_input` signature extension + 3 new tests + new pin | `crates/atlas-trust-core/src/cose.rs` | +160 |
+| `verify.rs` pre-signature `validate_agent_did` call | `crates/atlas-trust-core/src/verify.rs` | +13 |
+| `error.rs` `AgentDidFormatInvalid` variant | `crates/atlas-trust-core/src/error.rs` | +12 |
+| `hashchain.rs` caller update | `crates/atlas-trust-core/src/hashchain.rs` | +2 |
+| 9 caller updates (atlas-signer + 7 test files + demo) | various | +9 (one `None`/`author_did: None` per call site) |
+| `agent_did_integration.rs` E2E test | `crates/atlas-trust-core/tests/agent_did_integration.rs` | ~225 |
+| `SEMVER-AUDIT-V1.0.md` §10 V2-α Additions | `docs/SEMVER-AUDIT-V1.0.md` | ~55 |
+| `CHANGELOG.md [Unreleased]` Welle-1 entry | `CHANGELOG.md` | ~22 |
+| Total | | **~795 lines added** |
+
+### Test outcome
+
+- **All V1 unit tests pass unchanged** (`cargo test --workspace` green)
+- **V1 byte-determinism pin `signing_input_byte_determinism_pin` UNCHANGED** — confirms V1 backward-compat invariant: events without `author_did` produce byte-identical CBOR pre- and post-Welle-1
+- **NEW V2-α pin `signing_input_byte_determinism_pin_with_author_did`** passes with hand-computed CBOR hex (a8 map header + V1 7-pair content + `author_did` entry sorted LAST per RFC 8949 §4.2.1)
+- **13 new `agent_did` unit tests** all pass (format-validation positive + negative, parse roundtrip, structured-error reasons)
+- **4 new integration tests** all pass:
+  - `event_with_author_did_round_trips`
+  - `event_without_author_did_round_trips` (V1 backward-compat)
+  - `malformed_author_did_is_rejected_at_verify_time`
+  - `author_did_is_bound_into_signature` (cross-agent-replay defence)
+
+### Risk mitigations validated post-implementation
+
+| Plan-stage risk | Resolution |
+|---|---|
+| `skip_serializing_if = "Option::is_none"` CBOR edge-case | Resolved: V1 pin survived byte-identically; the entry is gated on `Some(_)` at the `build_signing_input` boundary (not via serde — serde owns wire JSON, not CBOR signing-input shape) |
+| CBOR canonicalisation surprises | Resolved: V2-α pin matched hand-computed hex on first run; sort-by-length-then-lex behaves identically with the longer new key |
+| Lyrie ATP standardised format risk | Unchanged from plan; ATP-compat as alias is V2-γ scope per `DECISION-BIZ-6` |
+
+### Deviations from plan
+
+- **None of substance.** Plan §"Implementation steps" 1-9 executed in order. Step 10 (docs) and Step 11 (parallel reviewers) per Atlas standing protocol.
+- **Verifier-side validate-before-signing-input vs validate-after**: plan said either; implementation chose BEFORE so the structured `AgentDidFormatInvalid` surfaces ahead of hash/signature errors — better operator diagnostics.
+
+### What's next (post-Welle-1 ship)
+
+- **V2-α Welle 2 candidate**: ArcadeDB vs FalkorDB comparative spike (`DECISION-DB-1`), pre-V2-α lock blocking item. Independent of Welle 1's schema work.
+- **V2-α Welle 3 candidate**: Atlas Projector skeleton (uses Welle 1's `author_did` to stamp graph nodes per Master Vision §5.1). Depends on Welle 1 on master.
+- **V2-α atlas-signer CLI `--author-did` flag**: separate follow-up welle to expose the new signing-input parameter at the CLI surface. Trivial scope (5-10 lines + a test).
+- **Counsel engagement** continues on Nelson-led parallel track per Master Plan §5.

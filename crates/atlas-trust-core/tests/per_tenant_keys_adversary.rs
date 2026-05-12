@@ -54,7 +54,7 @@ fn build_signed_event(
     payload: serde_json::Value,
 ) -> AtlasEvent {
     let signing_input =
-        build_signing_input(workspace_id, event_id, ts, kid, &parents, &payload).unwrap();
+        build_signing_input(workspace_id, event_id, ts, kid, &parents, &payload, None).unwrap();
     let event_hash = compute_event_hash(&signing_input);
     let signature = signing_key.sign(&signing_input);
     AtlasEvent {
@@ -68,6 +68,7 @@ fn build_signed_event(
             sig: b64url(&signature.to_bytes()),
         },
         ts: ts.to_string(),
+        author_did: None,
     }
 }
 

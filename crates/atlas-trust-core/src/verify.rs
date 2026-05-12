@@ -317,6 +317,25 @@ pub fn verify_trace_with(
             continue;
         }
 
+        // V2-α Welle 1: format-validate author_did if present. A malformed
+        // DID inside a signed event is either an issuer bug or a tampering
+        // attempt; either way the verifier MUST refuse to validate the trust
+        // chain. The check runs before signing-input construction so the
+        // failure surfaces with a structured `AgentDidFormatInvalid` error
+        // ahead of the downstream signature check. Note: `check_event_hashes`
+        // runs earlier in `verify_trace_with` and ALSO calls `build_signing_input`;
+        // if the tampered DID causes a hash mismatch there, both errors
+        // appear in `outcome.errors` — the structured `AgentDidFormatInvalid`
+        // is not necessarily the first error, but it IS the auditor-facing
+        // signal that pinpoints the format violation.
+        if let Some(did) = ev.author_did.as_deref() {
+            if let Err(e) = crate::agent_did::validate_agent_did(did) {
+                errors.push(format!("event {}: {}", ev.event_id, e));
+                sig_failures += 1;
+                continue;
+            }
+        }
+
         let signing_input = match build_signing_input(
             &trace.workspace_id,
             &ev.event_id,
@@ -324,6 +343,7 @@ pub fn verify_trace_with(
             &ev.signature.kid,
             &ev.parent_hashes,
             &ev.payload,
+            ev.author_did.as_deref(),
         ) {
             Ok(b) => b,
             Err(e) => {
