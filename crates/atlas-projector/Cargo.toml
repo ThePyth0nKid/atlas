@@ -1,0 +1,27 @@
+[package]
+name = "atlas-projector"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "V2-α Layer-2 graph projection canonicalisation for Atlas. Deterministic byte-pinned graph-state hashing. Apache-2.0."
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+# V2-α Welle 3: canonicalisation reuses the V1 CBOR pattern from
+# atlas-trust-core (ciborium + sort-cbor-map-entries-per-RFC-8949).
+# atlas-trust-core is a dependency only for AGENT_DID_PREFIX +
+# validate_agent_did (cross-validation of author_did stamping).
+atlas-trust-core = { path = "../atlas-trust-core" }
+ciborium = { workspace = true }
+blake3 = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+# (serde_json already listed in [dependencies]; no dev-only deps needed.)

@@ -1,0 +1,102 @@
+//! # Atlas Projector — V2-α Layer-2 graph projection canonicalisation
+//!
+//! This crate owns the **deterministic graph-state-hash** primitive that
+//! Atlas V2's Three-Layer Trust Architecture (per `docs/V2-MASTER-PLAN.md`
+//! §3) depends on: given a logical graph state derived from
+//! `events.jsonl` (Layer 1, authoritative), compute a stable
+//! byte-for-byte canonical encoding and a `blake3` hash of it. The hash
+//! is what gets pinned in the V2-α projector-state-hash CI gate (per
+//! `DECISION-ARCH-1` triple-hardening) and what `ProjectorRunAttestation`
+//! events (Welle 4 candidate) will cryptographically bind into the
+//! trust chain.
+//!
+//! ## Scope of V2-α Welle 3 (skeleton)
+//!
+//! This welle delivers the **load-bearing canonicalisation primitive
+//! only**. Out of scope for Welle 3:
+//!
+//! - Reading or replaying `events.jsonl` (Welle 4 candidate)
+//! - Idempotent upsert logic from events to graph state (Welle 4)
+//! - `ProjectorRunAttestation` event-kind emission to Layer 1 (Welle 4)
+//! - ArcadeDB driver integration (Welle 5)
+//! - Parallel-projection design for >10M event scenarios (Welle 5)
+//! - DB-specific dump-to-canonical adapter (Welle 5)
+//! - projector-state-hash CI gate enforcement (Welle 6)
+//!
+//! Welle 3 establishes the byte-pin pattern + the in-memory graph
+//! state representation so that every later welle has a stable target
+//! to build against.
+//!
+//! ## Design invariants
+//!
+//! 1. **Logical-identifier sort order, NOT insert-order.** Per V2-α
+//!    Welle 2 spike (`docs/V2-ALPHA-DB-SPIKE.md` §3.5), insert-order-
+//!    dependent identifiers (like ArcadeDB's `@rid`) are NOT a stable
+//!    canonical-hash identity anchor. Two projection runs replaying
+//!    the same `events.jsonl` into a fresh database in different
+//!    historical orders would produce different `@rid` values for
+//!    logically identical nodes. The canonical hash MUST sort by a
+//!    **stable logical identifier** — `entity_uuid` = `blake3(workspace_id
+//!    || event_uuid || kind)` — that is identical across replays.
+//!    This crate enforces logical-identifier sort via `BTreeMap`-backed
+//!    container choice in `state.rs`.
+//!
+//! 2. **CBOR canonicalisation per RFC 8949 §4.2.1.** Map entries are
+//!    sorted by encoded-key length first, then bytewise lex on the
+//!    encoded key (identical pattern to V1's
+//!    `atlas_trust_core::cose::build_signing_input`). Property maps
+//!    inside nodes/edges follow the same convention.
+//!
+//! 3. **No floating-point in canonicalised properties.** Floats
+//!    serialise non-deterministically across CBOR variants and across
+//!    float libraries. Callers MUST use integer representations
+//!    (e.g. basis points for fractional currency, microseconds for
+//!    sub-second timestamps). Same convention V1 enforces in
+//!    `cose::build_signing_input`.
+//!
+//! 4. **`author_did` schema-additive (Welle 1 invariant).** Every
+//!    `GraphNode` and `GraphEdge` MAY carry an optional `author_did`
+//!    stamping the agent identity that produced the originating event.
+//!    When present, the DID is canonically bound into the
+//!    graph-state-hash; when absent (V1-era events), the canonical
+//!    bytes omit the field entirely (no `author_did = null`
+//!    serialisation). Mirrors the V1 `cose::build_signing_input`
+//!    optional-field pattern.
+//!
+//! 5. **No serde derives on `GraphState`.** Welle 3 intentionally
+//!    isolates wire-format serialisation (CBOR canonical encoding for
+//!    hashing) from on-disk or over-the-wire serialisation. The
+//!    `build_canonical_bytes` function is the single canonical-CBOR
+//!    boundary; serde-Serialize of `GraphState` is OUT OF SCOPE.
+//!    Matches V1's `AtlasEvent` (serde for wire) vs
+//!    `build_signing_input` (canonical-CBOR pure function) split.
+//!
+//! ## Trust property
+//!
+//! `graph_state_hash(state)` is a function in the strict mathematical
+//! sense: same input bytes → same output bytes, every time, every
+//! Rust target, every Atlas build. The byte-determinism CI pin in
+//! `canonical::tests::graph_state_hash_byte_determinism_pin` locks
+//! this property and fails the build if any future change breaks it.
+//! Future Atlas-Projector wellen MUST preserve this property — any
+//! change that breaks the pin requires (a) intentional reason
+//! documented in the commit, (b) `atlas-projector` crate version bump
+//! to cascade through V2 version identity.
+
+#![deny(unsafe_code)]
+#![warn(missing_docs)]
+
+pub mod canonical;
+pub mod error;
+pub mod state;
+
+pub use canonical::{build_canonical_bytes, graph_state_hash};
+pub use error::{ProjectorError, ProjectorResult};
+pub use state::{GraphEdge, GraphNode, GraphState};
+
+/// V2-α canonical-form schema identifier. Bound into every
+/// `graph_state_hash` computation as the first map entry, so any
+/// future schema-version-incompatible change to the canonical form
+/// is structurally detectable (different `v` → different bytes →
+/// different hash → byte-pin fails).
+pub const PROJECTOR_SCHEMA_VERSION: &str = "atlas-projector-v1-alpha";

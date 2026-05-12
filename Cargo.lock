@@ -93,6 +93,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-projector"
+version = "1.0.1"
+dependencies = [
+ "atlas-trust-core",
+ "blake3",
+ "ciborium",
+ "hex",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "atlas-signer"
 version = "1.0.1"
 dependencies = [

@@ -378,6 +378,21 @@ Reviewer checklist for surface-touching PRs:
 - **V2-α byte-determinism pin:** `cose::tests::signing_input_byte_determinism_pin_with_author_did` locks the exact CBOR bytes for a fixture event with `author_did = Some(...)`. Map header is `a8` (8 pairs); the new `author_did` entry sorts last per RFC 8949 §4.2.1 (encoded-key-length 11 = longest).
 - **Sigstore Rekor binding:** `author_did` is part of the signed event body, so it is automatically part of the Rekor inclusion proof. No additional anchoring work needed at the V2-α layer.
 
+### 10.7a V2-α Welle 3 — new `atlas-projector` crate (2026-05-12)
+
+| Item | Tag | Notes |
+|---|---|---|
+| NEW workspace member `crates/atlas-projector` | **V2-α-Additive** | Layer-2 graph projection canonicalisation. Depends on `atlas-trust-core` only for `agent_did::validate_agent_did` cross-validation. Clean DAG: atlas-trust-core does NOT depend on atlas-projector. |
+| `pub const PROJECTOR_SCHEMA_VERSION: &str = "atlas-projector-v1-alpha"` | **V2-α-Additive** | Bound into every `graph_state_hash` computation. SemVer-major to change — would invalidate every pinned graph-state-hash + `ProjectorRunAttestation` payload signed under the old schema (Welle 4 candidate). |
+| `pub struct GraphNode { entity_uuid, labels, properties, event_uuid, rekor_log_index, author_did }` | **V2-α-Additive** | In-memory node representation. NOT serde-serialisable (intentional; isolates wire concerns from internal-state concerns). `author_did` Welle 1 schema-additive. |
+| `pub struct GraphEdge { edge_id, from_entity, to_entity, kind, properties, event_uuid, rekor_log_index, author_did }` | **V2-α-Additive** | In-memory edge representation. Same conventions as `GraphNode`. |
+| `pub struct GraphState { nodes: BTreeMap, edges: BTreeMap }` + `pub fn new()`, `upsert_node`, `upsert_edge`, `check_structural_integrity` | **V2-α-Additive** | Container is `BTreeMap` — **load-bearing invariant** for logical-identifier-sorted canonical output (per Welle 2 §3.5 caveat: `@rid` is insert-order, NOT logical identity anchor). |
+| `pub fn build_canonical_bytes(state: &GraphState) -> ProjectorResult<Vec<u8>>` | **V2-α-Additive** | CBOR canonical encoding per RFC 8949 §4.2.1 (same convention as V1's `atlas_trust_core::cose::build_signing_input`). Single canonical-CBOR boundary; serde-serialise of `GraphState` is intentionally out of scope. |
+| `pub fn graph_state_hash(state: &GraphState) -> ProjectorResult<[u8; 32]>` | **V2-α-Additive** | blake3 over canonical bytes. The hash projector-state-hash CI gate compares; the hash `ProjectorRunAttestation` events (Welle 4 candidate) will carry. |
+| `pub enum ProjectorError` (with `#[non_exhaustive]`) — variants: `CanonicalisationFailed`, `MalformedAuthorDid`, `MalformedEntityUuid`, `DuplicateNode`, `DanglingEdge` | **V2-α-Additive (SemVer-minor under non_exhaustive)** | Local crate error type; does NOT alias or wrap `TrustError`. Future wellen may add conversion impls. |
+| `pub type ProjectorResult<T> = Result<T, ProjectorError>` | **V2-α-Additive** | |
+| `canonical::tests::graph_state_hash_byte_determinism_pin` — pinned blake3 `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` (754 canonical bytes) | **CI gate** | Drift detection. Co-equal with V1's `cose::signing_input_byte_determinism_pin` and Welle 1's `signing_input_byte_determinism_pin_with_author_did`. |
+
 ### 10.7 What `v2.0.0-alpha.1` will bring (forecast, not committed)
 
 Pending the close-out of the V2-α welle bundle (Welle 1 = this surface; future Wellen = Projector + FalkorDB + ArcadeDB spike + content-hash separation if counsel-approved):

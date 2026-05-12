@@ -19,6 +19,23 @@ The v1.0 public-API surface contract is documented in
 
 _V2-α work in flight on this line. The next release tag will be `v2.0.0-alpha.1` (major-bump pre-release) at the close-out of the V2-α welle bundle, not a v1.x continuation. V2-α-Additive surface items are listed in [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10. The strategic documentation landings below do not touch the v1.0 public-API surface._
 
+### Added — V2-α Welle 3 (Atlas Projector Skeleton + Canonicalisation Byte-Pin, 2026-05-12)
+
+- **NEW `crates/atlas-projector/` workspace crate** — V2-α Layer-2 graph projection canonicalisation. Public surface: `GraphState` / `GraphNode` / `GraphEdge` types (in-memory representation, `BTreeMap`-backed for load-bearing logical-identifier-sorted canonical iteration); `build_canonical_bytes()` (RFC 8949 §4.2.1 CBOR canonical encoding); `graph_state_hash()` (blake3 over canonical bytes); `ProjectorError` enum (`#[non_exhaustive]`, 5 variants); `PROJECTOR_SCHEMA_VERSION = "atlas-projector-v1-alpha"` const bound into every canonicalisation.
+- **NEW `canonical::tests::graph_state_hash_byte_determinism_pin`** — pinned blake3 `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` (754 canonical bytes) for a 3-node + 2-edge fixture with mixed labels and mixed `author_did` presence. Co-equal CI gate with V1's `cose::signing_input_byte_determinism_pin`, V1.7's `anchor::chain_canonical_body_byte_determinism_pin`, V1.9's `pubkey_bundle::bundle_hash_byte_determinism_pin`, and Welle 1's `signing_input_byte_determinism_pin_with_author_did`.
+- **19 unit tests** in atlas-projector covering: empty-state hash, single-node hash, multi-node insert-order independence (the load-bearing Welle 2 §3.5 invariant), property-order independence, label-order independence + dedup, `author_did` schema-additive binding into hash, V1 backward-compat for `author_did = None`, float rejection at canonicalisation boundary, dangling-edge structural-integrity rejection, malformed-DID rejection, and the byte-determinism pin.
+- **Atlas-projector depends on atlas-trust-core** only for `agent_did::validate_agent_did` cross-validation. Clean DAG — atlas-trust-core does NOT depend on atlas-projector.
+- **NEW `.handoff/v2-alpha-welle-3-plan.md`** (~200 lines) — Welle 3 plan-doc with scope, decisions, files table, acceptance criteria, 5-entry risks table, V1-test-impact matrix, and out-of-scope items for V2-α Welles 4-8.
+- **MODIFY `Cargo.toml` workspace** — add `"crates/atlas-projector"` member entry.
+- **MODIFY `docs/SEMVER-AUDIT-V1.0.md` §10** — new subsection §10.7a listing every new `atlas-projector` `pub` item with V2-α-Additive tag.
+
+### Notes — V2-α Welle 3
+
+- **V1 backward-compat preserved.** All 150 atlas-trust-core unit tests + 4 byte-determinism CI pins (V1's `signing_input_byte_determinism_pin`, V1.7's `chain_canonical_body_byte_determinism_pin`, V1.9's `bundle_hash_byte_determinism_pin`, Welle 1's `signing_input_byte_determinism_pin_with_author_did`) pass byte-identical after Welle 3. Zero regression.
+- **Container choice is load-bearing.** `GraphState.nodes` and `.edges` use `BTreeMap` keyed by logical identifier (`entity_uuid` / `edge_id`) — iteration is sorted automatically per Rust stdlib. The Welle 2 §3.5 caveat ("`@rid` is insert-order, NOT logical identity anchor") is therefore structurally impossible to violate from within this crate's API.
+- **Out of scope (deferred to later wellen):** events.jsonl reading + idempotent upsert (Welle 4), `ProjectorRunAttestation` event-kind emission (Welle 4), ArcadeDB driver integration (Welle 5), projector-state-hash CI gate enforcement (Welle 6), parallel-projection design for >10M event scenarios (Welle 5).
+- **V2-α progress: 3 of 5-8 wellen shipped** (Welle 1 Agent-DID + Welle 2 DB spike + Welle 3 projector skeleton).
+
 ### Added — V2-α Welle 2 (ArcadeDB vs FalkorDB Comparative Spike, 2026-05-12)
 
 - **`docs/V2-ALPHA-DB-SPIKE.md`** (new, ~500 lines) — master-resident V2-α DB-choice decision source-of-truth. Comparative analysis of ArcadeDB (Apache-2.0) vs FalkorDB (SSPLv1) across 10 dimensions: license (SSPLv1 §13 vs Apache-2.0 §4-§5), Cypher subset coverage, property graph model, idempotent upsert pattern, multi-tenant isolation, schema determinism, performance characteristics, operational considerations, vendor risk, and 5 Atlas-specific decision factors (projection-determinism cost, author_did stamping, ProjectorRunAttestation hooks, V2-β Mem0g integration, V2-γ federation-witness property-visibility).
