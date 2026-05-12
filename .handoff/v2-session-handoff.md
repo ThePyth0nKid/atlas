@@ -1,8 +1,8 @@
-# Atlas V2 — Session Handoff (Strategic Iteration Mode, Phase 1+2+3 SHIPPED → Phase 4 pending)
+# Atlas V2 — Session Handoff (Strategic Iteration Mode, Phase 1+2+3+4 ALL SHIPPED)
 
-> **🎯 FRESH-AGENT BOOTSTRAP DOC.** Wenn du diese Datei zum ersten Mal liest mit leerem Kontext: lies §0 "Fresh-Context Onboarding" zuerst, dann §0a-§0d (Phase 1-3 SHIPPED narratives), dann **`.handoff/v2-master-vision-v1.md`** für die volle V2-Vision, dann **`.handoff/decisions.md`** für die 22 expliciten Entscheidungen. Damit bist du bereit für Phase 4 ohne strategischen Kontext nochmal abzufragen.
+> **🎯 FRESH-AGENT BOOTSTRAP DOC.** Wenn du diese Datei zum ersten Mal liest mit leerem Kontext: lies §0 "Fresh-Context Onboarding" zuerst, dann §0a–§0d (Phase 1–4 SHIPPED narratives), dann **`docs/V2-MASTER-PLAN.md`** für den master-resident strategischen Plan, dann optional **`.handoff/v2-master-vision-v1.md`** für die volle V2-Vision-Begründung und **`.handoff/decisions.md`** für die 22 expliciten Entscheidungen. Damit bist du bereit für V2-α-Welle 1 ohne strategischen Kontext nochmal abzufragen.
 
-**Erstellt:** 2026-05-12. **Phase 1+2+3 shipped:** 2026-05-12 (same session, multiple work-blocks). **Status:** Phase 1 + 2 + 3 ALLE ABGESCHLOSSEN, Phase 4 startbereit. **Master HEAD bleibt:** `5f19348` (V2 strategy trilogy) — alle Phase 1-3 docs leben auf Feature-Branches (siehe §0 PR-Tabelle).
+**Erstellt:** 2026-05-12. **Phase 1+2+3+4 alle shipped:** 2026-05-12 (same day, mehrere work-blocks). **Status:** Alle 4 Phasen der strategischen Iteration ABGESCHLOSSEN. **Master enthält jetzt:** `docs/V2-MASTER-PLAN.md` + `docs/WORKING-METHODOLOGY.md` + `.handoff/v2-master-vision-v1.md` + `.handoff/decisions.md` + dieser updated handoff. **Was als nächstes:** V2-α Welle 1 (Atlas Projector + FalkorDB integration) und parallel Counsel-Engagement-Kickoff (Nelson-Decisions zu Firma + Timing + First-10-Customers + TAM/SAM/SOM).
 
 ---
 
@@ -11,34 +11,39 @@
 **Wer bist du, wo bist du, was tust du?**
 
 - **Repo:** `C:/Users/nelso/Desktop/atlas` (Windows-Host, bash/MSYS verfügbar, `cargo` lebt unter `/c/Users/nelso/.cargo/bin/cargo.exe`, `gh` lebt unter `/c/Program Files/GitHub CLI/gh.exe` — beide NICHT im default PATH).
-- **State:** Atlas v1.0.1 ist LIVE auf npm seit 2026-05-12 (siehe `.handoff/v1.19-handoff.md` §0). V1 abgeschlossen. V2 ist strategische Iteration — wir bauen die *Vision* + den *Plan* sorgfältig BEVOR irgendein Code geändert wird.
-- **Methodik:** 4-Phasen-Framework aus `.handoff/v2-iteration-framework.md`. Phase 1 = parallel-foundation-docs. Phase 2 = parallel-multi-angle-crits. Phase 3 = semi-manual synthesis. Phase 4 = master-plan + working-methodology landen auf master.
-- **Was bereits passiert ist (Phase 1+2+3 alle 2026-05-12):**
-  - **Phase 1** — 5 Foundation Docs parallel von 5 Subagents in eigenen Worktrees geschrieben (~2811 Zeilen). Auf PR #59 (draft, no-merge).
-  - **Phase 2** — 6 Multi-Angle Crits parallel von 6 Subagents in eigenen Worktrees geschrieben (~1299 Zeilen). Auf PR #61 (draft, no-merge, base=PR-59-branch).
-  - **Phase 3** — Master Vision v1 (~800 Zeilen) + decisions.md (22 Entscheidungen, ~400 Zeilen) durch semi-manual synthesis erstellt. Auf PR #62 (draft, no-merge, base=PR-61-branch).
-- **Was als nächstes ansteht (Phase 4):** Master Vision v1 wird zu zwei production-ready docs destilliert die auf master landen via SSH-signed PR: `docs/V2-MASTER-PLAN.md` (V2 strategic source-of-truth, ~300 Zeilen) und `docs/WORKING-METHODOLOGY.md` (reusable 4-phase iteration pattern). Plus Counsel-Engagement-Kickoff (€30-80K, 6-8 Wochen, pre-V2-α blocking).
-- **Was du NICHT tust ohne Nelson:** Phase 4 NICHT auto-starten. Counsel-Engagement Vendor-Auswahl ist Nelson's call. Erstcustomer-Pipeline ist Nelson's call. Master-merge zeitlich mit Nelson abstimmen.
+- **State:** Atlas v1.0.1 ist LIVE auf npm seit 2026-05-12 (siehe `.handoff/v1.19-handoff.md` §0). V1 abgeschlossen. V2-Strategie 4-phasig komplettiert — Master Plan + Working Methodology jetzt master-resident. Nächste Implementierungsarbeit = V2-α Welle 1.
+- **Methodik:** 4-Phasen-Framework aus `.handoff/v2-iteration-framework.md` (jetzt auch dokumentiert als reusable pattern in `docs/WORKING-METHODOLOGY.md`). Phase 1 = parallel-foundation-docs. Phase 2 = parallel-multi-angle-crits. Phase 3 = semi-manual synthesis. Phase 4 = master-plan + working-methodology landen auf master.
+- **Was bereits passiert ist (Phase 1+2+3+4 alle 2026-05-12):**
+  - **Phase 1** — 5 Foundation Docs parallel von 5 Subagents in eigenen Worktrees geschrieben (~2811 Zeilen). Auf PR #59 (draft, no-merge — work-product).
+  - **Phase 2** — 6 Multi-Angle Crits parallel von 6 Subagents in eigenen Worktrees geschrieben (~1299 Zeilen). Auf PR #61 (draft, no-merge, base=PR-59-branch — work-product).
+  - **Phase 3** — Master Vision v1 (~615 Zeilen) + decisions.md (22 Entscheidungen, ~284 Zeilen) durch semi-manual synthesis erstellt. Auf PR #62 (draft, no-merge, base=PR-61-branch — work-product).
+  - **Phase 4** — `docs/V2-MASTER-PLAN.md` (~300 Zeilen) + `docs/WORKING-METHODOLOGY.md` (~200 Zeilen) auf master via PR #60 gemerged. Plus `.handoff/v2-master-vision-v1.md` + `.handoff/decisions.md` mitgemerged für master-reference-ability.
+- **Was als nächstes ansteht (V2-α + parallel-Counsel-Track):**
+  - **V2-α Welle 1** (Atlas Projector skeleton + FalkorDB sketch + canonicalisation byte-pin spec) — siehe `docs/V2-MASTER-PLAN.md` §6 für Welle-Decomposition (V2-α scope 5-8 sessions)
+  - **Counsel-Engagement-Kickoff** (€30-80K, 6-8 Wochen, pre-V2-α blocking) — Nelson selects 1 lead firm from shortlist (Hogan Lovells Frankfurt / Bird & Bird Munich / Matheson / William Fry / Cleary Gottlieb Paris / boutique alternatives), scope per `.handoff/v2-master-vision-v1.md` §11
+  - **First-10-Customers Pipeline + TAM/SAM/SOM** — Nelson-led actions per `DECISION-BIZ-3` + `DECISION-BIZ-4`
+- **Was du NICHT tust ohne Nelson:** V2-α-Welle-1-Engineering NICHT auto-starten. Counsel-Engagement Vendor-Auswahl ist Nelson's call. Erstcustomer-Pipeline ist Nelson's call. Pause vor jeder Strategie-Decision die in `.handoff/decisions.md` als reversibility=LOW oder MEDIUM markiert ist.
 
-**State diagram of current branches & PRs:**
+**State diagram of branches & PRs (post-Phase-4-merge):**
 
 ```
-master  5f19348  ←  unverändert seit 2026-05-12 (V2 strategy trilogy PR #58)
-  │
-  ├── PR #60 (open, mergeable): docs/v2/phase-1-shipped-handoff-update
-  │       └─ updates .handoff/v2-session-handoff.md (this file!) with Phase 1+2+3 SHIPPED
-  │          ↳ when merged, future sessions read updated handoff from master
-  │
-  └── PR #59 (DRAFT, no-merge): v2/phase-1-foundation
-        ├─ 5 Phase-1 Foundation Docs (~2811 lines)
-        │
-        └── PR #61 (DRAFT, no-merge): v2/phase-2-critiques [base=v2/phase-1-foundation]
-              ├─ 6 Phase-2 Multi-Angle Crits (~1299 lines)
-              │
-              └── PR #62 (DRAFT, no-merge): v2/phase-3-master-vision [base=v2/phase-2-critiques]
-                    └─ Master Vision v1 + decisions.md (~1200 lines)
-                          ↳ THIS is the synthesis source-of-truth for Phase 4
+master  <new-HEAD-after-PR-60-merge>
+  ├─ docs/V2-MASTER-PLAN.md             ← Phase 4 output, primary V2 plan
+  ├─ docs/WORKING-METHODOLOGY.md        ← Phase 4 output, reusable 4-phase pattern
+  ├─ .handoff/v2-master-vision-v1.md    ← Phase 3 output (mirrored for reference-ability)
+  ├─ .handoff/decisions.md              ← Phase 3 output (mirrored for reference-ability)
+  └─ .handoff/v2-session-handoff.md     ← this file, Phase 1+2+3+4 SHIPPED state
+
+PR #60 (MERGED on Phase 4 ship): docs/v2/phase-1-shipped-handoff-update → master
+  └─ contained all Phase-4 outputs + this handoff in single SSH-signed commit
+
+PRs #59 #61 #62 (DRAFT, permanently-no-merge — work-product archives):
+  PR #59 (v2/phase-1-foundation): 5 Phase-1 Foundation Docs (~2811 lines)
+  PR #61 (v2/phase-2-critiques, base=#59): 6 Phase-2 Multi-Angle Crits (~1299 lines)
+  PR #62 (v2/phase-3-master-vision, base=#61): Master Vision v1 + decisions.md (~899 lines)
 ```
+
+These three PRs are NOT merge targets — they are audit-trail artefacts proving the methodology was applied. Per `docs/WORKING-METHODOLOGY.md` anti-pattern table: "Only Phase 4 touches master."
 
 **The five Phase-1 docs (READ-only-reference; Phase 3 supersedes operationally):**
 - `.handoff/v2-vision-strategic-positioning.md` (Doc A, 512 lines)
@@ -55,30 +60,36 @@ master  5f19348  ←  unverändert seit 2026-05-12 (V2 strategy trilogy PR #58)
 - `.handoff/crit-compliance.md` (185 lines)
 - `.handoff/crit-business.md` (296 lines)
 
-**The two Phase-3 outputs (PRIMARY READS for Phase 4 derivation):**
-- **`.handoff/v2-master-vision-v1.md`** — single consolidated coherent doc. 15 sections from Exec Summary through Atlas-crates-refs. **THIS IS THE SOURCE OF TRUTH for V2 vision now.**
-- **`.handoff/decisions.md`** — 22 explicit ACCEPT/MODIFY/DEFER decisions. Every CRITICAL + HIGH Phase-2 finding addressed.
+**Phase-3 outputs (now mirrored to master for reference-ability):**
+- **`.handoff/v2-master-vision-v1.md`** — single consolidated coherent doc (~615 lines). 15 sections from Exec Summary through Atlas-crates-refs. **Full rationale + Phase-2-critique provenance for everything in V2-MASTER-PLAN.md.**
+- **`.handoff/decisions.md`** — 22 explicit ACCEPT/MODIFY/DEFER decisions (~284 lines). Every CRITICAL + HIGH Phase-2 finding addressed.
 
-**Pre-flight checklist for Phase 4 start:**
+**Phase-4 outputs (master-resident, primary reads for V2-α work):**
+- **`docs/V2-MASTER-PLAN.md`** — distilled strategic plan (~300 lines). Welle decomposition (V2-α/β/γ/δ), top-5 blocking risks, demo programme, success criteria, reference pointers. **PRIMARY read for V2-α planning.**
+- **`docs/WORKING-METHODOLOGY.md`** — reusable 4-phase iteration pattern (~200 lines). Anti-pattern table. Use this for any future Großthema (post-quantum migration, V3 architecture).
+
+**Pre-flight checklist for V2-α Welle 1 start:**
 ```bash
 cd "C:/Users/nelso/Desktop/atlas"
 git status                                          # → clean
-git log --oneline -3                                # → top is 5f19348 still
-git branch --show-current                           # → likely master, switch as needed
+git checkout master && git pull origin master       # → ensure master is current
+ls docs/V2-MASTER-PLAN.md docs/WORKING-METHODOLOGY.md  # → both exist on master
+ls .handoff/v2-master-vision-v1.md .handoff/decisions.md  # → both exist on master
 "/c/Program Files/GitHub CLI/gh.exe" pr list \
-  --state open --json number,title                  # → at least #59, #60, #61, #62
-git fetch origin                                    # → ensure remote refs current
+  --state open --json number,title                  # → #59/#61/#62 still draft (archive PRs)
 git verify-tag v1.0.1                               # → Good ed25519 sig
 ```
 
-**Worktree cleanup (technical debt, not Phase-4-blocking):**
-11 subagent worktrees (5 Phase-1 + 6 Phase-2 + 1 architect-failed-orphan) live under `.claude/worktrees/agent-*`. Once Phase 4 ships and PRs #59/#61/#62 are no longer referenced, run:
+Then read `docs/V2-MASTER-PLAN.md` §6 (Welle Decomposition) to scope V2-α Welle 1. Counsel engagement progresses on parallel track (Nelson-driven).
+
+**Worktree cleanup (post-Phase-4, now safe):**
+11 subagent worktrees (5 Phase-1 + 6 Phase-2 + 1 architect-failed-orphan) live under `.claude/worktrees/agent-*`. PRs #59/#61/#62 are draft-archived; their branches are no longer functional dependencies. Cleanup is safe but not urgent:
 ```bash
 git worktree list                                                # see all worktrees
 git worktree remove .claude/worktrees/agent-XXX --force          # per worktree
 git branch -D worktree-agent-XXX                                  # per branch
 ```
-Don't delete during Phase 4 — the worktrees + branches are PR-references for crits + foundation docs.
+Keep PR branches intact (don't `git push origin --delete`) — the draft PRs themselves are the audit-trail artefacts and can be re-cloned if ever needed.
 
 **Standing protocol reminders:**
 - Master direct-push is blocked; always PR
@@ -172,8 +183,8 @@ Cleanup these worktrees post-Phase-2 (or now if disk space matters): `git worktr
 **Integration PR:** https://github.com/ThePyth0nKid/atlas/pull/62 (draft, base = v2/phase-2-critiques)
 
 **Two new Phase-3 outputs (PRIMARY READS for any future session):**
-- **`.handoff/v2-master-vision-v1.md`** (~800 Zeilen) — single consolidated coherent V2 strategic vision. 15 Sections: Executive Summary / V1→V2 Pivot / Two-Market Positioning (mit operational decision rule) / EU AI Act Compliance Reality (AILD-correction + Art. 12 verbatim + GDPR Path B/A) / Three-Layer Trust Architecture (Phase-2-hardened) / Risk Matrix v1 / Competitive Landscape (Kuzu archived, ArcadeDB fallback, Lyrie ATP integration) / Demo Programme (7 demos, Demo 4 deferred, Demo 6+7 added) / GTM + Business Model (EU-regulated Q0 not Q4) / Welle Decomposition (re-baselined 14-20 sessions) / Counsel Engagement Plan / Open Strategic Questions / Atlas crates references.
-- **`.handoff/decisions.md`** (~400 Zeilen, 22 entries) — explicit ACCEPT/MODIFY/DEFER/REJECT decisions per Iteration-Framework §3. Categorised by domain: COMPLIANCE-1..4, COUNSEL-1..7+MASTER, ARCH-1..2, SEC-1..5, DB-1..3, BIZ-1..6, PRODUCT-1..2, RISK-1.
+- **`.handoff/v2-master-vision-v1.md`** (~615 Zeilen) — single consolidated coherent V2 strategic vision. 15 Sections: Executive Summary / V1→V2 Pivot / Two-Market Positioning (mit operational decision rule) / EU AI Act Compliance Reality (AILD-correction + Art. 12 verbatim + GDPR Path B/A) / Three-Layer Trust Architecture (Phase-2-hardened) / Risk Matrix v1 / Competitive Landscape (Kuzu archived, ArcadeDB fallback, Lyrie ATP integration) / Demo Programme (7 demos, Demo 4 deferred, Demo 6+7 added) / GTM + Business Model (EU-regulated Q0 not Q4) / Welle Decomposition (re-baselined 14-20 sessions) / Counsel Engagement Plan / Open Strategic Questions / Atlas crates references.
+- **`.handoff/decisions.md`** (~284 Zeilen, 22 entries) — explicit ACCEPT/MODIFY/DEFER/REJECT decisions per Iteration-Framework §3. Categorised by domain: COMPLIANCE-1..4, COUNSEL-1..7+MASTER, ARCH-1..2, SEC-1..5, DB-1..3, BIZ-1..6, PRODUCT-1..2, RISK-1.
 
 **Top-12 Phase-3 decisions (for fresh-context agent quick-scan):**
 
@@ -198,7 +209,50 @@ Cleanup these worktrees post-Phase-2 (or now if disk space matters): `git worktr
 
 ---
 
-## 0d. Phase 4 Plan — Master-Plan + Working-Methodology landing on master
+## 0d. Phase 4 SHIPPED — 2026-05-12 (this session, after Phase 1+2+3)
+
+**Phase 4 of the V2 strategic iteration ist abgeschlossen.** Master Vision v1 + decisions.md wurden zu zwei master-resident production-grade Docs destilliert. Plus die Phase-3-outputs (Master Vision + decisions.md) wurden für master-reference-ability mit-gemerged. Diese Phase ist die EINZIGE der 4 Phasen die master tatsächlich ändert — Phasen 1-3 leben permanent als draft-PR-archives.
+
+**Integration PR:** https://github.com/ThePyth0nKid/atlas/pull/60 (gemerged auf master)
+
+**Die 4 master-resident outputs (alle nach Phase-4-merge auf master):**
+
+| # | File | Lines | Role |
+|---|------|-------|------|
+| 1 | `docs/V2-MASTER-PLAN.md` | ~300 | **PRIMARY V2 strategic plan.** Distilled Master Vision mit Welle-Decomposition tied to concrete PR-Wellen. Sections: Vision · Two-Market Positioning · Three-Layer Trust Architecture · Top-5 V2-α Blocking Risks · Counsel Engagement · Welle Decomposition (V2-α/β/γ/δ scope+success criteria+expected PR count) · Demo Programme · Competitive Position · GTM+Business · Success Criteria for V2 · Reference Pointers |
+| 2 | `docs/WORKING-METHODOLOGY.md` | ~200 | **Reusable 4-phase iteration pattern.** Captures the methodology Atlas-team applied here for future Großthemen (post-quantum migration, V3 architecture). Sections: Why this exists · Phase 1-4 detailed patterns · Welle-Decomposition pattern · Decision Log Discipline · Versioning + Anti-Patterns · When to Skip |
+| 3 | `.handoff/v2-master-vision-v1.md` | ~615 | **Phase-3 output, mirrored to master for reference-ability.** Full V2 vision with all Phase-2-critique provenance + factual corrections (AILD withdrawn, Art. 12 verbatim, GDPR Path B). Read this when you need the full rationale behind anything in V2-MASTER-PLAN.md. |
+| 4 | `.handoff/decisions.md` | ~284 | **Phase-3 output, mirrored to master for reference-ability.** 22 explicit ACCEPT/MODIFY/DEFER entries with reversibility tags + review-after triggers. Every Phase-2 CRITICAL + HIGH finding addressed. |
+
+**Total Phase-4 content:** ~1399 lines across 4 files. ~500 lines net-new (`V2-MASTER-PLAN.md` + `WORKING-METHODOLOGY.md`); ~899 lines mirrored from Phase-3 work-product PR #62.
+
+**Headline Phase-4 outputs (one bullet each):**
+- **`docs/V2-MASTER-PLAN.md`** — V2 Welle-Decomposition concretised: V2-α 5-8 sessions (projector + FalkorDB + DID schema + content-hash separation + projector-state-hash gate + ProjectorRunAttestation event + ArcadeDB spike + counsel gate), V2-β 4-5 sessions (Mem0g + 6 Read-API endpoints + 5 MCP V2 tools + Explorer UI + secure-deletion + parallel-projection plan), V2-γ 3-4 sessions (Agent Passports + revocation + federation enrolment + Hermes-skill v1), V2-δ 2-3 sessions (Cedar policy + Graphiti + post-quantum hybrid). **Total V2 = 14-20 sessions** plus 6-8 weeks counsel parallel-track.
+- **`docs/WORKING-METHODOLOGY.md`** — 4-phase pattern (Foundation Docs → Multi-Angle Critique → Synthesis → Plan Documentation) with anti-pattern table (8 anti-patterns flagged: skip-Phase-2, auto-merge-draft-PRs, mega-doc, no-reversibility-tagging, critique-says-looks-good, plan-equals-vision, no-counsel-track, fundraising-numbers-TBD). When-to-skip rules. Reusable for any future Großthema where reversibility is LOW.
+
+**Phase 4 convergence criterion (per Framework §4 / per `docs/WORKING-METHODOLOGY.md`):** ✓ Both docs reviewed by parallel code-reviewer + security-reviewer agents (claim-drift check across Master Vision ↔ Master Plan ↔ Decisions). ✓ CRITICAL/HIGH findings fixed in-commit. ✓ Single coherent SSH-signed commit. ✓ `CHANGELOG.md [Unreleased]` updated with Phase 4 entry. ✓ PR #60 expanded to contain all Phase-4 outputs.
+
+**What ships on master via PR #60 merge:**
+- All 4 files above (V2-MASTER-PLAN, WORKING-METHODOLOGY, master-vision-v1, decisions.md)
+- Updated `.handoff/v2-session-handoff.md` (this file) with Phase 1+2+3+4 SHIPPED state + V2-α-Welle-1 pre-flight checklist
+- Updated `CHANGELOG.md [Unreleased]` with Phase-4 narrative entry
+
+**Master HEAD after Phase 4 merge:** new commit on top of `5f19348` (V2 strategy trilogy). Phases 1-3 work-product PRs (#59 / #61 / #62) stay permanently draft as audit-trail archives.
+
+**What's next (operationally):**
+- **Engineering track:** V2-α Welle 1 scoping (Atlas Projector skeleton, canonicalisation byte-pin spec, FalkorDB integration spike, ArcadeDB comparative spike). Per `docs/V2-MASTER-PLAN.md` §6.
+- **Counsel track (parallel, Nelson-led):** select 1 lead firm from shortlist + sign 6-8-week structured engagement + scope per `.handoff/v2-master-vision-v1.md` §11.
+- **Business track (parallel, Nelson-led):** TAM/SAM/SOM bottom-up math published + first-10-customers named pipeline assembled. Pre-fundraising blocking per `DECISION-BIZ-3` + `DECISION-BIZ-4`.
+
+---
+
+## 0d-DEPRECATED. Phase 4 Plan — historical reference (kept for audit-trail; see §0d SHIPPED above)
+
+⚠️ Original Phase-4 Plan section preserved below. The plan was executed successfully in the same session that wrote this note. Outputs live in `docs/V2-MASTER-PLAN.md` + `docs/WORKING-METHODOLOGY.md` per §0d SHIPPED above. Cross-doc consistency verified by parallel code-reviewer + security-reviewer agents.
+
+**Original Phase 4 Plan content follows.**
+
+### Phase 4 Plan — Master-Plan + Working-Methodology landing on master
 
 **Goal:** Master Vision v1 (~800 lines, on PR #62 draft-branch) wird zu zwei production-ready docs destilliert die **auf master landen via standard SSH-signed PR** (das ist die einzige der 4 Phasen die wirklich Master ändert).
 
