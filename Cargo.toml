@@ -17,6 +17,14 @@ members = [
     # `witness_signing_input` helper. Atlas-trust-core does NOT depend
     # on atlas-witness — clean DAG, no cycle.
     "crates/atlas-witness",
+    # V2-α Welle 3: Layer-2 graph projection canonicalisation crate.
+    # Depends on atlas-trust-core ONLY for `agent_did::validate_agent_did`
+    # (cross-validation of `author_did` stamping on graph nodes/edges).
+    # atlas-trust-core does NOT depend on atlas-projector — clean DAG,
+    # no cycle. Verifier-side ProjectorRunAttestation parsing (Welle 4)
+    # will live in atlas-trust-core; the projector crate produces the
+    # graph-state-hash that the attestation event payload carries.
+    "crates/atlas-projector",
 ]
 
 [workspace.package]
