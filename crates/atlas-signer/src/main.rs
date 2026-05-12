@@ -913,7 +913,13 @@ fn run_sign(mut args: SignArgs, signer: Option<&dyn WorkspaceSigner>) -> ExitCod
         args.parents.split(',').map(|s| s.trim().to_string()).collect()
     };
 
-    let signing_input = match build_signing_input(&workspace, &event_id, &ts, &kid, &parents, &payload) {
+    // V2-α Welle 1: atlas-signer V1 CLI surface does not yet wire up an
+    // `--author-did` flag (would be a separate V2-α welle to add). Pass
+    // None so V1 issuer-side behaviour is preserved exactly. V2-α
+    // signing with author_did is exercised via the test path
+    // (crates/atlas-trust-core/tests/agent_did_integration.rs) until
+    // a follow-up welle adds the CLI knob.
+    let signing_input = match build_signing_input(&workspace, &event_id, &ts, &kid, &parents, &payload, None) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("signing-input build failed: {e}");
@@ -966,6 +972,7 @@ fn run_sign(mut args: SignArgs, signer: Option<&dyn WorkspaceSigner>) -> ExitCod
             sig: b64url_no_pad_encode(&sig_bytes),
         },
         ts,
+        author_did: None,
     };
 
     match serde_json::to_string_pretty(&event) {

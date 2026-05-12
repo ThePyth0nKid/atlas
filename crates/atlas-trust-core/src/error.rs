@@ -137,6 +137,18 @@ pub enum TrustError {
         msg: String,
     },
 
+    /// V2-α Welle 1: agent-DID in `AtlasEvent.author_did` did not match
+    /// the `did:atlas:<64-lowercase-hex>` format. Verifier-side reject.
+    /// Distinct variant — auditor tooling can switch on
+    /// `AgentDidFormatInvalid` rather than parse the human-readable text.
+    #[error("invalid agent-DID '{did}': {reason}")]
+    AgentDidFormatInvalid {
+        /// the offending DID string as it appeared on the wire
+        did: String,
+        /// structured reason naming the specific format violation
+        reason: String,
+    },
+
     /// Generic deserialization error.
     #[error("deserialization error: {0}")]
     Deserialize(String),

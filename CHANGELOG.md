@@ -17,7 +17,26 @@ The v1.0 public-API surface contract is documented in
 
 ## [Unreleased]
 
-_No code changes on this line yet. Next release will be v1.1.0 (SemVer-minor) or v1.0.2 (SemVer-patch) depending on scope. Public-API contract per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md). The strategic documentation landings below do not touch the v1.0 public-API surface — they are master-resident planning artefacts._
+_V2-α work in flight on this line. The next release tag will be `v2.0.0-alpha.1` (major-bump pre-release) at the close-out of the V2-α welle bundle, not a v1.x continuation. V2-α-Additive surface items are listed in [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10. The strategic documentation landings below do not touch the v1.0 public-API surface._
+
+### Added — V2-α Welle 1 (Agent-DID Schema Foundation, 2026-05-12)
+
+- **`crates/atlas-trust-core/src/agent_did.rs`** (new module) — W3C-DID parser, validator, and presentation-layer helpers for `did:atlas:<lowercase-hex-32-bytes>` agent identities. Public surface: `AGENT_DID_PREFIX`, `agent_did_for`, `parse_agent_did`, `validate_agent_did`. 13 unit tests covering positive + negative format-validation cases, parse roundtrip, structured-error reasons. Re-exported at crate root.
+- **`AtlasEvent.author_did: Option<String>`** field (`crates/atlas-trust-core/src/trace_format.rs`) — optional agent-identity binding on every signed event. When present, canonically bound into the signing-input alongside `kid` (Phase 2 Security H-1), providing cross-agent-replay defence in addition to V1's cross-workspace-replay defence. When absent, events remain V1-shaped and byte-identical to pre-Welle-1 output.
+- **`TrustError::AgentDidFormatInvalid { did, reason }`** new variant — structured reject path for malformed `author_did` values. Verifier surfaces this before signature-check so auditor tooling sees the precise failure mode. Additive under `#[non_exhaustive]` per `SEMVER-AUDIT-V1.0.md` §8.
+- **`cose::tests::signing_input_byte_determinism_pin_with_author_did`** — new V2-α byte-determinism CI pin. Locks exact CBOR bytes for fixture event with `author_did = Some(...)`. Map header is `a8` (8 pairs); `author_did` entry sorts LAST per RFC 8949 §4.2.1 (longest encoded-key length, 11 bytes). The V1 pin `cose::tests::signing_input_byte_determinism_pin` is preserved byte-identical — V1-shaped events produce identical CBOR pre- and post-Welle-1.
+- **`crates/atlas-trust-core/tests/agent_did_integration.rs`** (new integration test) — 4 end-to-end test cases: (1) sign+verify with `author_did = Some(...)`, (2) V1 backward-compat (no `author_did`), (3) malformed DID rejected at verify-time with `AgentDidFormatInvalid`, (4) cross-agent-replay defence (tampered well-formed DID fails signature check).
+
+### Changed — V2-α Welle 1
+
+- **`cose::build_signing_input` signature** — added trailing parameter `author_did: Option<&str>`. Callers passing `None` produce byte-identical CBOR to V1 (V1 byte-determinism pin holds unchanged). Source-break for direct callers; all 15 in-tree callers updated (atlas-signer CLI, atlas-signer demo, hashchain inner verify, verify.rs main loop, 6 integration tests).
+- **`verify_trace` pre-signature-check hardening** — when `event.author_did` is `Some(_)`, format-validates against `did:atlas:<64-lowercase-hex>` shape and rejects with `AgentDidFormatInvalid` before downstream signature/hash checks. V1 events without `author_did` follow the unchanged verifier path.
+
+### Notes — V2-α Welle 1
+
+- **Workspace version unchanged at `1.0.1`.** A major-bump release (`v2.0.0-alpha.1` candidate) is deferred to the close-out of the V2-α welle bundle per [`.handoff/v2-alpha-welle-1-plan.md`](.handoff/v2-alpha-welle-1-plan.md) §"Decisions". Welle 1 lands on master; the version tag waits for Projector + FalkorDB + content-hash separation (if counsel-approved) + Agent-DID-end-to-end on atlas-signer CLI to ship as a coherent v2.0.0-alpha.1.
+- **Wire-compat break for V1.0 verifiers reading V2-α events with `author_did = Some(...)`** is by design and documented in `docs/SEMVER-AUDIT-V1.0.md` §10. V1.0 verifiers deserialize via `#[serde(deny_unknown_fields)]` and will surface `unknown_field("author_did")`. V1-shaped events (no `author_did`) remain forward-compatible across both verifier generations.
+- **Trust invariant preserved:** `cose::tests::signing_input_byte_determinism_pin` retains its V1 pinned hex byte-identically. All 146 atlas-trust-core unit tests + 4 new integration tests + the full workspace test suite pass green. Zero V1 regression.
 
 ### Documentation — V2 Strategic Planning (2026-05-12)
 

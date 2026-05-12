@@ -45,6 +45,7 @@ pub fn check_event_hashes(workspace_id: &str, events: &[AtlasEvent]) -> TrustRes
             &ev.signature.kid,
             &ev.parent_hashes,
             &ev.payload,
+            ev.author_did.as_deref(),
         )?;
         let computed = compute_event_hash(&signing_input);
         if !crate::ct::ct_eq_str(&computed, &ev.event_hash) {
@@ -249,6 +250,7 @@ mod tests {
             "spiffe://atlas/test",
             &parents,
             &payload,
+            None,
         )
         .unwrap();
         let event_hash = compute_event_hash(&signing_input);
@@ -263,6 +265,7 @@ mod tests {
                 sig: "00".to_string(),
             },
             ts: "2026-04-27T10:00:00Z".to_string(),
+            author_did: None,
         }
     }
 

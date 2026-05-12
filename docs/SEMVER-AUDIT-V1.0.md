@@ -327,3 +327,61 @@ Reviewer checklist for surface-touching PRs:
 **Audit author:** V1.19 Welle 12 implementer.
 **Audit reviewer:** parallel `security-reviewer` agent (Welle 12 review pass).
 **Effective date:** finalised at v1.0.0 tag (V1.19 Welle 13).
+
+---
+
+## 10. V2-α Additions (additive on master, version-bump deferred)
+
+> **Status:** added 2026-05-12 by V2-α Welle 1 ship. Workspace version unchanged (still `1.0.1`); a major-bump release (`v2.0.0-alpha.1` candidate) is deferred to the end of the V2-α welle bundle per `.handoff/v2-alpha-welle-1-plan.md` §"Decisions".
+>
+> **Wire-compat policy:** V2-α additions intentionally break V1.0 verifier deserialization when `author_did` is present on the wire. `AtlasEvent` retains `#[serde(deny_unknown_fields)]`; a V1.0 verifier reading a V2-α event with `author_did = Some(...)` will reject with `unknown_field("author_did")`. This is by design — V2 = major bump. Events without `author_did` (V1-shaped) remain forward-compatible across both verifier generations.
+>
+> **Trust-property invariant preserved:** the V1 byte-determinism CI pin in `cose::tests::signing_input_byte_determinism_pin` is byte-identical pre- and post-Welle-1. When `author_did = None`, the CBOR signing-input is exactly what V1 produced.
+
+### 10.1 New `pub mod agent_did` (`crates/atlas-trust-core/src/agent_did.rs`)
+
+| Item | Tag | Notes |
+|---|---|---|
+| `pub const AGENT_DID_PREFIX: &str = "did:atlas:"` | **V2-α-Additive** | DID-method prefix. SemVer-major to change (would invalidate every Atlas agent DID on the wire). |
+| `pub fn agent_did_for(pubkey_hash: &str) -> String` | **V2-α-Additive** | Presentation-layer helper. SemVer-major to change return shape; SemVer-minor to add parameters with defaults (Rust doesn't support default args, so realistically also major). |
+| `pub fn parse_agent_did(did: &str) -> Option<&str>` | **V2-α-Additive** | Strict parser. Returning `Some(...)` for a previously-rejected input is SemVer-major (loosens trust contract); returning `None` for previously-accepted input is also SemVer-major (rejects existing data). |
+| `pub fn validate_agent_did(did: &str) -> TrustResult<()>` | **V2-α-Additive** | Verifier-side check. Same SemVer treatment as `parse_agent_did`. |
+
+### 10.2 `TrustError` new variant (`crates/atlas-trust-core/src/error.rs`)
+
+| Variant | Tag | Notes |
+|---|---|---|
+| `TrustError::AgentDidFormatInvalid { did: String, reason: String }` | **V2-α-Additive (SemVer-minor under `#[non_exhaustive]`)** | New failure mode. Adding variants to `#[non_exhaustive]` enums is SemVer-minor per §8 conventions. Auditor tooling that switches on `TrustError` discriminant continues to match exhaustively because of `#[non_exhaustive]`. |
+
+### 10.3 `AtlasEvent` new field (`crates/atlas-trust-core/src/trace_format.rs`)
+
+| Field | Tag | Notes |
+|---|---|---|
+| `pub author_did: Option<String>` | **V2-α-Additive (WIRE-BREAK for V1.0 readers)** | New optional field with `#[serde(default, skip_serializing_if = "Option::is_none")]`. Serialisation-side: events without `author_did` produce byte-identical JSON to V1. Deserialisation-side: V1.0 verifiers see `author_did` as `unknown_field` due to `deny_unknown_fields` and reject; V2-α verifiers accept. The struct's overall SemVer treatment moves from **Locked** (V1 baseline) to **V2-α-Additive with documented wire-break** until the version bump lands. |
+
+### 10.4 `build_signing_input` signature change (`crates/atlas-trust-core/src/cose.rs`)
+
+| Item | Tag | Notes |
+|---|---|---|
+| `pub fn build_signing_input(workspace_id, event_id, ts, kid, parent_hashes, payload_json, author_did: Option<&str>) -> TrustResult<Vec<u8>>` | **V2-α-Additive (SOURCE-BREAK for direct callers; WIRE-PRESERVING when `None`)** | New trailing parameter `author_did: Option<&str>`. Callers passing `None` get byte-identical CBOR output to V1 (V1 byte-determinism pin holds). Callers passing `Some(...)` get a longer CBOR map with the `"author_did"` key appended in RFC 8949 §4.2.1 order (last, due to longest encoded-key length). Direct downstream consumers of `build_signing_input` (atlas-signer, future Rust SDKs, custom verifiers) must update their callsites to pass `None` or a DID. Wire-format consumers (anything reading or writing events.jsonl) see no change unless they explicitly use the new field. |
+
+### 10.5 Verifier behaviour change (`crates/atlas-trust-core/src/verify.rs`)
+
+| Item | Tag | Notes |
+|---|---|---|
+| Pre-signature-check validation of `event.author_did` | **V2-α-Additive (NEW REJECT PATH)** | When `event.author_did` is `Some(_)`, the verifier now calls `validate_agent_did` before signing-input construction. Malformed DIDs produce a structured `AgentDidFormatInvalid` error rather than a downstream signature-mismatch. Events without `author_did` follow the unchanged V1 verifier path. |
+
+### 10.6 V2-α Wire-Format Invariants (added 2026-05-12)
+
+- **Cross-agent-replay defence (Phase 2 Security H-1):** when `author_did` is present, it is canonically bound into the signing-input alongside `kid`. An event signed by agent A in workspace X cannot be replayed as if signed by agent B in workspace X without breaking the signature.
+- **V1 byte-determinism preservation:** `cose::tests::signing_input_byte_determinism_pin` retains its V1 pinned hex unchanged. V1-shaped events (no `author_did`) produce byte-identical CBOR pre- and post-Welle-1.
+- **V2-α byte-determinism pin:** `cose::tests::signing_input_byte_determinism_pin_with_author_did` locks the exact CBOR bytes for a fixture event with `author_did = Some(...)`. Map header is `a8` (8 pairs); the new `author_did` entry sorts last per RFC 8949 §4.2.1 (encoded-key-length 11 = longest).
+- **Sigstore Rekor binding:** `author_did` is part of the signed event body, so it is automatically part of the Rekor inclusion proof. No additional anchoring work needed at the V2-α layer.
+
+### 10.7 What `v2.0.0-alpha.1` will bring (forecast, not committed)
+
+Pending the close-out of the V2-α welle bundle (Welle 1 = this surface; future Wellen = Projector + FalkorDB + ArcadeDB spike + content-hash separation if counsel-approved):
+- Workspace version bump `1.0.1 → 2.0.0-alpha.1`
+- `SCHEMA_VERSION` may move from `atlas-trace-v1` → `atlas-trace-v2-alpha` (decision deferred)
+- All V1 **Locked** items reclassified for v2 contract review
+- This audit document gets a v2 successor doc; `SEMVER-AUDIT-V1.0.md` stays as historical record of the v1 contract.
