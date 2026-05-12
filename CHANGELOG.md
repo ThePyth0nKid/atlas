@@ -17,7 +17,17 @@ The v1.0 public-API surface contract is documented in
 
 ## [Unreleased]
 
-_No unreleased changes. Next release on this line will be v1.1.0 (SemVer-minor) or v1.0.2 (SemVer-patch) depending on scope. Public-API contract per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md)._
+_No code changes on this line yet. Next release will be v1.1.0 (SemVer-minor) or v1.0.2 (SemVer-patch) depending on scope. Public-API contract per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md). The strategic documentation landings below do not touch the v1.0 public-API surface — they are master-resident planning artefacts._
+
+### Documentation — V2 Strategic Planning (2026-05-12)
+
+- **`docs/V2-MASTER-PLAN.md`** (new, ~300 lines) — master-resident strategic plan for Atlas V2. Distilled from Master Vision v1 with Welle decomposition tied to concrete PR-Wellen (V2-α / V2-β / V2-γ / V2-δ, total 14–20 sessions plus 6–8 weeks counsel-engagement in parallel with V2-α), top-5 V2-α blocking risks, 7-demo programme with hero-CTA-inversion (Demo 2 Continuous Regulator Witness above-the-fold primary), and explicit success criteria. Companion to `docs/WORKING-METHODOLOGY.md`.
+- **`docs/WORKING-METHODOLOGY.md`** (new, ~200 lines) — reusable 4-phase iteration pattern (Foundation Docs → Multi-Angle Critique → Synthesis → Plan Documentation) with 8-entry anti-pattern table and explicit "when to skip" rules. Use for future Großthemen (e.g. post-quantum migration, V3 architecture). Independent versioning from per-Großthema Master Plans.
+- **`.handoff/v2-master-vision-v1.md`** (new on master, ~615 lines) — Phase-3 synthesis output mirrored from PR #62 draft-branch for master-reference-ability. 15-section consolidated V2 vision including factual corrections from Phase-2 critique (EU AI Liability Directive WITHDRAWN Feb 2025 → fallback regime is Product Liability Directive 2024/2853; "independently verifiable" Art. 12 phrasing replaced with verbatim text; Art. 18 / Art. 19 conflation fixed). Full rationale for everything in V2-MASTER-PLAN.md.
+- **`.handoff/decisions.md`** (new on master, ~284 lines) — Phase-3 decision log with 22 explicit ACCEPT/MODIFY/DEFER entries. Each carries crit-source attribution, reversibility tag (HIGH/MEDIUM/LOW), and review-after trigger. Cross-referenced from V2-MASTER-PLAN + Master Vision via stable `DECISION-<DOMAIN>-<N>` IDs.
+- **`.handoff/v2-session-handoff.md`** (updated, +400 lines) — Phase 1+2+3+4 ALL SHIPPED state, V2-α Welle 1 pre-flight checklist, branch-and-PR diagram showing master-resident outputs and permanently-draft work-product archives (#59/#61/#62).
+
+**No v1.0 public-API surface touched.** Per SemVer contract committed at v1.0.0, these are pure documentation additions. Reproducibility, signed-tag chain, npm `@atlas-trust/verify-wasm@1.0.1` byte-identical state — all unchanged.
 
 ## [1.0.1] — 2026-05-12
 
