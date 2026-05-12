@@ -149,6 +149,19 @@ pub enum TrustError {
         reason: String,
     },
 
+    /// V2-α Welle 4: `ProjectorRunAttestation` payload failed strict
+    /// format validation (wrong payload type, missing field, malformed
+    /// hex hash, schema-version mismatch, etc.). Verifier-side reject.
+    /// Distinct variant — auditor tooling can switch on
+    /// `ProjectorAttestationInvalid` rather than parse the
+    /// human-readable text. See `projector_attestation` module for
+    /// the specific format requirements enforced.
+    #[error("invalid projector-attestation: {reason}")]
+    ProjectorAttestationInvalid {
+        /// structured reason naming the specific format violation
+        reason: String,
+    },
+
     /// Generic deserialization error.
     #[error("deserialization error: {0}")]
     Deserialize(String),

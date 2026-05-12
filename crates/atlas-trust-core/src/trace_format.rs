@@ -414,4 +414,28 @@ pub enum AtlasPayload {
         /// Position in the log
         log_index: u64,
     },
+    /// V2-α Welle 4: projector-run attestation. Signed Atlas event
+    /// asserting that a specific projector binary, having consumed
+    /// events up to `head_event_hash`, produced a graph state whose
+    /// canonical hash is `graph_state_hash`. See
+    /// `projector_attestation` module for full design rationale,
+    /// format-validation rules, and counsel/regulator-audit
+    /// implications. Format-validation happens in
+    /// `projector_attestation::validate_projector_run_attestation`;
+    /// the typed variant here exists for downstream typed inspection.
+    ProjectorRunAttestation {
+        /// Issuer-supplied identifier of the projector binary
+        /// (e.g. `"atlas-projector/0.1.0"`).
+        projector_version: String,
+        /// Envelope schema version. MUST equal
+        /// `projector_attestation::PROJECTOR_RUN_ATTESTATION_SCHEMA_VERSION`.
+        projector_schema_version: String,
+        /// blake3 hex of the last Atlas event consumed (64 lowercase-hex).
+        head_event_hash: String,
+        /// blake3 hex of `atlas_projector::graph_state_hash(state)`
+        /// (64 lowercase-hex).
+        graph_state_hash: String,
+        /// Number of Atlas events the projector consumed. Non-zero.
+        projected_event_count: u64,
+    },
 }

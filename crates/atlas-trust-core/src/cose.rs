@@ -511,4 +511,108 @@ mod tests {
             "V1 entries must be byte-prefix-identical to V2-α entries (only map-header byte and trailing entry differ)"
         );
     }
+
+    /// V2-α Welle 4 byte-determinism pin: signing-input for an event
+    /// whose payload is a `ProjectorRunAttestation`. Locks the exact
+    /// canonical CBOR bytes for this specific payload shape via blake3
+    /// of the canonical signing input. The 5 attestation fields + the
+    /// 7 envelope fields together produce a deterministic byte stream;
+    /// any drift in either layer (signing-input shape, JSON-to-CBOR
+    /// canonicalisation, attestation payload field order) trips this
+    /// test BEFORE the change can reach a customer's WASM verifier.
+    ///
+    /// Co-equal CI gate with the V1 pin, the Welle-1 author_did pin,
+    /// V1.7's anchor::chain_canonical_body pin, V1.9's pubkey_bundle pin,
+    /// and Welle 3's graph_state_hash pin.
+    #[test]
+    fn signing_input_byte_determinism_pin_with_projector_attestation() {
+        // Fixture: ProjectorRunAttestation payload with all 5 fields
+        // populated with deterministic synthetic values.
+        let payload = serde_json::json!({
+            "type": "projector_run_attestation",
+            "projector_version": "atlas-projector/0.1.0",
+            "projector_schema_version": "atlas-projector-run-attestation/v1-alpha",
+            "head_event_hash": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+            "graph_state_hash": "8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4",
+            "projected_event_count": 5_u64,
+        });
+
+        let actual = build_signing_input(
+            "ws-test",
+            "01H001",
+            "2026-04-27T10:00:00Z",
+            "spiffe://atlas/test",
+            &[],
+            &payload,
+            None,
+        )
+        .unwrap();
+        let actual_hash = blake3::hash(&actual);
+        let actual_hash_hex = hex::encode(actual_hash.as_bytes());
+
+        // BEGIN PINNED — DO NOT EDIT WITHOUT INTENT.
+        // blake3 of the canonical CBOR signing input for the
+        // ProjectorRunAttestation fixture above. Captured 2026-05-12
+        // from V2-α Welle 4 implementation run. **Operator
+        // reproducibility:** an initial guessed value failed the
+        // assertion below; the failure-output value was then captured
+        // and committed as the pin, so the pinned value is verifiably
+        // the canonicaliser's actual output (not a pre-committed
+        // guess). To independently reproduce: check out this commit,
+        // run `cargo test -p atlas-trust-core
+        // signing_input_byte_determinism_pin_with_projector_attestation`
+        // — the test must pass green. If the canonical form changes
+        // intentionally, regenerate via the same command, capture
+        // the new hash from the failure-diff, update this pin AND
+        // bump atlas-trust-core's crate version (cascade catches
+        // downstream consumers).
+        let expected_hash_hex =
+            "8fbe734511c6347a5fe18476d7fb32a6b6650652e9319dcb8f91d4ba70865557";
+        // END PINNED.
+
+        // Note: the byte-pin is verified dynamically below by
+        // recomputing via the same canonicalisation pipeline. The
+        // static blake3 hex captures the value post-first-run; if it
+        // ever fails, regenerate and inspect what changed.
+        let reference = build_signing_input(
+            "ws-test",
+            "01H001",
+            "2026-04-27T10:00:00Z",
+            "spiffe://atlas/test",
+            &[],
+            &payload,
+            None,
+        )
+        .unwrap();
+        let reference_hash_hex = hex::encode(blake3::hash(&reference).as_bytes());
+        assert_eq!(
+            actual_hash_hex, reference_hash_hex,
+            "signing-input non-deterministic across calls for ProjectorRunAttestation payload"
+        );
+
+        // Static pin assertion. If this fails, the canonical form
+        // of either build_signing_input OR the attestation payload
+        // shape has changed. Both are wire-breaks requiring crate-
+        // version bumps.
+        assert_eq!(
+            actual_hash_hex, expected_hash_hex,
+            "V2-α Welle 4 signing-input drift for ProjectorRunAttestation payload. \
+             If intentional, update the pinned hex AND bump atlas-trust-core's crate version."
+        );
+
+        // Sanity: the payload field names appear in the bytes (CBOR
+        // text-string encoding includes the key text directly).
+        let key_marker = b"projector_run_attestation";
+        assert!(
+            actual.windows(key_marker.len()).any(|w| w == key_marker),
+            "expected 'projector_run_attestation' marker to appear in canonical bytes"
+        );
+        let state_hash_marker = b"8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4";
+        assert!(
+            actual
+                .windows(state_hash_marker.len())
+                .any(|w| w == state_hash_marker),
+            "expected graph_state_hash literal to appear in canonical bytes"
+        );
+    }
 }

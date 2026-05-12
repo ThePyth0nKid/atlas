@@ -17,6 +17,7 @@ pub mod cose;
 pub mod ct;
 pub mod hashchain;
 pub mod per_tenant;
+pub mod projector_attestation;
 pub mod pubkey_bundle;
 pub mod trace_format;
 pub mod verify;
@@ -33,6 +34,10 @@ pub use pubkey_bundle::PubkeyBundle;
 pub use anchor::{chain_head_for, ChainHeadHex, ANCHOR_CHAIN_DOMAIN};
 pub use per_tenant::{parse_per_tenant_kid, per_tenant_kid_for, PER_TENANT_KID_PREFIX};
 pub use agent_did::{agent_did_for, parse_agent_did, validate_agent_did, AGENT_DID_PREFIX};
+pub use projector_attestation::{
+    parse_projector_run_attestation, validate_projector_run_attestation, ProjectorRunAttestation,
+    PROJECTOR_RUN_ATTESTATION_KIND, PROJECTOR_RUN_ATTESTATION_SCHEMA_VERSION,
+};
 pub use witness::{
     decode_chain_head, verify_witness_against_roster, verify_witnesses_against_roster,
     witness_signing_input, WitnessFailure, WitnessFailureReason, WitnessFailureWire,
