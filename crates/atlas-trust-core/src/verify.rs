@@ -336,6 +336,36 @@ pub fn verify_trace_with(
             }
         }
 
+        // V2-α Welle 4: when the event's payload `type` is
+        // `projector_run_attestation`, run strict format-validation
+        // on the attestation envelope. Failure surfaces structured
+        // `ProjectorAttestationInvalid` ahead of signature/hash
+        // checks. Same placement rationale as the agent_did check
+        // above: distinct trust-domain check; auditor tooling
+        // switches on the variant. Non-attestation payloads (V1
+        // node.create / node.update / etc.) are passed through
+        // unchanged — V1 backward-compat preserved.
+        if let Some(payload_type) = ev.payload.get("type").and_then(|v| v.as_str()) {
+            if payload_type == crate::projector_attestation::PROJECTOR_RUN_ATTESTATION_KIND {
+                match crate::projector_attestation::parse_projector_run_attestation(&ev.payload) {
+                    Ok(att) => {
+                        if let Err(e) =
+                            crate::projector_attestation::validate_projector_run_attestation(&att)
+                        {
+                            errors.push(format!("event {}: {}", ev.event_id, e));
+                            sig_failures += 1;
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        errors.push(format!("event {}: {}", ev.event_id, e));
+                        sig_failures += 1;
+                        continue;
+                    }
+                }
+            }
+        }
+
         let signing_input = match build_signing_input(
             &trace.workspace_id,
             &ev.event_id,

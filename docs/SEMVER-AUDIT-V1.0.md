@@ -393,6 +393,21 @@ Reviewer checklist for surface-touching PRs:
 | `pub type ProjectorResult<T> = Result<T, ProjectorError>` | **V2-α-Additive** | |
 | `canonical::tests::graph_state_hash_byte_determinism_pin` — pinned blake3 `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` (754 canonical bytes) | **CI gate** | Drift detection. Co-equal with V1's `cose::signing_input_byte_determinism_pin` and Welle 1's `signing_input_byte_determinism_pin_with_author_did`. |
 
+### 10.7b V2-α Welle 4 — `ProjectorRunAttestation` event-kind (2026-05-12)
+
+| Item | Tag | Notes |
+|---|---|---|
+| NEW `pub mod projector_attestation` in atlas-trust-core | **V2-α-Additive** | Verifier-side parser + format-validator for the new event-kind. No emission code (Welle 5 candidate). |
+| `pub const PROJECTOR_RUN_ATTESTATION_KIND: &str = "projector_run_attestation"` | **V2-α-Additive** | Payload `type` discriminator. SemVer-major to change — would invalidate every signed attestation event on the wire. |
+| `pub const PROJECTOR_RUN_ATTESTATION_SCHEMA_VERSION: &str = "atlas-projector-run-attestation/v1-alpha"` | **V2-α-Additive** | Envelope schema-version identifier. Bumped on schema-incompatible changes. Separate from `atlas-projector::PROJECTOR_SCHEMA_VERSION` (which versions the GraphState canonical form). |
+| `pub struct ProjectorRunAttestation { projector_version, projector_schema_version, head_event_hash, graph_state_hash, projected_event_count }` | **V2-α-Additive** | Typed envelope. Constructed via `parse_projector_run_attestation`. |
+| `pub fn parse_projector_run_attestation(payload: &serde_json::Value) -> TrustResult<ProjectorRunAttestation>` | **V2-α-Additive** | JSON-to-typed parser; strict-mode reject of unknown fields. |
+| `pub fn validate_projector_run_attestation(att: &ProjectorRunAttestation) -> TrustResult<()>` | **V2-α-Additive** | Strict format-validator. Enforces non-empty projector_version, schema-version match, 64-lowercase-hex hashes, non-zero event count. |
+| `AtlasPayload::ProjectorRunAttestation { ... }` new enum variant | **V2-α-Additive (additive under existing `#[serde(tag = "type")]` convention)** | Typed enum variant for downstream inspection. The underlying `AtlasEvent.payload` remains `serde_json::Value` for forward-compat. |
+| `TrustError::ProjectorAttestationInvalid { reason }` | **V2-α-Additive (SemVer-minor under `#[non_exhaustive]`)** | Structured reject path for malformed attestation payload. |
+| `verify_trace` pre-signature attestation format-validation | **V2-α-Additive (NEW REJECT PATH)** | When event's `payload.type` is `projector_run_attestation`, runs `parse_projector_run_attestation` + `validate_projector_run_attestation` before signature check. Malformed attestation surfaces structured `ProjectorAttestationInvalid` ahead of downstream errors. V1 payloads (`node.create` / `node.update` / etc.) pass through unchanged. |
+| `cose::tests::signing_input_byte_determinism_pin_with_projector_attestation` — pinned blake3 `8fbe734511c6347a5fe18476d7fb32a6b6650652e9319dcb8f91d4ba70865557` | **CI gate** | Drift detection for events with ProjectorRunAttestation payload. Co-equal with the 5 prior byte-determinism pins. |
+
 ### 10.7 What `v2.0.0-alpha.1` will bring (forecast, not committed)
 
 Pending the close-out of the V2-α welle bundle (Welle 1 = this surface; future Wellen = Projector + FalkorDB + ArcadeDB spike + content-hash separation if counsel-approved):
