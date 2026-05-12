@@ -1,349 +1,228 @@
-# Atlas — Verifiable Knowledge Graphs for AI Agents
+<!--
+  TODO: drop the 70s-style Atlas icon image (à la Canon-Projekt-Look) at `docs/assets/atlas-logo.png`,
+  then UNCOMMENT the <p>/<img> block below to render it above the title.
 
-> *"Knowledge graphs the agent can prove, not just claim."*
+<p align="center">
+  <img src="docs/assets/atlas-logo.png" alt="Atlas — Verifiable Knowledge Graphs for AI Agents" width="180" />
+</p>
+-->
 
-Atlas is a knowledge graph backend where every fact is signed (Ed25519 + COSE_Sign1),
-every edge is hash-chained, every state is anchored to Sigstore Rekor, and every
-agent-write is verified by an offline WASM verifier — running in the customer's
-browser, not on our server.
+<h1 align="center">Atlas</h1>
 
-## Why?
+<p align="center"><em>Verifiable Knowledge Graphs for AI Agents — knowledge the agent can prove, not just claim.</em></p>
 
-EU AI Act Article 12 (in force 2026-08-02) requires high-risk AI systems to
-maintain automatic event records that are *independently verifiable* by regulators.
+<p align="center">
+  <a href="https://www.npmjs.com/package/@atlas-trust/verify-wasm"><img alt="npm" src="https://img.shields.io/npm/v/@atlas-trust/verify-wasm.svg?style=flat-square&label=%40atlas-trust%2Fverify-wasm" /></a>
+  <a href="https://opensource.org/licenses/Apache-2.0"><img alt="License: Apache-2.0 (verifier)" src="https://img.shields.io/badge/verifier_license-Apache--2.0-blue?style=flat-square" /></a>
+  <a href="LICENSE-SUSTAINABLE-USE"><img alt="License: Sustainable Use (server)" src="https://img.shields.io/badge/server_license-Sustainable_Use-orange?style=flat-square" /></a>
+  <a href="https://slsa.dev/spec/v1.0/levels#build-l3"><img alt="SLSA Build L3" src="https://img.shields.io/badge/SLSA-Build_L3-2ea44f?style=flat-square" /></a>
+  <a href="docs/COMPLIANCE-MAPPING.md"><img alt="EU AI Act Article 12" src="https://img.shields.io/badge/EU_AI_Act-Art._12-005599?style=flat-square" /></a>
+</p>
 
-Atlas makes that **structurally true** — not a checkbox in a compliance dashboard.
+Atlas is a knowledge-graph backend where every fact is signed (Ed25519 + COSE_Sign1), every edge is hash-chained, every state is anchored to Sigstore Rekor, and every agent write is verified by an **offline WASM verifier** running in the customer's browser — not on our server.
 
-## Status
+---
 
-**V1.17 Welle A + Welle B shipped — Welle B = Tag-Signing Enforcement: every `v*` release tag in this repo MUST be cryptographically signed by an SSH key in `.github/allowed_signers` (in-repo trust root, canonical OpenSSH `allowed_signers` format). `tools/verify-tag-signatures.sh` runs `git verify-tag` against the trust root and exits non-zero on unsigned / untrusted-key / invalid-signature tags. The existing `wasm-publish.yml` (V1.14 Scope E) gains a first-step verification gate that fails the publish lane closed BEFORE any `npm publish` or GH-Release upload on any unsigned tag. Standalone `verify-tag-signatures.yml` re-asserts the invariant on every tag push, weekly cron (Mon 06:37 UTC), and PRs touching tag-signing surfaces. `tools/setup-tag-signing.sh init` (one-time) auto-picks the maintainer's SSH key matching an `.github/allowed_signers` entry and configures `gpg.format=ssh + user.signingkey + tag.gpgSign=true + gpg.ssh.allowedSignersFile`. Anti-drift harness `tools/test-tag-signatures.sh` with **13/13 green** covers trust-root validation, tag-existence, lightweight-tag rejection, annotated-unsigned rejection, no-tags-yet early exit, and the setup script's subcommand surface. Closes the V1.14 Scope E publish-lane authentication gap (F-5): before V1.17 Welle B, "tag pushed by an authorised maintainer" was a configuration assumption (GitHub Settings tag-protection rules); after, it is a cryptographic invariant verified by every publish run. SSH-based (not Sigstore/gitsign) for V1.17 because SSH keys are already in maintainers' GitHub accounts, git 2.34+ has first-class SSH-signing support without plugins, and the trust root is in-repo (auditable) — Sigstore/gitsign documented as additive V1.18 candidate. **Welle A (still shipped):** `verify-wasm-pin-check@v1` consumer-side auto-verify CI Action at `.github/actions/verify-wasm-pin-check/`: a pure-bash composite GitHub Action that re-asserts every CONSUMER-RUNBOOK §1 trust layer on every consumer CI install — Layer 1 (`package.json` exact-version pin — rejects caret/tilde/range/file/git/github/http/workspace/etc.), Layer 2 (lockfile integrity — every entry for `@atlas-trust/verify-wasm` carries `sha512`/`sha384`/`sha256` integrity, HTTPS-origin `resolved`, version matching the pin, across npm `lockfileVersion` 1+2+3 / pnpm v6+ / Bun `bun.lockb` binary + `bun.lock` text), Layer 3 (`npm audit signatures` round-trip → SLSA L3 OIDC provenance attestation via Sigstore Rekor + npm registry, with exponential-backoff retry 10s/30s/90s on transient registry/Sigstore outage and immediate-fail on cryptographic-rejection). Field-separator hardening (`\x1f` ASCII Unit Separator, octal `\037` for AWK portability) defends against bash IFS-whitespace collapse silently masking Layer 2 failures. String-aware JSONC tokenizer for `bun.lock` (regex-based JSONC strippers trip on `//` inside HTTPS URLs). Read-only against consumer files + npm attestation API; pure-bash composite action with no `dist/index.js` bundle (the irony of a supply-chain-hardening action being itself a supply-chain risk would defeat the point). 16 fixture-based unit tests + 4-job self-test workflow at `.github/workflows/verify-wasm-pin-check-self-test.yml` (fixture harness, action-fixture invocation matrix, action-negative-case matrix with outcome assertion, and `live-install-layer-3` with real `npm install --save-exact @atlas-trust/verify-wasm@latest` + live Sigstore round-trip on every push/PR + weekly cron Mon 06:17 UTC to catch live regressions). V1.16 CLOSED previously (Welle A strict CSP + SRI + Trusted Types on `apps/wasm-playground/`, Welle B `report-uri /csp-report` for blocked-violation surfacing, Welle C Cloudflare Workers + Static Assets host with executable receiver, security-header layering, and AE → R2 daily archive — see [docs/ARCHITECTURE.md V1.16 boundary](docs/ARCHITECTURE.md)). V1.15 CLOSED previously (Welle A const-time KID-equality invariant, Welle B dual-channel WASM distribution via GitHub Releases — see [OPERATOR-RUNBOOK §12](docs/OPERATOR-RUNBOOK.md), Welle C consumer-side reproducibility runbook — see [CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md)). V1.14 Scope I + Scope J + Scope E shipped — HSM-backed witness (witness scalar sealed inside PKCS#11 token) + auditor wire-surface (structured `witness_failures` in `VerifyOutcome` JSON) + WASM verifier on npm + browser playground.**
+## Why Atlas exists
 
-Trust-core crate + Rekor anchoring + per-tenant key derivation + HSM-backed signing + independent
-witness attestor (V1.5 mock-issuer, V1.6 live Sigstore Rekor v1, V1.7 anchor-chain + shard
-expansion, V1.8 per-tenant key separation, V1.9 strict-mode + master-seed positive opt-in,
-V1.10 in-HSM HKDF derivation, V1.11 wave-3 sealed-signer (per-workspace scalar never enters
-Atlas address space), V1.12 CI lane promotion + nightly Sigstore lane, V1.13 wave C-1 lenient
-witness + wave C-2 strict mode, V1.14 Scope I HSM-backed witness — witness Ed25519 scalar
-never enters atlas-witness address space, signing routes through `CKM_EDDSA` against a
-sealed `Sensitive=true, Extractable=false, Derive=false` keypair).
+**EU AI Act Article 12** (in force 2026-08-02) requires high-risk AI systems to maintain automatic event records that are *independently verifiable* by regulators.
 
-Current state:
+Most "AI logging" today is a dashboard. Atlas makes the verifiability **structural** — the auditor doesn't trust our server, our company, or our roadmap. They run the verifier themselves and check the signatures, anchors, and witness cosignatures against pinned trust roots.
 
-- 347 Rust tests green across the workspace (`--features hsm`): 121 trust-core unit
-  (incl. V1.14 Scope J `WitnessFailureReason` per-variant pinning + cross-batch dup
-  sanitisation pin) + 18 anchor-chain adversary + 13 golden trace + 11 per-tenant-keys
-  adversary + 6 Sigstore golden + 6 witness-strict-mode + 8 V1.14 Scope J
-  `witness_failures` integration + 5 V1.15 Welle A `const_time_kid_invariant`
-  source-level anti-drift (KID-equality audit + helper sanity pins) in
-  `atlas-trust-core`; 115 issuer/anchor/HSM in `atlas-signer`; 5 strict-mode +
-  3 V1.14 Scope J `--output json` in `atlas-verify-cli`; 29 unit + 1
-  byte-equivalence integration in `atlas-witness` including V1.14 Scope I
-  HSM-backed witness
-- Signing-input is deterministic CBOR per RFC 8949 §4.2.1
-  (length-first map sort, no floats, byte-pinned golden)
-- Pubkey-bundle hash is canonical-JSON, byte-pinned golden — silent
-  bundle-rotation drift trips the test before reaching production
-- Anchor verification: RFC 6962-style Merkle inclusion proofs +
-  Ed25519-signed checkpoints, validated against a pinned log pubkey.
-  Anchored objects: `bundle_hash` (defends bundle swap) and `dag_tip`
-  (defends tail truncation). Lenient by default,
-  `VerifyOptions::require_anchors` strict mode for high-assurance audit
-- Anchor-chain tip-rotation: consecutive `AnchorBatch`es are cross-linked
-  via `prev_anchor_head`, recomputed deterministically, and the chain
-  head is signable by an independent witness (V1.13)
-- Independent witness cosignature (V1.13): `atlas-witness` binary signs
-  the recomputed chain head with its own Ed25519 key in a separate
-  process from `atlas-signer` (trust-domain separation by process).
-  `ATLAS_WITNESS_DOMAIN` prefix prevents cross-domain replay,
-  `ATLAS_WITNESS_V1_ROSTER` is source-controlled (genesis-empty per the
-  V1.7 boundary rule). `--require-witness <N>` promotes wave-C-1's
-  lenient evidence row to a hard error when fewer than `N` distinct
-  roster-resolved witnesses verify
-- HSM-backed witness (V1.14 Scope I): `atlas-witness sign-chain-head --hsm`
-  routes signing through a PKCS#11 token's `CKM_EDDSA(Ed25519)` against
-  a sealed (`Sensitive=true, Extractable=false, Derive=false`) keypair —
-  the witness Ed25519 scalar never enters atlas-witness address space.
-  Trust-domain separation extends to the env-var trio
-  (`ATLAS_WITNESS_HSM_*` distinct from `ATLAS_HSM_*`) and label prefix
-  (`atlas-witness-key-v1:` distinct from `atlas-workspace-key-v1:`).
-  `atlas-witness extract-pubkey-hex --kid X` retrieves the rostering
-  hex per OPERATOR-RUNBOOK §11
-- Auditor wire-surface (V1.14 Scope J): `VerifyOutcome.witness_failures`
-  is a structured `Vec<WitnessFailureWire>` (additive,
-  `#[serde(default)]`) carrying `{ witness_kid, batch_index,
-  reason_code, message }`. `WitnessFailureReason` is a
-  `#[non_exhaustive]` kebab-case enum (`kid-not-in-roster`,
-  `duplicate-kid`, `cross-batch-duplicate-kid`,
-  `invalid-signature-format`, …). Auditor tooling switches on
-  `reason_code` instead of fragile wording match against the lenient
-  evidence row's `detail`. `atlas-verify-cli verify-trace --output json`
-  carries the field; the field is end-to-end exercised by the TS
-  smoke lane in `apps/atlas-mcp-server/scripts/smoke.ts` step 8
-- `workspace_id` bound into the signing-input + per-workspace key
-  derivation (HKDF-SHA256) — cross-workspace replay structurally
-  impossible AND no shared signing key across tenants
-- HSM-backed signing (V1.11 wave-3): per-workspace scalar lives only
-  inside the HSM token; `CKM_EDDSA(Ed25519)` signs without exposing
-  private bytes to the Atlas address space (`atlas-signer --features hsm`)
-- Constant-time hash AND KID equality (V1.15 Welle A extends the V1.5 hash
-  invariant to every wire-side KID compare reachable from the verifier
-  API), alg-downgrade rejection, RFC 3339 timestamp validation,
-  duplicate-event-hash detection, `deny_unknown_fields` on the wire format
-- Bank demo bundle verifies `✓ VALID` end-to-end through both the native
-  CLI and the in-browser WASM verifier, including
-  `✓ anchors — N anchor(s) verified against pinned log keys` and
-  `✓ witnesses — M presented / K verified` when witness sigs are attached
+| Trust property | How Atlas delivers it |
+|---|---|
+| **Cryptographic integrity** | Ed25519 + COSE_Sign1 signatures, hash-chained edges, byte-deterministic CBOR signing-input (RFC 8949 §4.2.1) |
+| **Independent verifiability** | Offline WASM verifier — auditor runs it in any browser, no network calls to us |
+| **Tamper-evident anchoring** | Every state anchored to Sigstore Rekor with RFC 6962 Merkle inclusion proofs, validated against pinned log pubkey |
+| **Witness cosignature** | Out-of-process independent witness (`atlas-witness`) signs chain heads with separate Ed25519 key — trust-domain separation by process |
+| **Hardware-backed signing** | PKCS#11/HSM seal for per-workspace and witness scalars (`CKM_EDDSA`, `Sensitive=true, Extractable=false, Derive=false`); private bytes never enter Atlas address space |
+| **Supply-chain provenance** | npm publishes with SLSA Build L3 OIDC provenance via Sigstore Rekor; consumers verify via `npm audit signatures` and exact-version lockfile pins |
+| **Tag-signing enforcement** | Every `v*` release tag must be SSH-signed by a key in the in-repo trust root `.github/allowed_signers`; publish lane fails closed on unsigned/untrusted tags |
 
-V1.6 ships live Sigstore submission. V1.7 adds anchor-chain tip-rotation + Sigstore shard
-roster expansion. V1.8/V1.9/V1.10/V1.11 ship per-tenant key separation and HSM-backed
-signing through to wave-3 (per-workspace scalar never enters Atlas address space). V1.12
-promotes the HSM and Sigstore CI lanes to `pull_request:` and adds a nightly live-Rekor
-sentry. V1.13 ships the independent witness cosignature attestor (wave C-1 lenient,
-wave C-2 strict-mode + commissioning ceremony). V1.14 Scope I closes the witness-side
-residual by sealing the witness Ed25519 scalar inside a PKCS#11 token (signing routes
-through `CKM_EDDSA`, scalar never enters atlas-witness address space). V1.14 Scope J
-replaces V1.13 wave-C-2's string-match diagnostic surface with a structured
-`witness_failures` JSON wire so auditor tooling can classify per-witness failures
-without keying on human-readable wording. V1.14 Scope E publishes the WASM verifier
-to npm as `@atlas-trust/verify-wasm` (browser + Node.js targets) and ships a
-zero-build-step browser playground at `apps/wasm-playground/` — the same Rust
-verifier core, packaged for in-browser auditor tooling without a server round-trip.
-V1.15 Welle A extends the V1.5 const-time-hash-equality invariant to every
-wire-side KID compare reachable from the verifier API: the V1.9 per-tenant-keys
-strict-mode check now routes through `crate::ct::ct_eq_str`, joining the V1.13
-wave-C-2 witness-roster compare. A new source-level anti-drift test
-(`tests/const_time_kid_invariant.rs`) audits both `verify.rs` and `witness.rs`
-for forbidden raw-`==` patterns on KID fields and fails the build at the next
-CI run if a future caller re-introduces one. V1.15 Welle B adds a backup
-distribution channel for the WASM verifier: every `v*` tag push uploads the
-byte-identical `npm pack` tarballs (web + node) plus a `tarball-sha256.txt`
-manifest as GitHub Release assets alongside the existing npm publish, so an
-auditor whose primary channel is unreachable can `gh release download`,
-`sha256sum --check`, and `npm install ./local.tgz` against the same SLSA L3
-provenance attestation. V1.15 Welle C closes the V1.15 distribution-resilience
-story on the consumer side: a new `docs/CONSUMER-RUNBOOK.md` documents
-exact-version pinning across npm / pnpm / Bun lockfiles, SLSA L3 provenance
-verification via `npm audit signatures`, the GH-Releases backup-channel
-install flow, and the reproduce-from-source fallback (clone at the tagged
-commit, `cargo install wasm-pack --locked`, `wasm-pack build`, byte-compare)
-for the both-channels-unreachable scenario. V1.16 Welle A hardens the WASM
-playground at `apps/wasm-playground/` for any deployment beyond pure
-local-dev: application code is extracted from inline `<script>` into
-`app.js` so the page can ship a strict `<meta http-equiv>` CSP without
-`'unsafe-inline'` / `'unsafe-eval'` on `script-src`, with sha384 SRI on
-the loading `<script>` tag and Trusted Types enforced (sink-free
-`app.js` discipline; any future regression that introduces `innerHTML`
-/ `eval` / `setTimeout(string)` / `*.src = userInput` fails at the
-browser boundary). V1.16 Welle B closes the Welle-A residual gap that
-CSP violations were silent in production by adding `report-uri
-/csp-report` to the meta-tag CSP — a deployed playground that runs a
-minimal receiver at the same-origin path (receiver-shape spec in
-[SECURITY-NOTES §scope-d](docs/SECURITY-NOTES.md)) now sees every
-blocked violation as a JSON POST. V1.16 Welle C is the deployment-
-side closure: a Cloudflare Workers + Static Assets host
-(`apps/wasm-playground/wrangler.toml` + `apps/wasm-playground/
-worker/`) emits the full security-header set on every response
-(HSTS preload, COOP `same-origin`, COEP `require-corp`, the same
-CSP as an HTTP header so `frame-ancestors` finally takes effect,
-plus `report-to` + `Reporting-Endpoints` for forward-compat with
-the Reporting API, plus per-path Cache-Control), runs an executable
-receiver at `/csp-report` (silent-204 + categorised internal logs +
-Origin-anchored CSRF + per-IP `/64` + global rate-limit via Durable
-Object + JSON-bomb defence + ANSI-strip + field allow-list + AE
-`writeDataPoint` persistence), and writes a daily AE → R2 archive
-heartbeat. The pure-bash anti-drift validator
-(`tools/playground-csp-check.sh`) re-asserts the CSP directives +
-SRI hash + `report-uri` declaration on every CI run; with
-`--live-check <url>` it asserts every Worker-emitted hardening
-invariant against the deployed URL post-deploy. A repo-tracked
-`tools/git-hooks/pre-commit` activated by `bash tools/install-git-
-hooks.sh` runs the validator at commit time. V1.17 Welle A closes
-the V1.15 Welle C automation gap with a reusable consumer-side
-GitHub Action (`.github/actions/verify-wasm-pin-check@v1`) that
-re-asserts every CONSUMER-RUNBOOK §1 trust layer on every CI run:
-exact-version pin in `package.json` (rejecting caret/tilde/range/
-file/git/github/http/workspace), per-entry `sha512`/`sha384`/
-`sha256` lockfile integrity (across npm v1+v2+v3 / pnpm v6+ /
-Bun binary + text formats), and `npm audit signatures` SLSA L3
-provenance with exponential-backoff retry against transient
-Sigstore/registry outage but immediate-fail on cryptographic
-rejection. The action is pure-bash composite (no `dist/index.js`
-bundle, no transitive npm dependency tree of its own), read-only
-against consumer files + the npm attestation API, and runs
-entirely on the consumer's GitHub Actions runner. 16 fixture-based
-unit tests + a 4-job self-test workflow including a weekly cron
-that performs a live `npm install --save-exact @atlas-trust/
-verify-wasm@latest` + real `npm audit signatures` round-trip
-catch publisher-side or Sigstore-side regressions before they
-reach downstream consumers. V1.17 Welle B locks the publish-lane
-authentication path with SSH-based tag signing: `.github/
-allowed_signers` is the in-repo trust root, `tools/verify-tag-
-signatures.sh` runs `git verify-tag` against it inside
-`wasm-publish.yml`'s first step (fail-closed BEFORE any
-`npm publish`), and a standalone `verify-tag-signatures.yml`
-workflow re-asserts the same invariant on every tag push, weekly
-cron (Mon 06:37 UTC), and PR touching tag-signing surfaces.
-V1.17 Welle C pins the integrity of that trust root: any commit
-modifying a trust-root-protected surface file
-(`.github/allowed_signers`, the verifier scripts, the publish +
-verify workflows, CODEOWNERS, the anti-drift harnesses, the
-`.github/actions/verify-wasm-pin-check/` subtree) must itself be
-signed by a key in the *prior* trust root (i.e. allowed_signers
-*as it existed at the PR base*). The
-`verify-trust-root-mutations.yml` workflow runs from the base
-branch (`pull_request`, not `pull_request_target`) so an attacker
-modifying the workflow inside their PR cannot disable
-verification, and an anti-rewrite guard rejects bootstrap-mode
-PRs whose merge-base appears clean only because an admin
-force-pushed history that previously contained the file.
-CODEOWNERS adds a second-maintainer review requirement on the
-same surface — single-PAT compromise no longer mints trust in a
-single commit. Branch protection on `master` (no direct push, no
-force-push including admins, required CODEOWNERS review,
-required `verify-trust-root-mutations` status check) is the
-operator-side complement; see `docs/OPERATOR-RUNBOOK.md §14`.
-Graph-database integration and policy-engine follow in V2.
+---
 
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — full system design,
-  trust property, write/export flows, V1 → V1.16 → V2 boundaries.
-- [docs/SECURITY-NOTES.md](docs/SECURITY-NOTES.md) — defended attack
-  surface, per-test mapping for auditors.
-- [docs/OPERATOR-RUNBOOK.md](docs/OPERATOR-RUNBOOK.md) — production
-  operator procedures: master-seed import, HSM wave-3 setup, witness
-  commissioning (verifier-side §10 + HSM-backed witness §11),
-  WASM verifier backup-channel install (V1.15 Welle B §12),
-  CI lane reference.
-- [docs/CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md) — downstream
-  npm-consumer reproducibility: exact-version pinning, lockfile
-  integrity, SLSA L3 provenance verification, reproduce-from-source
-  fallback (V1.15 Welle C).
-- [docs/COMPLIANCE-MAPPING.md](docs/COMPLIANCE-MAPPING.md) —
-  clause-by-clause regulatory mapping (EU AI Act, GAMP 5, ICH E6(R3),
-  DORA, GDPR).
+## Quick Start
 
-## Try it offline
+### Browser (ESM, default tag)
 
 ```bash
-# Build atlas-verify-cli from source (or download a release binary)
-# Get any Atlas trace bundle (.json) and matching pubkey-bundle (.json)
+npm install @atlas-trust/verify-wasm
+```
+
+```js
+import init, { verify_trace_json } from '@atlas-trust/verify-wasm';
+await init();
+const outcome = verify_trace_json(traceJson, bundleJson);
+// outcome.valid === true / false
+// outcome.witness_failures[] — structured per-witness failure surface (V1.14 Scope J)
+```
+
+### Node.js (CommonJS, `node` dist-tag)
+
+```bash
+npm install @atlas-trust/verify-wasm@node
+```
+
+```js
+const { verify_trace_json } = require('@atlas-trust/verify-wasm');
+const outcome = verify_trace_json(traceJson, bundleJson);
+```
+
+### Native CLI
+
+```bash
+# Build from source — or download a signed release binary
+cargo install --path crates/atlas-verify-cli
 atlas-verify-cli verify-trace bundle.json -k pubkey-bundle.json
-
-# Output:
-#   ✓ VALID — all checks passed
-#   ✓ schema-version — trace schema atlas-trace-v1 matches verifier
-#   ✓ event-hashes — 5 events, all hashes recomputed-match
-#   ✓ event-signatures — 5 signatures verified
-#   ✓ parent-links — all parent_hashes resolved within trace
-#   ✓ dag-tips — 1 tips, match server claim
-#   ✓ anchors — 2 anchor(s) verified against pinned log keys
-#   ✓ witnesses — 0 presented / 0 verified  (lenient until --require-witness)
 ```
 
-## Try it in the browser
+Sample output:
 
-```bash
-# `@atlas-trust/verify-wasm` ships under two npm dist-tags so the
-# same package name covers both runtimes:
-#
-#   * default tag (`latest`) — ESM + browser-first build (web target)
-#   * `node` dist-tag — CommonJS build for Node.js consumers
-#
-# Browser (ESM, default tag):
-#   npm install @atlas-trust/verify-wasm
-#   import init, { verify_trace_json } from '@atlas-trust/verify-wasm';
-#   await init();
-#   const outcome = verify_trace_json(traceJson, bundleJson);
-#   // outcome.valid === true / false
-#   // outcome.witness_failures[] — V1.14 Scope J classification surface
-#
-# Node.js (CommonJS, `node` dist-tag — pin the tag to get the
-# Node-target build instead of the browser ESM build):
-#   npm install @atlas-trust/verify-wasm@node
-#   const m = require('@atlas-trust/verify-wasm');
-#   const outcome = m.verify_trace_json(traceJson, bundleJson);
+```
+✓ VALID — all checks passed
+✓ schema-version — trace schema atlas-trace-v1 matches verifier
+✓ event-hashes — 5 events, all hashes recomputed-match
+✓ event-signatures — 5 signatures verified
+✓ parent-links — all parent_hashes resolved within trace
+✓ dag-tips — 1 tips, match server claim
+✓ anchors — 2 anchor(s) verified against pinned log keys
+✓ witnesses — 2 presented / 2 verified
 ```
 
-Or open the zero-build-step playground at `apps/wasm-playground/` — drop
-a `*.trace.json` + `*.pubkey-bundle.json`, click Verify. Same Rust
-verifier core, byte-identical to the native CLI's output.
+No network calls. No talking to our server. Bit-identical determinism — the same input produces byte-identical signing-input bytes whether the verifier runs on Linux, macOS, or as WASM in your browser.
 
-### For npm consumers — pinning + provenance verification
+### Zero-build playground
 
-If you embed `@atlas-trust/verify-wasm` in production tooling, see
-[docs/CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md) for the full
-consumer-side reproducibility guide: exact-version pinning across
-npm / pnpm / Bun lockfiles, SLSA L3 provenance verification via
-`npm audit signatures`, the V1.15 Welle B GitHub-Releases backup-
-channel install flow, and the reproduce-from-source fallback when
-both channels are unreachable.
+Open [`apps/wasm-playground/`](apps/wasm-playground) — drop in a `*.trace.json` + `*.pubkey-bundle.json`, click **Verify**. Same Rust verifier core, byte-identical to the native CLI.
 
-No network calls. No talking to our server. Bit-identical determinism —
-the same input produces byte-identical signing-input bytes whether the
-verifier ran on Linux, on macOS, or as WASM in your browser. Three
-anti-drift properties in `crates/` lock the trust model at the build
-step:
-`atlas-trust-core/src/cose.rs::signing_input_byte_determinism_pin` for
-the per-event signing-input;
-`atlas-trust-core/src/pubkey_bundle.rs::bundle_hash_byte_determinism_pin`
-for the pubkey-bundle hash that binds a trace to a keyset; and
-`atlas-signer/src/anchor.rs::mock_log_pubkey_matches_signer_seed` which
-asserts the issuer-side seed and the verifier-pinned log pubkey stay in
-sync — touching one without the other fails CI.
+---
+
+## Status — v1.0.0 (2026-05-11)
+
+**First stable release.** Trust model frozen. Public verification API committed. Semver in force from here.
+
+- **347 Rust tests green** across the workspace (`--features hsm`) — covering trust-core unit + anchor-chain adversary + golden trace + per-tenant-keys adversary + Sigstore golden + witness-strict-mode + V1.14 Scope J integration + V1.15 Welle A source-level anti-drift pins
+- **SLSA Build L3 provenance** on every `@atlas-trust/verify-wasm` npm publish — OIDC-signed Sigstore Rekor attestation, verifiable via `npm audit signatures`
+- **Signed release tags** — every `v*` tag SSH-signed (Ed25519) against in-repo trust root at `.github/allowed_signers`; `tools/verify-tag-signatures.sh` gates the publish lane
+- **Consumer-side automation** — [`verify-wasm-pin-check@v1`](.github/actions/verify-wasm-pin-check) GitHub Action re-asserts exact-version pin + lockfile integrity + `npm audit signatures` on every consumer CI run (pure-bash composite, no `dist/index.js`)
+- **CSP-hardened browser playground** — strict CSP + SRI + Trusted Types on [`apps/wasm-playground/`](apps/wasm-playground), Cloudflare Workers + Static Assets host with per-response security headers, executable `/csp-report` receiver, AE → R2 daily archive
+- **Branch protection on `master`** — no direct push, no force-push (admins included), CODEOWNERS-required review on trust-root surfaces, `verify-trust-root-mutations` status check required
+- **Backup distribution channel** — every `v*` tag uploads byte-identical npm-pack tarballs (web + node) + `tarball-sha256.txt` manifest as GitHub Release assets; auditors can `gh release download` and verify SHA against the same SLSA L3 provenance
+
+See [CHANGELOG.md](CHANGELOG.md) for the full V1 wave history (V1.5 → V1.19, ~14 months of trust-property hardening).
+
+---
+
+## How verification works
+
+```
+   ┌────────────────────┐                  ┌─────────────────────────────────┐
+   │ Atlas Server       │                  │ Auditor's machine (browser/CLI) │
+   │                    │                  │                                 │
+   │ 1. Sign trace ─────────────tarball───▶ verify-wasm                      │
+   │    (Ed25519+COSE)  │                  │                                 │
+   │                    │                  │ 2. Recompute event hashes       │
+   │ 3. Anchor to ──────────Rekor proof───▶ 4. Validate Rekor inclusion      │
+   │    Sigstore Rekor  │                  │    proofs against pinned key    │
+   │                    │                  │                                 │
+   │ 5. Witness (out ───────cosignature───▶ 6. Verify witness against         │
+   │    of process)     │                  │    source-controlled roster     │
+   │    cosigns chain   │                  │                                 │
+   │    head            │                  │ 7. Emit VerifyOutcome JSON      │
+   └────────────────────┘                  │    { valid, witness_failures }  │
+                                           └─────────────────────────────────┘
+```
+
+**The auditor's machine does the verification.** No round-trip to our server. The trust property is structural, not transactional.
+
+Full architecture: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+---
+
+## Documentation
+
+| Document | What's in it |
+|---|---|
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, trust property, write/export flows, V1 → V2 boundaries |
+| [docs/SECURITY-NOTES.md](docs/SECURITY-NOTES.md) | Defended attack surface, per-test mapping for auditors |
+| [docs/OPERATOR-RUNBOOK.md](docs/OPERATOR-RUNBOOK.md) | Production procedures: master-seed import, HSM wave-3 setup, witness commissioning, backup-channel install, CI lane reference |
+| [docs/CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md) | Downstream consumer reproducibility: exact-version pinning across npm / pnpm / Bun, SLSA L3 provenance verification, reproduce-from-source fallback |
+| [docs/COMPLIANCE-MAPPING.md](docs/COMPLIANCE-MAPPING.md) | Clause-by-clause regulatory mapping (EU AI Act, GAMP 5, ICH E6(R3), DORA, GDPR) |
+| [docs/SEMVER-AUDIT-V1.0.md](docs/SEMVER-AUDIT-V1.0.md) | Public-API surface audit pinning the v1.0.0 semver commitment |
+| [CHANGELOG.md](CHANGELOG.md) | Full V1 wave history with per-version trust-property additions |
+
+---
 
 ## Components
 
 | Component | Path | License |
 |---|---|---|
-| `atlas-trust-core` | `crates/atlas-trust-core` | Apache-2.0 |
-| `atlas-verify-cli` | `crates/atlas-verify-cli` | Apache-2.0 |
-| `atlas-verify-wasm` | `crates/atlas-verify-wasm` | Apache-2.0 |
-| `atlas-signer` | `crates/atlas-signer` | Apache-2.0 |
-| `atlas-witness` | `crates/atlas-witness` | Apache-2.0 |
-| `atlas-mcp-server` | `apps/atlas-mcp-server` | Sustainable Use |
-| `atlas-web` | `apps/atlas-web` | Sustainable Use |
+| `atlas-trust-core` | [`crates/atlas-trust-core`](crates/atlas-trust-core) | Apache-2.0 |
+| `atlas-verify-cli` | [`crates/atlas-verify-cli`](crates/atlas-verify-cli) | Apache-2.0 |
+| `atlas-verify-wasm` | [`crates/atlas-verify-wasm`](crates/atlas-verify-wasm) | Apache-2.0 |
+| `atlas-signer` | [`crates/atlas-signer`](crates/atlas-signer) | Apache-2.0 |
+| `atlas-witness` | [`crates/atlas-witness`](crates/atlas-witness) | Apache-2.0 |
+| `atlas-mcp-server` | [`apps/atlas-mcp-server`](apps/atlas-mcp-server) | Sustainable Use |
+| `atlas-web` | [`apps/atlas-web`](apps/atlas-web) | Sustainable Use |
 
-## Compliance Mappings
+---
 
-- EU AI Act Annex IV §1(e) — full provenance trail with named human verifiers
-- GAMP 5 Appendix D11 (July 2025) — AI/ML system validation in GxP context
-- ICH E6(R3) §7.4 — clinical trial data lineage
-- DORA Art. 11–14 — operational resilience event logging
-- GDPR Art. 22 — automated-decision traceability
+## Compliance mappings
 
-A clause-by-clause mapping with inspectable-evidence pointers lives at
-[docs/COMPLIANCE-MAPPING.md](docs/COMPLIANCE-MAPPING.md).
+- **EU AI Act Annex IV §1(e)** — full provenance trail with named human verifiers
+- **GAMP 5 Appendix D11 (July 2025)** — AI/ML system validation in GxP context
+- **ICH E6(R3) §7.4** — clinical trial data lineage
+- **DORA Art. 11–14** — operational resilience event logging
+- **GDPR Art. 22** — automated-decision traceability
 
-## Build
+Clause-by-clause mapping with inspectable-evidence pointers: [docs/COMPLIANCE-MAPPING.md](docs/COMPLIANCE-MAPPING.md).
+
+---
+
+## Build from source
 
 ```bash
-# Rust workspace
+# Rust workspace — all crates, full test suite
 cargo build --release
-cargo test
+cargo test --features hsm   # 347 tests
 
-# End-to-end demo: generate a trace + bundle, then verify it
+# End-to-end demo: generate a signed trace + bundle, then verify it
 cargo run --example seed_bank_demo -p atlas-signer --release
 ./target/release/atlas-verify-cli verify-trace \
   examples/golden-traces/bank-q1-2026.trace.json \
   -k examples/golden-traces/bank-q1-2026.pubkey-bundle.json
 ```
 
+---
+
+## For npm consumers — pinning + provenance verification
+
+If you embed `@atlas-trust/verify-wasm` in production tooling, see [docs/CONSUMER-RUNBOOK.md](docs/CONSUMER-RUNBOOK.md) for the full consumer-side reproducibility guide: exact-version pinning across npm / pnpm / Bun lockfiles, SLSA L3 provenance verification via `npm audit signatures`, the GH-Releases backup-channel install flow, and the reproduce-from-source fallback (clone at tagged commit, `wasm-pack build`, byte-compare) for the both-channels-unreachable scenario.
+
+The drop-in CI assertion lives at [`.github/actions/verify-wasm-pin-check`](.github/actions/verify-wasm-pin-check) — a pure-bash composite GitHub Action that re-asserts every CONSUMER-RUNBOOK §1 trust layer on every consumer build, with fixture-based unit tests + a weekly cron that performs a live `npm install --save-exact @atlas-trust/verify-wasm@latest` + real `npm audit signatures` round-trip to catch publisher-side or Sigstore-side regressions before they reach downstream consumers.
+
+---
+
 ## License
 
-Atlas uses a fair-code split, modelled on n8n's Sustainable Use License:
+Atlas uses a **fair-code split**, modelled on n8n's Sustainable Use License:
 
-- **Verifier crates** (`crates/atlas-trust-core`, `atlas-verify-cli`,
-  `atlas-verify-wasm`, `atlas-signer`, `atlas-witness`) are **Apache-2.0**.
-  Any auditor, regulator, or third-party tool can fork, embed, redistribute,
-  or rebuild them with no friction. Apache-2.0 is the standard for sigstore-rs
-  and the Rust crypto tooling ecosystem — Atlas joins it.
+- **Verifier crates** (`crates/atlas-trust-core`, `atlas-verify-cli`, `atlas-verify-wasm`, `atlas-signer`, `atlas-witness`) are **Apache-2.0** ([LICENSE-APACHE-2.0](LICENSE-APACHE-2.0)). Any auditor, regulator, or third-party tool can fork, embed, redistribute, or rebuild them with no friction. Apache-2.0 is the standard for sigstore-rs and the Rust crypto-tooling ecosystem — Atlas joins it.
 
-- **Server, web frontend, and MCP server** (`apps/`) are licensed under the
-  **Atlas Sustainable Use License** (see `LICENSE-SUSTAINABLE-USE`).
-  Self-host for internal business use is permitted free of charge. Hosting
-  Atlas as an as-a-service offering for third parties, removing attribution,
-  or reselling compliance bundles requires a commercial license.
+- **Server, web frontend, MCP server** (`apps/`) are licensed under the **Atlas Sustainable Use License** ([LICENSE-SUSTAINABLE-USE](LICENSE-SUSTAINABLE-USE)). Self-host for internal business use is permitted free of charge. Hosting Atlas as an as-a-service offering for third parties, removing attribution, or reselling compliance bundles requires a commercial license.
 
-This split is deliberate: the trust-property of Atlas must be structurally
-verifiable by any auditor, end-to-end, without buying anything from us.
+This split is deliberate: the trust property of Atlas must be structurally verifiable by any auditor, end-to-end, without buying anything from us.
 
-Commercial licensing inquiries: nelson@ultranova.io
+**Commercial licensing inquiries:** [nelson@ultranova.io](mailto:nelson@ultranova.io)
+
+---
+
+<!--
+TODO list (after the v1.0.0 npm-publish + public-flip lands):
+
+- [ ] Replace the placeholder image at the top with the 70s-style Atlas icon (à la the Canon-Projekt look — small, retro, monochrome-ish, distinct silhouette). Drop it at `docs/assets/atlas-logo.png`.
+- [ ] Once `@atlas-trust/verify-wasm@1.0.0` is on the npm registry, the npm badge resolves automatically (no change needed).
+- [ ] Add a `## Citing Atlas` section once the BibTeX entry / Zenodo DOI is minted.
+- [ ] Add a one-line link to a short demo video (≤90 s) showing trace generation → in-browser verify.
+- [ ] Consider a `## Roadmap` section pointing at V2 (graph-database integration + policy-engine).
+-->
