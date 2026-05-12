@@ -1,8 +1,99 @@
-# Atlas V2 — Session Handoff (Strategic Iteration Mode, Phase 1 Start)
+# Atlas V2 — Session Handoff (Strategic Iteration Mode, Phase 1 SHIPPED → Phase 2 pending)
 
-> **Bootstrap prompt für die nächste Claude Code Session.** Self-contained: ein Fresh Agent kann dieses Dokument + die referenzierten Files lesen und Phase 1 starten ohne irgendetwas neu zu derivieren. Designed um über mehrere Sessions stabil zu sein.
+> **Bootstrap prompt für die nächste Claude Code Session.** Self-contained: ein Fresh Agent kann dieses Dokument + die referenzierten Files lesen und Phase 2 starten ohne irgendetwas neu zu derivieren. Designed um über mehrere Sessions stabil zu sein.
 
-**Erstellt:** 2026-05-12. **Status:** Phase 1 startbereit. **Next session entry point:** dieses Dokument zuerst lesen, dann Phase 1 Plan (§7) review, dann subagents dispatchen.
+**Erstellt:** 2026-05-12. **Phase 1 shipped:** 2026-05-12 (this session). **Status:** Phase 1 ABGESCHLOSSEN, Phase 2 startbereit. **Next session entry point:** dieses Dokument §0a (Phase 1 SHIPPED block) zuerst lesen, dann die 5 Phase-1-Docs auf PR #59 review'n, dann Phase 2 critique-agent dispatch per §0b planen.
+
+---
+
+## 0a. Phase 1 SHIPPED — 2026-05-12 (this session)
+
+**Phase 1 of the V2 strategic iteration ist abgeschlossen.** 5 Foundation Documents wurden parallel von 5 isolierten Subagents in eigenen git worktrees geschrieben. Integration auf branch `v2/phase-1-foundation` (PR #59, **DRAFT**, **NICHT mergen** — das ist der Phase-2-critique-target).
+
+**Integration PR:** https://github.com/ThePyth0nKid/atlas/pull/59 (draft state)
+
+**Die 5 Foundation Documents (alle auf `v2/phase-1-foundation` branch):**
+
+| # | Doc | File | Lines | Subagent |
+|---|-----|------|-------|----------|
+| A | Strategic Positioning Vision | `.handoff/v2-vision-strategic-positioning.md` | 512 | general-purpose |
+| B | Knowledge Graph Layer Architecture (v0.5) | `.handoff/v2-vision-knowledge-graph-layer.md` | 727 (+608/-93 vs v0) | general-purpose |
+| C | Risk Matrix | `.handoff/v2-risk-matrix.md` | 457 | security-reviewer |
+| D | Competitive Landscape (2026-05 baseline) | `.handoff/v2-competitive-landscape.md` | 630 | general-purpose + WebSearch |
+| E | Demo Sketches | `.handoff/v2-demo-sketches.md` | 485 | general-purpose |
+
+**Headline theses (one bullet each):**
+- **Doc A** — Two-market positioning (Verifiable Second Brain + Multi-Agent Shared Memory); 6 novel trust-modes (continuous regulator attestation / insurance pricing substrate / Agent Passports / Cedar write-time / AI-BOM / B2B cross-org); 4 GTM hypotheses sequenced.
+- **Doc B** — Three-Layer Architecture: events.jsonl (authoritative) + FalkorDB projection (queryable) + Mem0g cache (fast retrieval); Atlas as Hermes Memory Skill (4-call API); Agent Passports as `did:atlas:<pubkey-hash>` DIDs with revocation chain; federated witness cosignature; GDPR via content/hash separation.
+- **Doc C** — Top-5 risks: R-A-01 Projection Determinism Drift (LOW detect, CRITICAL impact), R-L-01 GDPR Right-to-be-Forgotten (EU privacy counsel required), R-A-03 Agent Identity Key Compromise (V2-α blocking), R-S-01 Adoption Tipping Point (structural to category), R-L-02 FalkorDB SSPL License Trap.
+- **Doc D** — No competitor has cryptographic trust in either category (verified via WebSearch 2026-05). Kuzu acquired by Apple Oct-2025 — ArcadeDB is next viable Apache-2.0 fallback. Graphiti = strongest partner candidate, 12-18mo competitor-risk. Obsidian has zero signature/verification plugins — white space for fast Verifiable-Second-Brain validation.
+- **Doc E** — Demo 1 Multi-Agent Race = recommended landing-page hero. Demo 2 Regulator Witness = most ship-able TODAY (V1.14 live). Demos 3-5 need V2-α/β/γ/δ work; 4 of 5 are aspirational. Honesty flag raised in own open questions.
+
+**Total content:** 2811 lines of strategic + architectural + risk + competitive + product material across 5 Foundation Documents.
+
+**Open-Questions surface:** every doc carries an explicit "Open Questions for Phase 2 Critique" section. Combined ~55-65 explicit open questions across all 5 docs. **Cross-doc inconsistency is expected and NOT a Phase-1 convergence criterion** (per Iteration-Framework §1) — discrepancies are resolved in Phase 3 synthesis, not in Phase 1.
+
+**Master HEAD on Phase-1-completion:** master remains at `5f19348` (V2 strategy trilogy). Phase 1 docs ONLY live on `v2/phase-1-foundation` branch — they do not enter master until Phase 4's `docs/V2-MASTER-PLAN.md`.
+
+**Worktrees from Phase 1 (5 doc-branches + 1 orphan from architect re-dispatch):**
+- `agent-a9da7cf2b6af8198c` / branch `worktree-agent-a9da7cf2b6af8198c` (Doc A, merged)
+- `agent-a47f83e4af0f7b2d5` / branch `worktree-agent-a47f83e4af0f7b2d5` (Doc B re-dispatch, merged)
+- `agent-adfac218b1cda42a9` / branch `worktree-agent-adfac218b1cda42a9` (Doc C, merged)
+- `agent-ad7977870e1b40ef5` / branch `worktree-agent-ad7977870e1b40ef5` (Doc D, merged)
+- `agent-a880ad3bdfa5c1083` / branch `worktree-agent-a880ad3bdfa5c1083` (Doc E, merged)
+- `agent-a7f0eb28efcf59ae3` (orphan from architect re-dispatch, no writes — should be cleaned)
+
+Cleanup these worktrees post-Phase-2 (or now if disk space matters): `git worktree remove <path> && git branch -D <branch>` per branch.
+
+---
+
+## 0b. Phase 2 Plan — Multi-Angle Critique (next session entry point)
+
+**Goal:** 6 parallele critique-Subagents lesen alle 5 Phase-1-Docs auf PR-Branch `v2/phase-1-foundation` und produzieren strukturierte +/- Crits per Iteration-Framework §2.
+
+**Pre-flight (vor Phase-2-dispatch):**
+1. `git fetch origin && git checkout v2/phase-1-foundation` — sicherstellen die Branch ist lokal aktuell
+2. Read alle 5 Phase-1-Docs (Files: `.handoff/v2-vision-strategic-positioning.md`, `.handoff/v2-vision-knowledge-graph-layer.md`, `.handoff/v2-risk-matrix.md`, `.handoff/v2-competitive-landscape.md`, `.handoff/v2-demo-sketches.md`)
+3. Read Iteration-Framework §2 (`.handoff/v2-iteration-framework.md`) — critique-format template
+4. **Mit Nelson abstimmen:** sind die 6 critique-Rollen unverändert (architect / security / database-performance / product-UX / compliance-regulatory / business-investor) oder Anpassung gewünscht?
+
+**Dispatch convention (mirror Phase 1):**
+- 6 parallele Agent-Calls in einer Message
+- `isolation: "worktree"` für jeden (eigene Branch je crit)
+- Pfade in Prompts **relativ** (`.handoff/...` NICHT `C:/Users/.../.handoff/...`)
+- Subagent_types matchen die Crit-Rolle (architect → architect, security → security-reviewer, database-performance → general-purpose, product-UX → general-purpose, compliance-regulatory → general-purpose, business-investor → general-purpose)
+- Each crit produces `.handoff/crit-<role>.md` (~300-500 lines)
+
+**Crit format template** (per Iteration-Framework §2):
+```
+# Crit: <role> on Atlas V2 Vision
+## Stärken (was ist gut, sollte bleiben)
+## Probleme (was muss adressiert werden — by severity: CRITICAL/HIGH/MEDIUM/LOW)
+## Blinde Flecken (was wird in den docs gar nicht angesprochen)
+## Konkrete Vorschläge (specific edits/additions, doc-section-tagged)
+## Offene Fragen für Phase 3
+```
+
+**The 6 critique agents + their primary doc targets:**
+
+| # | Crit-Rolle | Subagent-Type | Primary Doc Target | Output |
+|---|---|---|---|---|
+| 1 | Architect | architect (Read/Grep/Glob only — produce text inline, parent writes file) | Doc B + Doc D — technical feasibility, projector-determinism, multi-tenant isolation, FalkorDB vs Kuzu-now-archived | `.handoff/crit-architect.md` |
+| 2 | Security reviewer | security-reviewer | Doc B + Doc C — trust invariant integrity, key management, replay attacks, post-quantum, GDPR conflict, Agent-DID revocation | `.handoff/crit-security.md` |
+| 3 | Database / performance | general-purpose | Doc B + Doc D — FalkorDB vs ArcadeDB (Kuzu archived!) vs Neo4j vs Memgraph, performance vs Mem0g, projection-rebuild-cost at scale, index strategy | `.handoff/crit-database.md` |
+| 4 | Product / UX | general-purpose | Doc A + Doc E — positioning coherence, user-journey realism, demo-conversion-likelihood, Obsidian-comparison-fairness, multi-agent-race-demo-feasibility | `.handoff/crit-product.md` |
+| 5 | Compliance / regulatory | general-purpose | Doc A + Doc C — EU AI Act Art. 12-19 mapping accuracy, AI-Liability-Directive readiness, agent-identity/DID compatibility, jurisdictional scope, witness-federation legal pattern | `.handoff/crit-compliance.md` |
+| 6 | Business / investor | general-purpose | Doc A + Doc D + Doc E — market sizing, competitive moat, monetization paths, fundraising readiness, partnership candidates (Mem0/Graphiti/Hermes/Lyrie-ATP) | `.handoff/crit-business.md` |
+
+**Lesson from Phase 1 (architect Read-only constraint):** the `architect` subagent_type only has Read/Grep/Glob — no Write. If using architect for Crit #1, expect inline text return; parent agent (this session's main thread) writes the file. Alternative: use `general-purpose` for all 6 crits to avoid the constraint, accepting that the architect role's specialism is lost.
+
+**Convergence criterion for Phase 2** (per Framework §2): alle 6 crits geliefert, jede ≥5 strukturelle Punkte + ≥3 konkrete Edits. **Crits MÜSSEN adressieren, nicht nur "looks good".**
+
+**Output:** integration branch `v2/phase-2-critiques` (analog to Phase 1), all 6 crits merged, PR opened **draft, no-merge**. Then Phase 3 synthesis (manual, with Nelson).
+
+**Timing:** ~60-90 min for 6 parallel crits.
+
+---
 
 ---
 
