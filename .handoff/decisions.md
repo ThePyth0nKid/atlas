@@ -135,10 +135,10 @@
 - **Crit source:** Database (Kuzu acquired by Apple Oct-2025, repo archived); cross-ref Doc D §4.4 + Doc C R-L-02
 - **Phase 1 doc affected:** Doc B §2.3, Doc D §4.4, Doc C R-L-02
 - **Recommendation:** Replace Kuzu fallback with **ArcadeDB (Apache-2.0)**. Comparative benchmark spike against FalkorDB pre-V2-α lock. Memgraph + HugeGraph + DuckDB-graph-ext as second-tier fallbacks.
-- **Decision:** **ACCEPT** — Master Vision v1 §7.2 graph DB table updated. V2-α scope includes ArcadeDB comparative spike. SSPL-trap mitigation depends on this fallback being benchmark-validated.
+- **Decision:** **ACCEPT — superseded by DECISION-DB-4 on 2026-05-12.** Original framing kept ArcadeDB as fallback to FalkorDB primary. V2-α Welle 2 spike flipped this: ArcadeDB primary, FalkorDB fallback (see `docs/V2-ALPHA-DB-SPIKE.md` + `DECISION-DB-4`).
 - **Rationale:** Phase 1 plan referenced Kuzu as the MIT fallback for SSPL exposure; that fallback is now dead. ArcadeDB is the next viable Apache-2.0 graph DB. Comparative spike is mandatory because if ArcadeDB doesn't meet Atlas's performance/feature needs, FalkorDB SSPL becomes a much harder commercial-license dependency without a real escape hatch.
 - **Reversibility:** MEDIUM (fallback choice is reversible pre-lock; post-V2-α much harder)
-- **Review-after:** ArcadeDB spike completes
+- **Review-after:** ArcadeDB spike completes — DONE 2026-05-12, see DECISION-DB-4
 
 ---
 
@@ -281,4 +281,20 @@
 
 ---
 
-**End of decisions.md.** 22 decisions documented. All Phase-2 CRITICAL findings addressed (accepted/modified/deferred/rejected with rationale). Phase 4 reads this log + Master Vision v1 to derive `docs/V2-MASTER-PLAN.md` for master-merge.
+---
+
+## 2026-05-12: V2-α DB Primary Flip (ArcadeDB primary, FalkorDB fallback) [DECISION-DB-4]
+- **Crit source:** V2-α Welle 2 comparative spike `docs/V2-ALPHA-DB-SPIKE.md` §8 Recommendation
+- **Phase 1 doc affected:** Doc B §2.3 (FalkorDB primary), Doc D §4.4 (FalkorDB ranked above ArcadeDB)
+- **Master Plan affected:** §3 Three-Layer Trust Architecture (Layer 2 DB), §4 Risk Matrix R-L-02, §6 V2-α Foundation scope, §11 Reference Pointers
+- **Recommendation (from Welle 2 spike):** ArcadeDB Apache-2.0 as V2-α primary; FalkorDB as performance-validation fallback. MEDIUM-HIGH confidence. Deciding factors (weighted): License (HIGH weight — ArcadeDB wins; SSPLv1 §13 structurally incompatible with Atlas open-core hosted-service tier) + Projection-determinism cost (MEDIUM-HIGH — ArcadeDB's built-in `ORDER BY @rid` + schema-required mode reduces canonicalisation tooling cost ~30%) + Self-hosted-tier deployment simplicity (MEDIUM — ArcadeDB embedded mode lets self-hosted Atlas ship as single-process server).
+- **Decision:** **ACCEPT.** Master Plan + Master Vision graph-DB table flipped to ArcadeDB primary. Spike committed on master as `docs/V2-ALPHA-DB-SPIKE.md`.
+- **Rationale:** License compatibility is the decisive factor for Atlas's open-core monetization model — SSPLv1 §13 would require per-deployment commercial-license negotiation OR Atlas open-sourcing the entire hosted-service operational stack under SSPL. Apache-2.0 eliminates this burden across every Atlas tier (self-hosted, Personal/Team, Enterprise, white-label partner). Projection-determinism cost is a secondary advantage. Performance differential is acceptable at year-1 scale (10M events / workspace expected); FalkorDB's GraphBLAS edge appears only at very-large-scale traversals beyond Atlas's year-1 reality.
+- **Confidence:** MEDIUM-HIGH. Raise to HIGH would require (a) actual benchmark harness Welle 2b validation, (b) counsel-validated SSPL §13 opinion confirming the engineer-perspective analysis, (c) operator-runbook validation of ArcadeDB EU-data-residency deployment.
+- **Reversibility:** MEDIUM-HIGH. Atlas's Three-Layer Architecture (Layer 2 derivative of Layer 1) means swapping Layer-2 DBs is a re-projection operation, not a data-migration operation. Reversal cost: 1-2 sessions of projector rewrite (Cypher dialect adjustment) + replay-from-events.jsonl + doc updates. No data loss. Customer downtime zero via dual-write transition.
+- **Open question:** Should V2-α DB lock wait for Welle 2b actual-benchmark spike, or proceed on Welle 2 public-knowledge-recommendation? Nelson decision.
+- **Review-after:** V2-α Welle 3 (Projector skeleton) implementation begins against the locked choice; Welle 3 should surface any Cypher-subset incompatibilities in ArcadeDB that would lower confidence.
+
+---
+
+**End of decisions.md.** 23 decisions documented. All Phase-2 CRITICAL findings addressed (accepted/modified/deferred/rejected with rationale). V2-α Welle 1 + Welle 2 strategic decisions added 2026-05-12.

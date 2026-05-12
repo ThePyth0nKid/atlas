@@ -19,6 +19,23 @@ The v1.0 public-API surface contract is documented in
 
 _V2-α work in flight on this line. The next release tag will be `v2.0.0-alpha.1` (major-bump pre-release) at the close-out of the V2-α welle bundle, not a v1.x continuation. V2-α-Additive surface items are listed in [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10. The strategic documentation landings below do not touch the v1.0 public-API surface._
 
+### Added — V2-α Welle 2 (ArcadeDB vs FalkorDB Comparative Spike, 2026-05-12)
+
+- **`docs/V2-ALPHA-DB-SPIKE.md`** (new, ~500 lines) — master-resident V2-α DB-choice decision source-of-truth. Comparative analysis of ArcadeDB (Apache-2.0) vs FalkorDB (SSPLv1) across 10 dimensions: license (SSPLv1 §13 vs Apache-2.0 §4-§5), Cypher subset coverage, property graph model, idempotent upsert pattern, multi-tenant isolation, schema determinism, performance characteristics, operational considerations, vendor risk, and 5 Atlas-specific decision factors (projection-determinism cost, author_did stamping, ProjectorRunAttestation hooks, V2-β Mem0g integration, V2-γ federation-witness property-visibility).
+- **`.handoff/v2-alpha-welle-2-plan.md`** (new, ~180 lines) — Welle 2 plan-doc with scope, decisions, files table, spike-doc target outline, acceptance criteria, risks, and out-of-scope items.
+
+### Changed — V2-α Welle 2 (Strategic DB-Choice Flip)
+
+- **V2-α DB primary flipped from FalkorDB to ArcadeDB** per `DECISION-DB-4` (new). Recommendation confidence MEDIUM-HIGH; deciding factor is license compatibility (SSPLv1 §13 vs Apache-2.0) for Atlas's planned open-core hosted-service monetization tier. Secondary factors: projection-determinism canonicalisation cost (~30% lower with ArcadeDB's `ORDER BY @rid` + schema-required mode) and self-hosted-tier deployment simplicity (ArcadeDB embedded mode lets Atlas ship as single-process server). Reversal cost MEDIUM (re-projection from authoritative Layer 1 `events.jsonl`, 1-2 sessions of projector rewrite, zero customer downtime via dual-write).
+- **`docs/V2-MASTER-PLAN.md` §3 + §4 R-L-02 + §6 V2-α Foundation + §11 Reference Pointers** updated to reflect the ArcadeDB-primary flip. ASCII Three-Layer Architecture diagram updated.
+- **`.handoff/decisions.md`** — `DECISION-DB-1` (original Kuzu→ArcadeDB-fallback) annotated as superseded; new `DECISION-DB-4` documents the primary flip with full rationale, confidence level, and reversal-cost analysis. Now 23 decisions documented.
+
+### Notes — V2-α Welle 2
+
+- **Spike methodology: public-knowledge-based research, no actual benchmarks executed.** If Welle 3 (Projector skeleton) implementation surfaces Cypher-subset incompatibilities in ArcadeDB OR if Nelson commissions a Welle 2b actual-benchmark validation, the recommendation may be revisited.
+- **Counsel-validated SSPLv1 §13 opinion** remains on Nelson's parallel counsel-engagement track and is pre-V2-α-public-materials blocking per Master Plan §5.
+- **V2-α progress: 2 of 5-8 wellen shipped (Welle 1 Agent-DID schema + Welle 2 DB spike).** Welle 3 candidate: Atlas Projector skeleton against locked ArcadeDB choice.
+
 ### Added — V2-α Welle 1 (Agent-DID Schema Foundation, 2026-05-12)
 
 - **`crates/atlas-trust-core/src/agent_did.rs`** (new module) — W3C-DID parser, validator, and presentation-layer helpers for `did:atlas:<lowercase-hex-32-bytes>` agent identities. Public surface: `AGENT_DID_PREFIX`, `agent_did_for`, `parse_agent_did`, `validate_agent_did`. 13 unit tests covering positive + negative format-validation cases, parse roundtrip, structured-error reasons. Re-exported at crate root.
