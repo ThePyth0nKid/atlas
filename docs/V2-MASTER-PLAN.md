@@ -1,7 +1,7 @@
 # Atlas V2 — Master Plan
 
 > **Status:** Phase 4 output, 2026-05-12. **Scope:** master-resident strategic source-of-truth for Atlas V2.
-> **Sources:** distilled from `.handoff/v2-master-vision-v1.md` (full V2 vision, ~615 lines) and `.handoff/decisions.md` (22 explicit ACCEPT/MODIFY/DEFER decisions). Read those for full context, rationale, and Phase-2 critique provenance.
+> **Sources:** distilled from `.handoff/v2-master-vision-v1.md` (full V2 vision, ~615 lines) and `.handoff/decisions.md` (23 explicit ACCEPT/MODIFY/DEFER decisions). Read those for full context, rationale, and Phase-2 critique provenance.
 > **Companion doc:** `docs/WORKING-METHODOLOGY.md` (reusable 4-phase iteration pattern).
 > **Methodology:** this plan was produced via Atlas's 4-phase iteration framework (see `docs/WORKING-METHODOLOGY.md`).
 
@@ -53,11 +53,11 @@ Reasoning: AI-memory-infra SAM (~$10–45M) is fundable; personal-tier PKM SOM (
                              │ (projector: verifies + extracts)
                              ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│  LAYER 2 — FalkorDB projection    [QUERYABLE, REBUILDABLE]       │
-│  Property graph · Cypher subset · GraphBLAS backend              │
+│  LAYER 2 — ArcadeDB projection    [QUERYABLE, REBUILDABLE]       │
+│  Property graph · Cypher subset · Apache-2.0 · embedded mode     │
 │  · CI gate: projector-state-hash MUST match pinned hash          │
 │  · ProjectorRunAttestation event emitted into Layer 1            │
-│  · ArcadeDB Apache-2.0 fallback (Kuzu archived Oct-2025)         │
+│  · FalkorDB SSPLv1 fallback (per V2-α Welle 2 spike flip)        │
 └────────────────────────────┬─────────────────────────────────────┘
                              ▼
 ┌──────────────────────────────────────────────────────────────────┐
@@ -81,7 +81,7 @@ Reasoning: AI-memory-infra SAM (~$10–45M) is fundable; personal-tier PKM SOM (
 | **R-A-01 Projection Determinism Drift** | LOW detect × CRITICAL impact. Graph projection silently produces non-byte-identical output → trust invariant breaks invisibly | Triple-hardening: canonicalisation byte-pin + `ProjectorRunAttestation` signed event into Layer 1 + parallel-projection design pre-V2-α (`DECISION-ARCH-1` / `DECISION-SEC-2`) |
 | **R-L-01 GDPR Art. 17 Hash-as-Personal-Data** | Probability HIGH (escalated from MEDIUM per CJEU *Breyer* + EDPB Guidelines 4/2019 strict reading) | €30–80K counsel engagement, 6–8 weeks, pre-V2-α blocking. Path B (counsel opinion) primary, Path A (per-content salt redesign) fallback (`DECISION-COMPLIANCE-3` / `DECISION-COUNSEL-1`) |
 | **R-A-03 Agent Identity Key Compromise** | Revocation signed by compromised key fails closed-by-design | Out-of-band revocation channel (M-of-N threshold) + `signed_at_rekor_inclusion_time` Δ-flagging for backdate detection (`DECISION-SEC-1`) |
-| **R-L-02 FalkorDB SSPLv1 License** | Hosted-service blocker; Kuzu fallback archived by Apple Oct-2025 | ArcadeDB Apache-2.0 comparative benchmark spike pre-V2-α lock (`DECISION-DB-1`). Memgraph + HugeGraph as second-tier fallbacks |
+| **R-L-02 FalkorDB SSPLv1 License** | Hosted-service blocker; Kuzu fallback archived by Apple Oct-2025. **Mitigated by V2-α Welle 2 spike flip** — see `docs/V2-ALPHA-DB-SPIKE.md` | V2-α Welle 2 spike (2026-05-12) recommended ArcadeDB Apache-2.0 as primary with MEDIUM-HIGH confidence, eliminating SSPLv1 §13 hosted-service obligation. FalkorDB demoted to fallback. Counsel-validated license opinion still pre-V2-α-public-materials blocking |
 | **R-B-01 Fundraising-Blocking Market Sizing Gap** | No published TAM/SAM/SOM math. Probability HIGH (now), Impact CRITICAL (now) | Bottom-up math + first-10-customers named pipeline before next fundraising conversation (`DECISION-BIZ-3` / `DECISION-BIZ-4`) |
 
 Full risk matrix with 13+ entries in `.handoff/v2-master-vision-v1.md` §6.
@@ -112,23 +112,23 @@ Full risk matrix with 13+ entries in `.handoff/v2-master-vision-v1.md` §6.
 > **Phase 2 re-baseline:** Phase 1 estimated 10–14 sessions total; Phase 2 Architect H-3 + Database P-CRIT-3 surfaced concrete blocker items adding 2–4 sessions to V2-α alone. **Total V2 = 14–20 sessions** plus 6–8 weeks counsel engagement in parallel with V2-α. Welle 14b/c/d/e existing roadmap remains (14b: npm Trusted Publishers + dual-publish fix; can run in parallel with V2-α prep).
 
 ### V2-α Foundation (5–8 sessions)
-**Scope:** Atlas Projector + FalkorDB integration + Agent-DID schema + content-hash separation + projector-state-hash CI gate + `ProjectorRunAttestation` signed event + ArcadeDB comparative spike + GDPR counsel opinion gate.
+**Scope:** Atlas Projector + **ArcadeDB integration** (post-Welle-2 flip) + Agent-DID schema (Welle 1, SHIPPED) + content-hash separation + projector-state-hash CI gate + `ProjectorRunAttestation` signed event + ArcadeDB vs FalkorDB comparative spike (Welle 2, SHIPPED) + GDPR counsel opinion gate.
 
-**Dependencies:** counsel engagement kickoff (parallel); ArcadeDB spike completes before FalkorDB lock; canonicalisation byte-pin spec.
+**Dependencies:** counsel engagement kickoff (parallel); Welle 2 spike informed the V2-α DB lock (ArcadeDB primary recommended); canonicalisation byte-pin spec.
 
-**Blocking risks:** R-A-01 (determinism), R-L-01 (GDPR counsel), R-L-02 (FalkorDB fallback).
+**Blocking risks:** R-A-01 (determinism), R-L-01 (GDPR counsel), R-L-02 (mitigated by Welle 2 spike flip to ArcadeDB primary).
 
 **Success criteria:**
 - Projector emits canonical byte-pinned graph state matching `.projection-integrity.json` (CI gate green)
 - Each projector run emits a signed `ProjectorRunAttestation` into Layer 1
-- Agent DID schema (`did:atlas:<pubkey-hash>`) issued + parsed by verifier
-- ArcadeDB comparative spike yields go/no-go decision on FalkorDB lock
+- Agent DID schema (`did:atlas:<pubkey-hash>`) issued + parsed by verifier (SHIPPED 2026-05-12)
+- ArcadeDB vs FalkorDB comparative spike yields go/no-go decision (SHIPPED 2026-05-12; recommendation: ArcadeDB primary, FalkorDB fallback)
 - Counsel opinion on GDPR Art. 4(1) hash-as-PII delivered
 
-**Expected PR count:** 5–8 (one per session, ~Welle-14c/d/e size).
+**Expected PR count:** 5–8 (one per session, ~Welle-14c/d/e size). **Welle 1 + Welle 2 shipped 2026-05-12 (2 of 5-8 done).**
 
 ### V2-β Read-Side (4–5 sessions, depends serially on V2-α)
-**Scope:** Mem0g cache integration + 6 Read-API endpoints (AST-validated Cypher) + MCP V2 tools + Explorer UI (FalkorDB Browser embed OR Cytoscape.js) + secure-deletion mechanism + parallel-projection plan.
+**Scope:** Mem0g cache integration + 6 Read-API endpoints (AST-validated Cypher) + MCP V2 tools + Explorer UI (ArcadeDB Studio embed OR Cytoscape.js) + secure-deletion mechanism + parallel-projection plan.
 
 **Dependencies:** V2-α (Mem0g indexes FalkorDB which depends on projector — per Phase 2 Architect H-3 correction, NOT parallel as Phase 1 implied).
 
@@ -252,8 +252,9 @@ V2 is "successful" when **all** of the following hold:
 | Concept | Source-of-truth |
 |---|---|
 | Full V2 vision (rationale, Phase 1+2 provenance) | `.handoff/v2-master-vision-v1.md` |
-| 22 explicit ACCEPT/MODIFY/DEFER decisions | `.handoff/decisions.md` |
+| 23 explicit ACCEPT/MODIFY/DEFER decisions | `.handoff/decisions.md` |
 | Reusable 4-phase methodology | `docs/WORKING-METHODOLOGY.md` |
+| V2-α DB choice spike (ArcadeDB vs FalkorDB, Welle 2) | `docs/V2-ALPHA-DB-SPIKE.md` |
 | V1 public-API contract | `docs/SEMVER-AUDIT-V1.0.md` |
 | V1/V2 boundary spec | `docs/ARCHITECTURE.md` §10, §11 |
 | events.jsonl format | `crates/atlas-trust-core/src/trace_format.rs` |
