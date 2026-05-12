@@ -97,9 +97,9 @@ Open [`apps/wasm-playground/`](apps/wasm-playground) — drop in a `*.trace.json
 
 ---
 
-## Status — v1.0.0 (2026-05-11)
+## Status — v1.0.1 (2026-05-12)
 
-**First stable release.** Trust model frozen. Public verification API committed. Semver in force from here.
+**First stable release on npm.** Trust model frozen. Public verification API committed. Semver in force from here. The signed Git tag `v1.0.0` (2026-05-11) is preserved unmodified — v1.0.1 is the byte-identical SemVer-patch that corrects a `Cargo.toml` `workspace.package.repository` field which prevented the initial npm publish. See [CHANGELOG.md](CHANGELOG.md) for the full v1.0.0 → v1.0.1 narrative.
 
 - **347 Rust tests green** across the workspace (`--features hsm`) — covering trust-core unit + anchor-chain adversary + golden trace + per-tenant-keys adversary + Sigstore golden + witness-strict-mode + V1.14 Scope J integration + V1.15 Welle A source-level anti-drift pins
 - **SLSA Build L3 provenance** on every `@atlas-trust/verify-wasm` npm publish — OIDC-signed Sigstore Rekor attestation, verifiable via `npm audit signatures`

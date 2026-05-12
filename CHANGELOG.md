@@ -17,7 +17,27 @@ The v1.0 public-API surface contract is documented in
 
 ## [Unreleased]
 
-_No unreleased changes. Next release on this line will be v1.1.0 (SemVer-minor) or v1.0.1 (SemVer-patch) depending on scope. Public-API contract per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md)._
+_No unreleased changes. Next release on this line will be v1.1.0 (SemVer-minor) or v1.0.2 (SemVer-patch) depending on scope. Public-API contract per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md)._
+
+## [1.0.1] — 2026-05-12
+
+**SemVer-patch release — first version published to the npm registry.** No code changes; trust property, public API, and signed-tag chain are byte-identical to v1.0.0. This release corrects a `Cargo.toml` `workspace.package.repository` field that pointed at a stale organisation path (`https://github.com/ultranova/atlas`) instead of the canonical `https://github.com/ThePyth0nKid/atlas`. wasm-pack derives `package.json`'s `repository.url` from that Cargo field; npm's SLSA Build L3 provenance validator rejected the v1.0.0 publish attempt because the package.json URL did not match the GitHub Actions OIDC token's source-repository claim (`422 Unprocessable Entity — Error verifying sigstore provenance bundle: Failed to validate repository information`).
+
+### Fixed — V1.19 Welle 14a
+
+- `Cargo.toml` `workspace.package.repository`: `https://github.com/ultranova/atlas` → `https://github.com/ThePyth0nKid/atlas`. Flows through `wasm-pack build` into the generated `package.json` `repository.url`; the new value matches the OIDC `repository` claim emitted by GitHub Actions for `ThePyth0nKid/atlas`, unblocking SLSA Build L3 provenance verification.
+- `docs/ARCHITECTURE.md` reproduce-from-source `git clone` URL updated to match.
+
+### Changed — V1.19 Welle 14a
+
+- Workspace version bump 1.0.0 → 1.0.1 (single source of truth via `workspace.package.version`; all 5 crates inherit through `version.workspace = true`).
+- npm version bumps for `atlas-web`, `atlas-mcp-server`, `@atlas/bridge`, root monorepo manifest, and the `apps/atlas-mcp-server/src/index.ts` MCP server registration version.
+
+### Notes
+
+- The signed Git tag `v1.0.0` (`e97c025`, SSH-Ed25519 `SHA256:qq/VVJYpsgEdeQSLqU0QS/gKn6ohXJHio+VkzVX+4Zg`) is preserved unmodified. Atlas's tag-immutability invariant is upheld: published-but-unreachable artefacts are corrected by SemVer-patch, not by retroactive tag mutation.
+- The GitHub Release for `v1.0.0` remains live as a historical record with its byte-identical npm-pack tarballs; the release notes flag that the npm publish did not land for this tag and direct consumers to `npm install @atlas-trust/verify-wasm@1.0.1` (or `@latest`) instead.
+- No `Locked` public-API surface in [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) is touched. Per the SemVer contract committed at v1.0.0, this is a strict patch-level release.
 
 ## [1.0.0] — 2026-05-11
 
@@ -27,7 +47,7 @@ _No unreleased changes. Next release on this line will be v1.1.0 (SemVer-minor) 
 
 - Cargo workspace version bump 0.1.0 → 1.0.0 (single source of truth via `workspace.package.version`; all 5 crates inherit through `version.workspace = true`).
 - npm version bumps for `atlas-web`, `atlas-mcp-server`, `@atlas/bridge`, root monorepo manifest.
-- `@atlas-trust/verify-wasm@1.0.0` published to npm with SLSA L3 provenance attestation (auto-fires via `wasm-publish.yml` on signed-tag push; the published Sigstore Rekor entry is the public-trust anchor for this release).
+- `@atlas-trust/verify-wasm@1.0.0` build pipeline (`wasm-publish.yml`) auto-fires on signed-tag push to produce byte-identical `npm pack` tarballs (web + node targets) plus a `tarball-sha256.txt` manifest, uploaded to the GitHub Release as backup-channel assets per V1.15 Welle B. **Note (2026-05-12):** the npm-registry publish step for `v1.0.0` did not land due to a `Cargo.toml` repository-URL mismatch surfaced by npm's SLSA Build L3 provenance validator (see v1.0.1 entry). The `v1.0.0` Sigstore Rekor provenance attestation (logIndex `1510551161`, re-emitted as logIndex `1517641691` / `1517706827` across retry runs) was orphaned by the failed publish — it is content-addressed against the wasm bytes and remains audit-traceable. Consumers should install `@atlas-trust/verify-wasm@1.0.1` (or `@latest`) for the byte-identical trust property delivered through the npm registry.
 - Signed Git tag `v1.0.0` via the V1.17 SSH-Ed25519 path (key `SHA256:qq/VVJYpsgEdeQSLqU0QS/gKn6ohXJHio+VkzVX+4Zg`).
 
 ### Added — V1.19 Welle 12 (PR #48, commit cdf89e84)

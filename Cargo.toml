@@ -20,11 +20,11 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 authors = ["Nelson Mehlis <nelson@ultranova.io>"]
 license = "Apache-2.0"
-repository = "https://github.com/ultranova/atlas"
+repository = "https://github.com/ThePyth0nKid/atlas"
 rust-version = "1.85"
 
 [workspace.dependencies]
