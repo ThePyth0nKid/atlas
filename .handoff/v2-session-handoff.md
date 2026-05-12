@@ -1,8 +1,8 @@
-# Atlas V2 — Session Handoff (Strategic Iteration Mode, Phase 1 SHIPPED → Phase 2 pending)
+# Atlas V2 — Session Handoff (Strategic Iteration Mode, Phase 1+2 SHIPPED → Phase 3 pending)
 
-> **Bootstrap prompt für die nächste Claude Code Session.** Self-contained: ein Fresh Agent kann dieses Dokument + die referenzierten Files lesen und Phase 2 starten ohne irgendetwas neu zu derivieren. Designed um über mehrere Sessions stabil zu sein.
+> **Bootstrap prompt für die nächste Claude Code Session.** Self-contained: ein Fresh Agent kann dieses Dokument + die referenzierten Files lesen und Phase 3 starten ohne irgendetwas neu zu derivieren. Designed um über mehrere Sessions stabil zu sein.
 
-**Erstellt:** 2026-05-12. **Phase 1 shipped:** 2026-05-12 (this session). **Status:** Phase 1 ABGESCHLOSSEN, Phase 2 startbereit. **Next session entry point:** dieses Dokument §0a (Phase 1 SHIPPED block) zuerst lesen, dann die 5 Phase-1-Docs auf PR #59 review'n, dann Phase 2 critique-agent dispatch per §0b planen.
+**Erstellt:** 2026-05-12. **Phase 1+2 shipped:** 2026-05-12 (same session). **Status:** Phase 1 + Phase 2 ABGESCHLOSSEN, Phase 3 startbereit. **Next session entry point:** dieses Dokument §0a (Phase 1 SHIPPED) + §0b (Phase 2 SHIPPED) + §0c (Phase 3 Plan) lesen, dann PR #59 + PR #61 review'n, dann Phase 3 Synthesis mit Nelson starten (semi-manual, NICHT parallel-subagent-dispatchable).
 
 ---
 
@@ -47,9 +47,84 @@ Cleanup these worktrees post-Phase-2 (or now if disk space matters): `git worktr
 
 ---
 
-## 0b. Phase 2 Plan — Multi-Angle Critique (next session entry point)
+## 0b. Phase 2 SHIPPED — 2026-05-12 (this session, after Phase 1)
 
-**Goal:** 6 parallele critique-Subagents lesen alle 5 Phase-1-Docs auf PR-Branch `v2/phase-1-foundation` und produzieren strukturierte +/- Crits per Iteration-Framework §2.
+**Phase 2 of the V2 strategic iteration ist abgeschlossen.** 6 structured Critiques wurden parallel von 6 isolierten Subagents in eigenen git worktrees geschrieben. Integration auf branch `v2/phase-2-critiques` (PR #61, **DRAFT**, **NICHT mergen** — das ist der Phase-3-synthesis-target). Base-Branch von PR #61 ist `v2/phase-1-foundation` (PR #59) — Phase-2-Crits stacken atop Phase-1-Docs.
+
+**Integration PR:** https://github.com/ThePyth0nKid/atlas/pull/61 (draft, base = v2/phase-1-foundation)
+
+**Die 6 Critique Documents (alle auf `v2/phase-2-critiques` branch):**
+
+| # | Crit | File | Lines | Primary Targets |
+|---|------|------|-------|-----------------|
+| 1 | Architect | `.handoff/crit-architect.md` | 175 | Doc B + Doc D |
+| 2 | Security | `.handoff/crit-security.md` | 217 | Doc B + Doc C |
+| 3 | Database / Performance | `.handoff/crit-database.md` | 302 | Doc B + Doc D |
+| 4 | Product / UX | `.handoff/crit-product.md` | 124 | Doc A + Doc E |
+| 5 | Compliance / Regulatory | `.handoff/crit-compliance.md` | 185 | Doc A + Doc C |
+| 6 | Business / Investor | `.handoff/crit-business.md` | 296 | Doc A + Doc D + Doc E |
+
+**Total content:** 1299 lines structured critique across 6 perspectives.
+
+**Headline CRITICAL findings (one or two per crit):**
+- **Architect:** Projection determinism under-specified to unverifiability (Doc B §2.1/§3.2); Welle decomposition undercounted ~2× (realistic V2-α 5-8 sessions, total V2 14-20).
+- **Security:** Revocation lag bound is wrong (`event.timestamp` agent-claimed not Rekor-pinned → backdate possible; revocation event signed by compromised key). Cypher passthrough = injection + DoS surface. WASM verifier CDN-trust gap (SLSA L3 protects npm publish, NOT CDN delivery).
+- **Database:** FalkorDB "sub-ms p99 traversal" unsourced + dimensionally wrong. 91% Mem0g latency claim only cache-hit retrieval. Projection-rebuild 8.3h at 100M events, no parallel-projection plan.
+- **Product:** All demos lack failure-mode equivalent to HTTPS's absent-lock state. Two-market positioning operationally undefended. Zero demos show failure modes.
+- **Compliance:** "Independently verifiable" NOT in verbatim Art. 12 text. GDPR Art. 4(1) hash-as-personal-data is highest-stakes open legal question. **FACTUAL ERROR in Doc A §3.2:** EU AI Liability Directive was **WITHDRAWN Feb 2025** (Commission Work Programme 2025), not "expected 2026". Fallback regime is revised PLD 2024/2853. Regulator-witness federation has NO documented EU precedent.
+- **Business:** No TAM/SAM/SOM — **fundraising-blocking**. No first-10-customers pipeline. Hermes-skill math: 60K stars → ~4-36 retained users steady-state — reclassify as "credibility asset" not "GTM Hypothesis 1".
+
+**Convergence status:** Alle 6 Crits met or exceeded Iteration-Framework §2 criterion (≥5 strukturelle Punkte + ≥3 konkrete Edits). Quality high — genuinely surprising findings (esp. compliance AILD-withdrawal, database perf-deconstruction, business TAM/SAM/SOM gap).
+
+**Phase 2 worktree fork-base lesson (carry into Phase 3+):** `Agent` tool with `isolation: "worktree"` forks from master regardless of parent's current branch. 4 of 6 crit-agents found workarounds (`git show v2/phase-1-foundation:<path>`); 2 (architect, product) loaded Phase-1 docs to disk as reference — those staged-adds had to be reset before commit. Mitigation for Phase 3+: instruct subagents to `git fetch && git checkout <target>` as first action, OR pass critical content inline via prompt.
+
+---
+
+## 0c. Phase 3 Plan — Synthesis & Convergence (next session entry point)
+
+**Goal:** Synthesize the 6 Phase-2 critiques against the 5 Phase-1 Foundation Documents into a single coherent `.handoff/v2-master-vision-v1.md`, with every accepted/rejected/modified crit-point logged in `.handoff/decisions.log`.
+
+**Important:** Phase 3 is **semi-manual** with Nelson — NOT a parallel-subagent dispatch. Decisions belong to humans + Nelson + Claude jointly. Per Iteration-Framework §3, you read the crits together and make three classes of decisions:
+1. **ACCEPT** crit-points → directly insert into the Master-Vision-v1 (modifying Phase-1 docs as needed)
+2. **CONFLICT** between crits → Nelson decides with Claude's tradeoff-analysis (e.g., Architect's projection-determinism CRITICAL + Database's Mem0g latency CRITICAL both touch Doc B §2.5+§3.2 — must be reconciled, not both accepted independently)
+3. **REJECT** crit-points → log in `.handoff/decisions.log` with rationale + reversibility tag
+
+**Pre-flight (vor Phase-3-start):**
+1. `git fetch origin && git checkout v2/phase-2-critiques`
+2. Read all 6 crit files in `.handoff/crit-*.md` (cross-reference cited doc-sections)
+3. Re-read Iteration-Framework §3 (`.handoff/v2-iteration-framework.md`)
+4. Estimate decision-volume by skimming each crit's "Konkrete Vorschläge" + "Probleme" sections — probably 80-150 distinct decisions across all 6 crits
+
+**Top-priority cross-crit reconciliations (Phase 3 will need to resolve):**
+- **Projection-determinism** (Architect-C-1 + Security-Q-SEC-6 + Database-P-CRIT-3) — three perspectives on the same Doc B §2.1/§3.2 weak spot. Recommend: accept Architect's canonicalisation-byte-pin + accept Security's ProjectorRunAttestation event-binding + accept Database's parallel-projection requirement + add quantified RTO.
+- **GDPR-by-design vs GDPR-mitigated** (Architect-Q-ARCH-3 + Compliance-C-2) — both flag hash-personal-data as unresolved. Recommend: downgrade matrix wording, commit to EU-counsel engagement (Compliance recommends €30-80K budget).
+- **EU AI Liability Directive factual error** (Compliance-H-5) — Doc A §3.2 must be re-written. AILD was withdrawn Feb 2025; revised PLD 2024/2853 is the actual fallback regime. Doc A §4.2 (AI-Liability-Insurance pitch) needs full reframe.
+- **GTM sequencing** (Business-A vs Doc A current) — Business says reverse §6.5: EU-regulated enterprise must start Q0 not Q4 because sales cycles are 6-12 months. Recommend: accept reversal.
+- **Hermes-Agent reclassification** (Business + Product) — both crits agree Hermes should NOT be the primary GTM channel. Recommend: keep as credibility asset / demo channel but not GTM-Hypothesis-1.
+- **Demo programme overhaul** (Product) — Doc E needs Demo 6 (Quickstart, TODAY readiness) + Failure-Mode demo replacing Demo 4. Recommend: accept; instruct Phase-3 to revise Doc E.
+
+**Phase 3 outputs:**
+1. `.handoff/v2-master-vision-v1.md` — single consolidated coherent doc (Doc A + B + C + D + E merged + all accepted crit-edits)
+2. `.handoff/decisions.log` — ≥10 explicit ACCEPT/REJECT/MODIFY entries with rationale + reversibility
+3. Updated handoff (this file) with Phase 3 SHIPPED block + Phase 4 plan
+
+**Phase 3 convergence criterion** (per Framework §3): Master-Vision exists, all CRITICAL and HIGH crit-points addressed (accepted, modified, or explicitly rejected), decisions.log ≥10 entries.
+
+**Phase 3 lands on a new integration branch:** `v2/phase-3-master-vision`, base = `v2/phase-2-critiques`. Still draft PR, still no-merge. Only Phase 4 (`docs/V2-MASTER-PLAN.md` + `docs/WORKING-METHODOLOGY.md`) lands on master.
+
+**Timing:** ~2-3 sessions (semi-manual, decision-volume bounded by ~80-150 crit-points). Nelson + Claude work through synthesis methodically; not parallel-subagent dispatchable.
+
+---
+
+## 0d. Phase 1 Plan — DEPRECATED (kept for historical reference)
+
+⚠️ The original Phase 1 plan section below was superseded by Phase 1 SHIPPED (§0a). The original Phase 2 Plan section (formerly §0b) was superseded by Phase 2 SHIPPED (§0b above) and Phase 3 Plan (§0c). Below is the original Phase-1-Start handoff content preserved for historical reference and for any future agent that needs to understand the original strategic context (§4 in particular).
+
+---
+
+## ~~0b. Phase 2 Plan — Multi-Angle Critique (next session entry point)~~ [REPLACED by §0b SHIPPED + §0c Plan above]
+
+**Original goal:** 6 parallele critique-Subagents lesen alle 5 Phase-1-Docs auf PR-Branch `v2/phase-1-foundation` und produzieren strukturierte +/- Crits per Iteration-Framework §2.
 
 **Pre-flight (vor Phase-2-dispatch):**
 1. `git fetch origin && git checkout v2/phase-1-foundation` — sicherstellen die Branch ist lokal aktuell
