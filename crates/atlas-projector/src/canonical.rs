@@ -85,7 +85,7 @@ use crate::PROJECTOR_SCHEMA_VERSION;
 /// per-graph-state canonicalisation. Either way the bound prevents
 /// memory exhaustion under hostile input — the exact number is a
 /// workload-fit choice, not a security boundary.
-const MAX_ITEMS_PER_LEVEL: usize = 100_000;
+pub(crate) const MAX_ITEMS_PER_LEVEL: usize = 100_000;
 
 /// Build canonical CBOR bytes for a `GraphState`.
 ///

@@ -378,6 +378,16 @@ fn apply_annotation_add(event: &AtlasEvent, state: &mut GraphState) -> Projector
                 field: "entity_uuid".to_string(),
             })?;
 
+    // Defence-in-depth: empty-string entity_uuid is rejected explicitly so
+    // the resulting error message disambiguates "empty string submitted"
+    // from "valid UUID not in state". Symmetric with `apply_anchor_created`.
+    if entity_uuid.is_empty() {
+        return Err(ProjectorError::MissingPayloadField {
+            event_id: event.event_id.clone(),
+            field: "entity_uuid (empty string)".to_string(),
+        });
+    }
+
     let annotation_kind = payload_obj
         .get("annotation_kind")
         .and_then(Value::as_str)
@@ -403,15 +413,28 @@ fn apply_annotation_add(event: &AtlasEvent, state: &mut GraphState) -> Projector
         }
     })?;
 
+    // Per-event DoS cap: refuse to grow an annotation kind's Vec beyond
+    // the canonicalisation-time cap. Without this early-exit a hostile
+    // trace could accumulate `MAX_ITEMS_PER_LEVEL` entries per kind per
+    // node in memory before `build_canonical_bytes` ever runs. Shares
+    // the `MAX_ITEMS_PER_LEVEL` constant from `canonical.rs` to keep the
+    // upsert-time bound and the canonicalisation-time bound in lockstep.
+    let list = node.annotations.entry(annotation_kind.clone()).or_default();
+    if list.len() >= crate::canonical::MAX_ITEMS_PER_LEVEL {
+        return Err(ProjectorError::CanonicalisationFailed(format!(
+            "annotation kind '{}' on entity '{}' exceeds max entries ({})",
+            annotation_kind,
+            entity_uuid,
+            crate::canonical::MAX_ITEMS_PER_LEVEL
+        )));
+    }
+
     let entry = AnnotationEntry {
         body: annotation_body,
         event_uuid: event.event_id.clone(),
         author_did: event.author_did.clone(),
     };
-    node.annotations
-        .entry(annotation_kind)
-        .or_default()
-        .push(entry);
+    list.push(entry);
     Ok(())
 }
 
@@ -446,6 +469,16 @@ fn apply_policy_set(event: &AtlasEvent, state: &mut GraphState) -> ProjectorResu
                 event_id: event.event_id.clone(),
                 field: "entity_uuid".to_string(),
             })?;
+
+    // Defence-in-depth: empty-string entity_uuid is rejected explicitly so
+    // the resulting error message disambiguates "empty string submitted"
+    // from "valid UUID not in state". Symmetric with `apply_anchor_created`.
+    if entity_uuid.is_empty() {
+        return Err(ProjectorError::MissingPayloadField {
+            event_id: event.event_id.clone(),
+            field: "entity_uuid (empty string)".to_string(),
+        });
+    }
 
     let policy_id = payload_obj
         .get("policy_id")
@@ -1334,5 +1367,124 @@ mod tests {
             }
             other => panic!("expected MissingPayloadField; got {other:?}"),
         }
+    }
+
+    /// W14 reviewer-fix: defence-in-depth — empty-string `entity_uuid` on
+    /// `annotation_add` must surface the disambiguated
+    /// `entity_uuid (empty string)` message rather than the generic
+    /// "not found in state" message used for legitimate-but-missing
+    /// entity_uuids. Symmetric with `apply_anchor_created`'s guard.
+    #[test]
+    fn annotation_add_with_empty_entity_uuid_errors() {
+        let mut state = GraphState::new();
+        let event = make_event(
+            "01HANN1",
+            json!({
+                "type": "annotation_add",
+                "entity_uuid": "",
+                "annotation_kind": "k",
+                "annotation_body": "b"
+            }),
+            None,
+        );
+        match apply_event_to_state(WS, &event, &mut state) {
+            Err(ProjectorError::MissingPayloadField { field, .. }) => {
+                assert_eq!(
+                    field, "entity_uuid (empty string)",
+                    "field must disambiguate empty-string from missing-entity; got {field}"
+                );
+            }
+            other => panic!("expected MissingPayloadField; got {other:?}"),
+        }
+    }
+
+    /// W14 reviewer-fix: defence-in-depth — empty-string `entity_uuid` on
+    /// `policy_set` must surface the disambiguated
+    /// `entity_uuid (empty string)` message. Symmetric with
+    /// `apply_anchor_created`'s guard.
+    #[test]
+    fn policy_set_with_empty_entity_uuid_errors() {
+        let mut state = GraphState::new();
+        let event = make_event(
+            "01HPOL1",
+            json!({
+                "type": "policy_set",
+                "entity_uuid": "",
+                "policy_id": "p1"
+            }),
+            None,
+        );
+        match apply_event_to_state(WS, &event, &mut state) {
+            Err(ProjectorError::MissingPayloadField { field, .. }) => {
+                assert_eq!(
+                    field, "entity_uuid (empty string)",
+                    "field must disambiguate empty-string from missing-entity; got {field}"
+                );
+            }
+            other => panic!("expected MissingPayloadField; got {other:?}"),
+        }
+    }
+
+    /// W14 reviewer-fix (security MEDIUM-2): per-event DoS cap on
+    /// `annotation_add` Vec growth must fire at upsert time, not only at
+    /// canonicalisation. Closes the hostile-trace memory-exhaustion
+    /// window where 100_000 entries per kind per node could accumulate
+    /// before `build_canonical_bytes` ever ran.
+    #[test]
+    fn annotation_add_at_cap_returns_error_before_canonicalisation() {
+        let mut state = GraphState::new();
+        seed_node(&mut state, "alice");
+
+        // Pre-fill the annotation Vec to the cap directly (avoid running
+        // 100_000 upserts — this test must stay fast). The cap is shared
+        // with `canonical::MAX_ITEMS_PER_LEVEL`.
+        let kind = "spam".to_string();
+        let prefilled: Vec<AnnotationEntry> = (0..crate::canonical::MAX_ITEMS_PER_LEVEL)
+            .map(|i| AnnotationEntry {
+                body: format!("body-{i}"),
+                event_uuid: format!("01HSEED-{i}"),
+                author_did: None,
+            })
+            .collect();
+        state
+            .nodes
+            .get_mut("alice")
+            .unwrap()
+            .annotations
+            .insert(kind.clone(), prefilled);
+
+        // Now the cap+1 upsert must error at upsert time —
+        // `CanonicalisationFailed` is the existing variant for shape /
+        // bound violations and keeps the `#[non_exhaustive]` enum stable.
+        let event = make_event(
+            "01HANN-OVERFLOW",
+            json!({
+                "type": "annotation_add",
+                "entity_uuid": "alice",
+                "annotation_kind": "spam",
+                "annotation_body": "one-too-many"
+            }),
+            None,
+        );
+        match apply_event_to_state(WS, &event, &mut state) {
+            Err(ProjectorError::CanonicalisationFailed(msg)) => {
+                assert!(
+                    msg.contains("annotation kind") && msg.contains("exceeds max entries"),
+                    "message must identify the cap breach; got {msg}"
+                );
+                assert!(
+                    msg.contains("spam") && msg.contains("alice"),
+                    "message must surface kind + entity for operator diagnosis; got {msg}"
+                );
+            }
+            other => panic!("expected CanonicalisationFailed; got {other:?}"),
+        }
+
+        // The Vec must not have grown past the cap.
+        assert_eq!(
+            state.nodes["alice"].annotations["spam"].len(),
+            crate::canonical::MAX_ITEMS_PER_LEVEL,
+            "upsert-time cap must refuse the write, leaving Vec at exactly the cap"
+        );
     }
 }
