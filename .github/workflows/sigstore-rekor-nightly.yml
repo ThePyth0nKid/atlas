@@ -108,6 +108,15 @@ jobs:
       - name: Build @atlas/bridge (TypeScript)
         run: pnpm --filter @atlas/bridge build
 
+      - name: Build @atlas/cypher-validator
+        # V2-Beta Welle 15 hotfix: @atlas/cypher-validator emits dist/
+        # via tsc, matching @atlas/bridge convention. The MCP-server's
+        # query-graph tool imports from `@atlas/cypher-validator`,
+        # which the consumer `tsc` resolves through main/types/exports
+        # → ./dist/*.js. Without this step the MCP-server build fails
+        # with TS2307 "Cannot find module '@atlas/cypher-validator'".
+        run: pnpm --filter @atlas/cypher-validator build
+
       - name: Build MCP-server (TypeScript)
         run: pnpm build
         working-directory: apps/atlas-mcp-server
