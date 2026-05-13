@@ -129,7 +129,7 @@ Full risk matrix with 13+ entries in `.handoff/v2-master-vision-v1.md` §6.
 
 **Expected PR count:** 5–8 (one per session, ~Welle-14c/d/e size). **All 8 wellen shipped 2026-05-12 to 2026-05-13.** V2-α-α.1 release tag `v2.0.0-alpha.1` LIVE on master + GitHub + npm.
 
-### V2-β Read-Side (10 phases, 11 wellen W9-W19, ~12 sessions with parallel dispatch) — **Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 SHIPPED 2026-05-13**
+### V2-β Read-Side (10 phases, 11 wellen W9-W19, ~12 sessions with parallel dispatch) — **Phase 0 + 1 + 2 + 3 + 4 + 5 + 6 + 7 SHIPPED 2026-05-13**
 **Scope (full):** Mem0g cache integration + 6 Read-API endpoints (AST-validated Cypher) + MCP V2 tools + ArcadeDB embedded-mode backend + secure-deletion mechanism + parallel-projection design + expanded projector event-kinds + wasm-publish-race fix + v2.0.0-beta.1 ship.
 
 **Orchestration:** see [`docs/V2-BETA-ORCHESTRATION-PLAN.md`](V2-BETA-ORCHESTRATION-PLAN.md) (master-resident, Phase-0 output 2026-05-13) and [`docs/V2-BETA-DEPENDENCY-GRAPH.md`](V2-BETA-DEPENDENCY-GRAPH.md) (Mermaid + critical-path analysis). V2-β welle-progress tracker lives in the Orchestration Plan §2 + §3.4 (ADR-number reservation).
@@ -140,9 +140,13 @@ Full risk matrix with 13+ entries in `.handoff/v2-master-vision-v1.md` §6.
 
 **Phase 4 SHIPPED 2026-05-13:** W12 Read-API endpoints (6 Next.js routes + inline Cypher AST validator) + W13 MCP V2 tools (5 tools + inline Cypher AST validator, rule-of-three with W12) + W14 expanded projector event-kinds (`annotation_add` + `policy_set` + `anchor_created` additive dispatch arms with byte-determinism preservation). Three subagents in parallel worktrees, 6 per-welle reviewers, 1 cross-batch consistency-reviewer. All 7 V2-α byte-determinism CI pins byte-identical post-merge.
 
-**Phase 5 SHIPPED 2026-05-13:** this consolidation commit. CHANGELOG promoted Phase-4 wellen to `[Unreleased]`; master-plan §6, orchestration-plan welle-progress, handoff doc all synchronised.
+**Phase 5 SHIPPED 2026-05-13:** Phase-4-batch consolidation commit (PR #75-style for Phase 4).
 
-**Phase 6 next:** W15 Cypher-validator consolidation (rule-of-three extraction after W12 + W13 each ship inline; W15 entry criteria documented in CHANGELOG `[Unreleased]`).
+**Phase 6 SHIPPED 2026-05-13:** W15 Cypher-validator consolidation. Shared `@atlas/cypher-validator` monorepo package extracts the rule-of-three-aligned validators from W12 + W13 inlines. 43 unified tests; ADR-Atlas-009 documents the 10-section rationale. Two reviewer-driven hotfixes in PR #81 (proper `tsc` build step + workflow build-step propagation to wave3-smoke + sigstore-rekor-nightly). Byte-determinism unchanged (no Rust touched).
+
+**Phase 7 SHIPPED 2026-05-13:** this consolidation commit (post-W15 single-welle parent-consolidation).
+
+**Phase 8 next:** W16 ArcadeDB embedded-mode spike-doc (`docs/V2-BETA-ARCADEDB-SPIKE.md`, analog V2-α Welle 2 FalkorDB spike). Resolves JVM-dependency footprint, embedded vs server mode, FalkorDB fallback trigger criteria, Rust HTTP client choice. ADR-Atlas-010 reserved.
 
 **Dependencies:** V2-α (Mem0g indexes FalkorDB which depends on projector — per Phase 2 Architect H-3 correction, NOT parallel as Phase 1 implied).
 

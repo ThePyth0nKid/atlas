@@ -17,7 +17,19 @@ The v1.0 public-API surface contract is documented in
 
 ## [Unreleased]
 
-**V2-β Phase 4 parallel batch (Welles 12 + 13 + 14) landed on master 2026-05-13 — promoting candidate for `v2.0.0-alpha.3`.** V2-α public-API contract per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10 unchanged on the Rust verifier side; this batch adds the V2-β Read-side public surfaces (`apps/atlas-web` Read-API + `apps/atlas-mcp-server` MCP V2 tools) and extends `atlas-projector` event-kind dispatch with 3 new additive kinds. All 7 V2-α byte-determinism CI pins byte-identical from v2.0.0-alpha.2 baseline.
+**V2-β Phase 4 parallel batch (Welles 12 + 13 + 14) + Phase 5 consolidation + Phase 6 W15 Cypher-validator consolidation all landed on master 2026-05-13 — promoting candidate for `v2.0.0-alpha.3`.** V2-α public-API contract per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10 unchanged on the Rust verifier side; this batch adds the V2-β Read-side public surfaces (`apps/atlas-web` Read-API + `apps/atlas-mcp-server` MCP V2 tools), extends `atlas-projector` event-kind dispatch with 3 new additive kinds, and consolidates the Cypher AST validator into a shared `@atlas/cypher-validator` monorepo package. All 7 V2-α byte-determinism CI pins byte-identical from v2.0.0-alpha.2 baseline.
+
+### Refactored — V2-β Welle 15 (Cypher-validator consolidation, 2026-05-13)
+
+- **NEW `packages/atlas-cypher-validator/`** — shared monorepo package extracting the Cypher AST validator from W12 + W13 inline copies (rule-of-three pattern). Public exports: `validateReadOnlyCypher`, `CYPHER_MAX_LENGTH`, `CypherValidationResult`. Mirrors `packages/atlas-bridge/` conventions: `tsc` build step, `dist/*.js` + `dist/*.d.ts` outputs, `main`/`types`/`exports` pointing to dist, `files: ["dist", "src"]`.
+- **Union semantics preserved** — consolidated validator rejects ANY pattern that EITHER pre-W15 inline rejected (strictly superset). Procedure-namespace deny-list union of W12's bare-CALL rejection + W13's `CALL dbms.*` explicit + W12's broader `db.*` guard. String-concat detection uses W12's stricter rule (any `+`). Comment-stripping includes `.trimStart()` after strip (W13's correctness invariant).
+- **43 unified test cases** in `packages/atlas-cypher-validator/src/validator.test.ts` (deduplicated from W12×25 + W13×27 + 3 union-semantics-specific). All green.
+- **2 callsites updated:** `apps/atlas-web/src/app/api/atlas/query/route.ts` + `apps/atlas-mcp-server/src/tools/query-graph.ts` now import from `@atlas/cypher-validator`. Both consumer `package.json` declare `"@atlas/cypher-validator": "workspace:*"`.
+- **4 deleted files:** the two inline `cypher-validator.ts` + their test files (W12-inline at `apps/atlas-web/src/app/api/atlas/_lib/` + W13-inline at `apps/atlas-mcp-server/`).
+- **NEW `docs/ADR/ADR-Atlas-009-cypher-validator-consolidation-rationale.md`** (321 lines, 10 sections) — full option analysis (A: shared package = RECOMMENDED; B: mirror module per consumer = rejected; C: leave inline = rejected). Documents 6 invariants from cross-batch consistency-reviewer Phase 4 findings.
+- **CI workflows updated:** `atlas-web-playwright.yml`, `hsm-wave3-smoke.yml`, `sigstore-rekor-nightly.yml` each gain a `Build @atlas/cypher-validator` step before consumer build (since consumers depend on the package's compiled `dist/`). `packages/atlas-cypher-validator/**` added to path filters where applicable.
+- **Two reviewer-driven hotfixes applied in PR #81:** initial commit had `main`/`types`/`exports` pointing to source (not dist) — fixed in hotfix-1 with proper tsc build step; CI workflow gap surfaced wave3-smoke build break — fixed in hotfix-2 by adding the validator build step to all consumer workflows. 4 total commits on the W15 branch.
+- **Open question carried into V2-γ:** AST-level Cypher parsing (currently regex-based; documented as Open Question in ADR §8).
 
 ### Added — V2-β Welle 12 (Read-API endpoints + inline Cypher AST validator, 2026-05-13)
 

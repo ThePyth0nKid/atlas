@@ -2,14 +2,16 @@
 
 > **Status:** Phase-0 output, master-resident. **Effective 2026-05-13.**
 >
-> **Welle progress (updated 2026-05-13, Phase 5 consolidation commit):**
+> **Welle progress (updated 2026-05-13, Phase 7 consolidation commit):**
 > - Phase 0 SHIPPED (PR #71) — this plan + Dependency Graph + welle plan-doc template
 > - Phase 1 SHIPPED — W9 Operator Runbook (PR #72), W10 Parallel-Projection ADR-Atlas-007 (PR #73), W11 wasm-publish.yml race fix + ADR-Atlas-008 (PR #74)
 > - Phase 2 SHIPPED — Phase-1-batch consolidation (PR #75)
 > - Phase 3 SHIPPED — `v2.0.0-alpha.2` released (PR #76); signed tag + GitHub Release + npm publish validates W11 fix end-to-end
-> - Phase 4 SHIPPED — W12 Read-API endpoints (PR #79), W13 MCP V2 tools (PR #77), W14 expanded event-kinds (PR #78). Three parallel subagents in isolated worktrees, 6 per-welle reviewer agents + 1 cross-batch consistency-reviewer. Three reviewer-driven fix-commits per branch. All 7 byte-determinism CI pins byte-identical post-merge.
-> - Phase 5 SHIPPED — this consolidation commit (CHANGELOG + master-plan §6 + orchestration-plan welle-progress + handoff doc).
-> - Phase 6 next — W15 Cypher-validator consolidation (rule-of-three extraction; entry criteria documented in CHANGELOG `[Unreleased]`).
+> - Phase 4 SHIPPED — W12 Read-API (PR #79), W13 MCP V2 tools (PR #77), W14 expanded event-kinds (PR #78). Three parallel subagents in isolated worktrees, 6 per-welle reviewer agents + 1 cross-batch consistency-reviewer. Three reviewer-driven fix-commits per branch. All 7 byte-determinism CI pins byte-identical post-merge.
+> - Phase 5 SHIPPED — Phase-4-batch consolidation (PR #80)
+> - Phase 6 SHIPPED — W15 Cypher-validator consolidation (PR #81). NEW `packages/atlas-cypher-validator/` shared monorepo package + ADR-Atlas-009. Two reviewer-driven hotfixes (tsc build step + workflow propagation).
+> - Phase 7 SHIPPED — this consolidation commit (CHANGELOG + master-plan §6 + orchestration-plan welle-progress + handoff doc).
+> - Phase 8 next — W16 ArcadeDB embedded-mode spike-doc.
 > **Companion docs:** [`V2-BETA-DEPENDENCY-GRAPH.md`](V2-BETA-DEPENDENCY-GRAPH.md) (welle dependency edges + Mermaid diagram); [`../.handoff/v2-beta-welle-N-plan.md.template`](../.handoff/v2-beta-welle-N-plan.md.template) (per-welle plan-doc skeleton).
 > **Methodology baseline:** [`WORKING-METHODOLOGY.md`](WORKING-METHODOLOGY.md) — Atlas's 4-phase iteration framework, proven by V2-α Welles 1-8.
 > **Strategic context:** Atlas `v2.0.0-alpha.1` shipped 2026-05-13 (master commit `47b6894`; signed tag pushed; npm `@atlas-trust/verify-wasm@2.0.0-alpha.1` LIVE). V2-α delivered the cryptographic projection-state verification primitive end-to-end. V2-β scope per [`V2-MASTER-PLAN.md`](V2-MASTER-PLAN.md) §6.
@@ -110,7 +112,7 @@ V2-β ADRs (Architecture Decision Records) reserved in advance to prevent parall
 |---|---|---|---|
 | ADR-Atlas-007 | Parallel-projection design (W10) | 1 | **SHIPPED 2026-05-13** (PR #73) |
 | ADR-Atlas-008 | wasm-publish.yml race postmortem (W11) | 1 | **SHIPPED 2026-05-13** (PR #74) |
-| ADR-Atlas-009 | Cypher-validator consolidation rationale (W15) | 5 | **available** — Phase 6 next |
+| ADR-Atlas-009 | Cypher-validator consolidation rationale (W15) | 6 | **SHIPPED 2026-05-13** (PR #81) |
 | ADR-Atlas-009 | Cypher-validator consolidation rationale (W15) | 5 | available |
 | ADR-Atlas-010 | ArcadeDB backend choice + embedded-mode trade-off (W16) | 6 | available |
 | ADR-Atlas-011 | ArcadeDB driver scaffold + trait design (W17a) | 7 | available |
