@@ -111,24 +111,32 @@ Full risk matrix with 13+ entries in `.handoff/v2-master-vision-v1.md` §6.
 
 > **Phase 2 re-baseline:** Phase 1 estimated 10–14 sessions total; Phase 2 Architect H-3 + Database P-CRIT-3 surfaced concrete blocker items adding 2–4 sessions to V2-α alone. **Total V2 = 14–20 sessions** plus 6–8 weeks counsel engagement in parallel with V2-α. Welle 14b/c/d/e existing roadmap remains (14b: npm Trusted Publishers + dual-publish fix; can run in parallel with V2-α prep).
 
-### V2-α Foundation (5–8 sessions)
-**Scope:** Atlas Projector + **ArcadeDB integration** (post-Welle-2 flip) + Agent-DID schema (Welle 1, SHIPPED) + content-hash separation + projector-state-hash CI gate + `ProjectorRunAttestation` signed event + ArcadeDB vs FalkorDB comparative spike (Welle 2, SHIPPED) + GDPR counsel opinion gate.
+### V2-α Foundation (5–8 sessions) — **SHIPPED 2026-05-13 as `v2.0.0-alpha.1` (Welles 1-8, 8 of 8 done)**
+**Scope:** Atlas Projector + **ArcadeDB integration** (post-Welle-2 flip) + Agent-DID schema + content-hash separation + projector-state-hash gate library + `ProjectorRunAttestation` signed event + `atlas-signer emit-projector-attestation` CLI + ArcadeDB vs FalkorDB comparative spike + counsel opinion gate (pre-public-materials parallel-track).
 
-**Dependencies:** counsel engagement kickoff (parallel); Welle 2 spike informed the V2-α DB lock (ArcadeDB primary recommended); canonicalisation byte-pin spec.
+**Dependencies:** counsel engagement kickoff (parallel track, Nelson-led); Welle 2 spike informed the V2-α DB lock (ArcadeDB primary recommended); canonicalisation byte-pin spec.
 
-**Blocking risks:** R-A-01 (determinism), R-L-01 (GDPR counsel), R-L-02 (mitigated by Welle 2 spike flip to ArcadeDB primary).
+**Blocking risks:** R-A-01 (determinism — mitigated via Welle 3 canonicalisation byte-pin + Welle 6 verify_attestations_in_trace library); R-L-01 (GDPR counsel — pre-public-materials parallel track per `DECISION-COUNSEL-1`); R-L-02 (mitigated by Welle 2 spike flip to ArcadeDB primary).
 
 **Success criteria:**
-- Projector emits canonical byte-pinned graph state matching `.projection-integrity.json` (CI gate green)
-- Each projector run emits a signed `ProjectorRunAttestation` into Layer 1
-- Agent DID schema (`did:atlas:<pubkey-hash>`) issued + parsed by verifier (SHIPPED 2026-05-12)
-- ArcadeDB vs FalkorDB comparative spike yields go/no-go decision (SHIPPED 2026-05-12; recommendation: ArcadeDB primary, FalkorDB fallback)
-- Counsel opinion on GDPR Art. 4(1) hash-as-PII delivered
+- Projector emits canonical byte-pinned graph state (Welle 3, SHIPPED — `graph_state_hash` byte-pin = 1 of 7 V2-α CI byte-pins)
+- Each projector run can emit a signed `ProjectorRunAttestation` into Layer 1 (Welle 4 payload + Welle 5 emission + Welle 7 atlas-signer CLI, all SHIPPED)
+- Agent DID schema (`did:atlas:<pubkey-hash>`) issued + parsed by verifier (Welle 1, SHIPPED 2026-05-12)
+- ArcadeDB vs FalkorDB comparative spike yields go/no-go decision (Welle 2, SHIPPED 2026-05-12; recommendation: ArcadeDB primary, FalkorDB fallback)
+- `verify_attestations_in_trace` library function for projection-state verification (Welle 6, SHIPPED — automated pinned-CI-gate against `.projection-integrity.json` is deferred to V2-β)
+- v2.0.0-alpha.1 ship: workspace version bump + signed tag + GitHub Release + npm `@atlas-trust/verify-wasm@2.0.0-alpha.1` (Welle 8, SHIPPED 2026-05-13)
+- Counsel opinion on GDPR Art. 4(1) hash-as-PII delivered (parallel track, in-flight)
 
-**Expected PR count:** 5–8 (one per session, ~Welle-14c/d/e size). **Welle 1 + Welle 2 shipped 2026-05-12 (2 of 5-8 done).**
+**Expected PR count:** 5–8 (one per session, ~Welle-14c/d/e size). **All 8 wellen shipped 2026-05-12 to 2026-05-13.** V2-α-α.1 release tag `v2.0.0-alpha.1` LIVE on master + GitHub + npm.
 
-### V2-β Read-Side (4–5 sessions, depends serially on V2-α)
-**Scope:** Mem0g cache integration + 6 Read-API endpoints (AST-validated Cypher) + MCP V2 tools + Explorer UI (ArcadeDB Studio embed OR Cytoscape.js) + secure-deletion mechanism + parallel-projection plan.
+### V2-β Read-Side (10 phases, 11 wellen W9-W19, ~12 sessions with parallel dispatch) — **Phase 0 + Phase 1 + Phase 2 SHIPPED 2026-05-13**
+**Scope (full):** Mem0g cache integration + 6 Read-API endpoints (AST-validated Cypher) + MCP V2 tools + ArcadeDB embedded-mode backend + secure-deletion mechanism + parallel-projection design + expanded projector event-kinds + wasm-publish-race fix + v2.0.0-beta.1 ship.
+
+**Orchestration:** see [`docs/V2-BETA-ORCHESTRATION-PLAN.md`](V2-BETA-ORCHESTRATION-PLAN.md) (master-resident, Phase-0 output 2026-05-13) and [`docs/V2-BETA-DEPENDENCY-GRAPH.md`](V2-BETA-DEPENDENCY-GRAPH.md) (Mermaid + critical-path analysis). V2-β welle-progress tracker lives in the Orchestration Plan §2 + §3.4 (ADR-number reservation).
+
+**Phase 1 SHIPPED 2026-05-13 (`v2.0.0-alpha.2` candidate):** W9 Operator Runbook + W10 Parallel-Projection Design ADR-Atlas-007 + W11 wasm-publish.yml dual-publish race fix + ADR-Atlas-008. Three subagents in parallel worktrees, 6 per-welle reviewers (3 × code + 3 × security), 1 cross-batch consistency-reviewer (V2-β NEW invariant per Orchestration Plan §3.5). All 7 V2-α byte-determinism CI pins byte-identical post-merge.
+
+**Phase 3 next:** v2.0.0-alpha.2 ship welle (promotes Phase-1-batch to released pre-release, validates the W11 wasm-publish.yml fix end-to-end).
 
 **Dependencies:** V2-α (Mem0g indexes FalkorDB which depends on projector — per Phase 2 Architect H-3 correction, NOT parallel as Phase 1 implied).
 

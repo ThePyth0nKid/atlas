@@ -1,6 +1,12 @@
 # V2-β Wave Orchestration Plan
 
 > **Status:** Phase-0 output, master-resident. **Effective 2026-05-13.**
+>
+> **Welle progress (updated 2026-05-13, Phase 2 consolidation commit):**
+> - Phase 0 SHIPPED (PR #71) — this plan + Dependency Graph + welle plan-doc template
+> - Phase 1 SHIPPED — W9 Operator Runbook (PR #72), W10 Parallel-Projection ADR-Atlas-007 (PR #73), W11 wasm-publish.yml race fix + ADR-Atlas-008 (PR #74). Three parallel subagents in isolated worktrees, 6 per-welle reviewer agents + 1 cross-batch consistency-reviewer. All 7 byte-determinism CI pins byte-identical post-merge.
+> - Phase 2 SHIPPED — this consolidation commit (CHANGELOG + master-plan §6 + handoff doc + W9 §7-numbering-gap fix-forward from consistency-reviewer LOW finding).
+> - Phase 3 next — v2.0.0-alpha.2 ship welle.
 > **Companion docs:** [`V2-BETA-DEPENDENCY-GRAPH.md`](V2-BETA-DEPENDENCY-GRAPH.md) (welle dependency edges + Mermaid diagram); [`../.handoff/v2-beta-welle-N-plan.md.template`](../.handoff/v2-beta-welle-N-plan.md.template) (per-welle plan-doc skeleton).
 > **Methodology baseline:** [`WORKING-METHODOLOGY.md`](WORKING-METHODOLOGY.md) — Atlas's 4-phase iteration framework, proven by V2-α Welles 1-8.
 > **Strategic context:** Atlas `v2.0.0-alpha.1` shipped 2026-05-13 (master commit `47b6894`; signed tag pushed; npm `@atlas-trust/verify-wasm@2.0.0-alpha.1` LIVE). V2-α delivered the cryptographic projection-state verification primitive end-to-end. V2-β scope per [`V2-MASTER-PLAN.md`](V2-MASTER-PLAN.md) §6.
@@ -99,8 +105,8 @@ V2-β ADRs (Architecture Decision Records) reserved in advance to prevent parall
 
 | ADR # | Reserved for | Phase | Status |
 |---|---|---|---|
-| ADR-Atlas-007 | Parallel-projection design (W10) | 1 | available |
-| ADR-Atlas-008 | wasm-publish.yml race postmortem (W11) | 1 | available |
+| ADR-Atlas-007 | Parallel-projection design (W10) | 1 | **SHIPPED 2026-05-13** (PR #73) |
+| ADR-Atlas-008 | wasm-publish.yml race postmortem (W11) | 1 | **SHIPPED 2026-05-13** (PR #74) |
 | ADR-Atlas-009 | Cypher-validator consolidation rationale (W15) | 5 | available |
 | ADR-Atlas-010 | ArcadeDB backend choice + embedded-mode trade-off (W16) | 6 | available |
 | ADR-Atlas-011 | ArcadeDB driver scaffold + trait design (W17a) | 7 | available |
