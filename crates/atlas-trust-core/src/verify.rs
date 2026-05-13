@@ -134,7 +134,7 @@ pub struct VerifyOutcome {
     pub evidence: Vec<VerifyEvidence>,
     /// Errors that triggered `valid=false`.
     pub errors: Vec<String>,
-    /// Verifier build identity (e.g. "atlas-trust-core/1.0.0").
+    /// Verifier build identity (e.g. "atlas-trust-core/2.0.0-alpha.1").
     pub verifier_version: String,
     /// V1.14 Scope J: structured per-witness failure records suitable
     /// for programmatic auditor consumption (kid + batch_index +
