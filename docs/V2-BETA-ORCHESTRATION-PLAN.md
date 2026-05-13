@@ -12,8 +12,10 @@
 > - Phase 6 SHIPPED — W15 Cypher-validator consolidation (PR #81). NEW `packages/atlas-cypher-validator/` + ADR-Atlas-009. Two reviewer-driven hotfixes (tsc build step + workflow propagation).
 > - Phase 7 SHIPPED — Post-W15 single-welle consolidation (PR #82).
 > - Phase 8 SHIPPED — W16 ArcadeDB embedded-mode spike + ADR-Atlas-010 (PR #83). Locks W17 architectural decisions. Two reviewer-driven HIGH fixes in-commit.
-> - Phase 8.5 SHIPPED — this consolidation commit + bulletproof handoff doc update.
-> - Phase 9 next — W17a ArcadeDB driver scaffold + `GraphStateBackend` trait + InMemoryBackend wire-up + ArcadeDbBackend stub + ADR-Atlas-011.
+> - Phase 8.5 SHIPPED — Phase-8 consolidation + bulletproof handoff doc update (PR #84).
+> - Phase 9 SHIPPED — W17a ArcadeDB driver scaffold + `GraphStateBackend` trait + InMemoryBackend wire-up + ArcadeDbBackend stub + ADR-Atlas-011 (PR #85). Parallel external code-reviewer + security-reviewer both APPROVE (0 CRITICAL / 0 HIGH); one MEDIUM applied in-commit (`#[doc(hidden)]` on `snapshot()`), four documented as W17b/V2-γ carry-overs.
+> - Phase 9.5 SHIPPED — this consolidation commit (CHANGELOG + master-plan + handoff updates).
+> - Phase 10 next — W17b ArcadeDB driver implementation (`reqwest` HTTP + Cypher per ADR-Atlas-010 §4); must pass cross-backend byte-determinism test before merge.
 > **Companion docs:** [`V2-BETA-DEPENDENCY-GRAPH.md`](V2-BETA-DEPENDENCY-GRAPH.md) (welle dependency edges + Mermaid diagram); [`../.handoff/v2-beta-welle-N-plan.md.template`](../.handoff/v2-beta-welle-N-plan.md.template) (per-welle plan-doc skeleton).
 > **Methodology baseline:** [`WORKING-METHODOLOGY.md`](WORKING-METHODOLOGY.md) — Atlas's 4-phase iteration framework, proven by V2-α Welles 1-8.
 > **Strategic context:** Atlas `v2.0.0-alpha.1` shipped 2026-05-13 (master commit `47b6894`; signed tag pushed; npm `@atlas-trust/verify-wasm@2.0.0-alpha.1` LIVE). V2-α delivered the cryptographic projection-state verification primitive end-to-end. V2-β scope per [`V2-MASTER-PLAN.md`](V2-MASTER-PLAN.md) §6.
