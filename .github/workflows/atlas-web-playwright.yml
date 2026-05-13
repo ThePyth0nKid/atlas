@@ -38,6 +38,7 @@ on:
     paths:
       - 'apps/atlas-web/**'
       - 'packages/atlas-bridge/**'
+      - 'packages/atlas-cypher-validator/**'
       - 'crates/atlas-signer/**'
       - 'crates/atlas-trust-core/**'
       - 'crates/atlas-verify-wasm/**'
@@ -65,6 +66,7 @@ on:
     paths:
       - 'apps/atlas-web/**'
       - 'packages/atlas-bridge/**'
+      - 'packages/atlas-cypher-validator/**'
       - 'crates/atlas-signer/**'
       - 'crates/atlas-trust-core/**'
       - 'crates/atlas-verify-wasm/**'
@@ -162,6 +164,14 @@ jobs:
 
       - name: Build @atlas/bridge
         run: pnpm --filter @atlas/bridge build
+
+      - name: Build @atlas/cypher-validator
+        # V2-Beta Welle 15 hotfix: @atlas/cypher-validator emits dist/
+        # via tsc, matching @atlas/bridge convention. atlas-web's
+        # production build (Next.js/Turbopack) resolves the package
+        # through main/types/exports → ./dist/*.js. Without this step
+        # the next build fails to resolve ./validator.js.
+        run: pnpm --filter @atlas/cypher-validator build
 
       - name: Build atlas-web (production)
         # Playwright's webServer config invokes `next start` which
