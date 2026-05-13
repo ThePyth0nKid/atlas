@@ -73,7 +73,7 @@ use ciborium::Value;
 use std::collections::BTreeMap;
 
 use crate::error::{ProjectorError, ProjectorResult};
-use crate::state::{GraphEdge, GraphNode, GraphState};
+use crate::state::{AnchorEntry, AnnotationEntry, GraphEdge, GraphNode, GraphState, PolicyEntry};
 use crate::PROJECTOR_SCHEMA_VERSION;
 
 /// Hard cap on items per array/map level. Bounds allocation under
@@ -117,6 +117,14 @@ pub fn build_canonical_bytes(state: &GraphState) -> ProjectorResult<Vec<u8>> {
         )));
     }
 
+    if state.rekor_anchors.len() > MAX_ITEMS_PER_LEVEL {
+        return Err(ProjectorError::CanonicalisationFailed(format!(
+            "rekor_anchors count exceeds max ({} > {})",
+            state.rekor_anchors.len(),
+            MAX_ITEMS_PER_LEVEL
+        )));
+    }
+
     let nodes_cbor: Vec<Value> = state
         .nodes
         .values()
@@ -128,7 +136,7 @@ pub fn build_canonical_bytes(state: &GraphState) -> ProjectorResult<Vec<u8>> {
         .map(canonical_edge_map)
         .collect::<ProjectorResult<Vec<_>>>()?;
 
-    let entries: Vec<(Value, Value)> = vec![
+    let mut entries: Vec<(Value, Value)> = vec![
         (
             Value::Text("v".into()),
             Value::Text(PROJECTOR_SCHEMA_VERSION.into()),
@@ -136,6 +144,28 @@ pub fn build_canonical_bytes(state: &GraphState) -> ProjectorResult<Vec<u8>> {
         (Value::Text("nodes".into()), Value::Array(nodes_cbor)),
         (Value::Text("edges".into()), Value::Array(edges_cbor)),
     ];
+
+    // V2-β Welle 14 schema-additive: `rekor_anchors` is omitted from
+    // canonical bytes when empty, mirroring the V1 backward-compat
+    // pattern used for `author_did = None`. This preserves byte-
+    // determinism for V1 / V2-α-shape traces — `graph_state_hash`
+    // for a state with no anchors is byte-identical to pre-W14.
+    if !state.rekor_anchors.is_empty() {
+        let mut anchor_entries: Vec<(Value, Value)> =
+            Vec::with_capacity(state.rekor_anchors.len());
+        for (event_id, anchor) in &state.rekor_anchors {
+            anchor_entries.push((
+                Value::Text(event_id.clone()),
+                canonical_anchor_entry(anchor)?,
+            ));
+        }
+        let sorted_anchors = sort_cbor_map_entries(anchor_entries)?;
+        entries.push((
+            Value::Text("rekor_anchors".into()),
+            Value::Map(sorted_anchors),
+        ));
+    }
+
     let sorted = sort_cbor_map_entries(entries)?;
     let envelope = Value::Map(sorted);
 
@@ -202,6 +232,154 @@ fn canonical_node_map(node: &GraphNode) -> ProjectorResult<Value> {
         entries.push((Value::Text("author_did".into()), Value::Text(did.clone())));
     }
 
+    // V2-β Welle 14 schema-additive: `annotations` and `policies`
+    // are omitted from the per-node canonical CBOR when empty —
+    // mirrors the V1 `author_did = None` omission pattern. This
+    // keeps V1 / V2-α-shape traces byte-identical to pre-W14 output.
+    if !node.annotations.is_empty() {
+        if node.annotations.len() > MAX_ITEMS_PER_LEVEL {
+            return Err(ProjectorError::CanonicalisationFailed(format!(
+                "node {} annotations kind-count exceeds max ({} > {})",
+                node.entity_uuid,
+                node.annotations.len(),
+                MAX_ITEMS_PER_LEVEL
+            )));
+        }
+        let mut ann_entries: Vec<(Value, Value)> =
+            Vec::with_capacity(node.annotations.len());
+        for (kind, list) in &node.annotations {
+            if list.len() > MAX_ITEMS_PER_LEVEL {
+                return Err(ProjectorError::CanonicalisationFailed(format!(
+                    "node {} annotation kind {} exceeds max entries ({} > {})",
+                    node.entity_uuid,
+                    kind,
+                    list.len(),
+                    MAX_ITEMS_PER_LEVEL
+                )));
+            }
+            let list_cbor: Vec<Value> = list
+                .iter()
+                .map(|entry| canonical_annotation_entry(entry, &node.entity_uuid, kind))
+                .collect::<ProjectorResult<Vec<_>>>()?;
+            ann_entries.push((Value::Text(kind.clone()), Value::Array(list_cbor)));
+        }
+        let sorted_ann = sort_cbor_map_entries(ann_entries)?;
+        entries.push((Value::Text("annotations".into()), Value::Map(sorted_ann)));
+    }
+    if !node.policies.is_empty() {
+        if node.policies.len() > MAX_ITEMS_PER_LEVEL {
+            return Err(ProjectorError::CanonicalisationFailed(format!(
+                "node {} policies count exceeds max ({} > {})",
+                node.entity_uuid,
+                node.policies.len(),
+                MAX_ITEMS_PER_LEVEL
+            )));
+        }
+        let mut pol_entries: Vec<(Value, Value)> = Vec::with_capacity(node.policies.len());
+        for (policy_id, policy) in &node.policies {
+            pol_entries.push((
+                Value::Text(policy_id.clone()),
+                canonical_policy_entry(policy, &node.entity_uuid, policy_id)?,
+            ));
+        }
+        let sorted_pol = sort_cbor_map_entries(pol_entries)?;
+        entries.push((Value::Text("policies".into()), Value::Map(sorted_pol)));
+    }
+
+    let sorted = sort_cbor_map_entries(entries)?;
+    Ok(Value::Map(sorted))
+}
+
+/// V2-β Welle 14: canonical encoder for an `AnnotationEntry`. Map
+/// fields: `body`, `event_uuid`, plus optional `author_did` (omitted
+/// when `None`; format-validated when `Some` — same pattern as
+/// `canonical_node_map`). Entries sorted per RFC 8949 §4.2.1.
+fn canonical_annotation_entry(
+    entry: &AnnotationEntry,
+    node_entity_uuid: &str,
+    kind: &str,
+) -> ProjectorResult<Value> {
+    let mut entries: Vec<(Value, Value)> = vec![
+        (Value::Text("body".into()), Value::Text(entry.body.clone())),
+        (
+            Value::Text("event_uuid".into()),
+            Value::Text(entry.event_uuid.clone()),
+        ),
+    ];
+    if let Some(did) = &entry.author_did {
+        atlas_trust_core::agent_did::validate_agent_did(did).map_err(|e| {
+            ProjectorError::MalformedAuthorDid(format!(
+                "annotation on node {} kind {}: {e}",
+                node_entity_uuid, kind
+            ))
+        })?;
+        entries.push((Value::Text("author_did".into()), Value::Text(did.clone())));
+    }
+    let sorted = sort_cbor_map_entries(entries)?;
+    Ok(Value::Map(sorted))
+}
+
+/// V2-β Welle 14: canonical encoder for a `PolicyEntry`. Map fields:
+/// `policy_version`, `event_uuid`, plus optional `author_did`.
+fn canonical_policy_entry(
+    entry: &PolicyEntry,
+    node_entity_uuid: &str,
+    policy_id: &str,
+) -> ProjectorResult<Value> {
+    let mut entries: Vec<(Value, Value)> = vec![
+        (
+            Value::Text("policy_version".into()),
+            Value::Text(entry.policy_version.clone()),
+        ),
+        (
+            Value::Text("event_uuid".into()),
+            Value::Text(entry.event_uuid.clone()),
+        ),
+    ];
+    if let Some(did) = &entry.author_did {
+        atlas_trust_core::agent_did::validate_agent_did(did).map_err(|e| {
+            ProjectorError::MalformedAuthorDid(format!(
+                "policy {} on node {}: {e}",
+                policy_id, node_entity_uuid
+            ))
+        })?;
+        entries.push((Value::Text("author_did".into()), Value::Text(did.clone())));
+    }
+    let sorted = sort_cbor_map_entries(entries)?;
+    Ok(Value::Map(sorted))
+}
+
+/// V2-β Welle 14: canonical encoder for an `AnchorEntry`. Map fields:
+/// `rekor_log_index`, `rekor_log_id`, optional `rekor_tree_id`,
+/// `anchored_at`, optional `author_did`. Two optional fields, both
+/// omitted from canonical bytes when `None` — preserves byte-
+/// determinism for anchors built without those fields.
+fn canonical_anchor_entry(entry: &AnchorEntry) -> ProjectorResult<Value> {
+    let mut entries: Vec<(Value, Value)> = vec![
+        (
+            Value::Text("rekor_log_index".into()),
+            Value::Integer(entry.rekor_log_index.into()),
+        ),
+        (
+            Value::Text("rekor_log_id".into()),
+            Value::Text(entry.rekor_log_id.clone()),
+        ),
+        (
+            Value::Text("anchored_at".into()),
+            Value::Text(entry.anchored_at.clone()),
+        ),
+    ];
+    if let Some(tree_id) = entry.rekor_tree_id {
+        entries.push((
+            Value::Text("rekor_tree_id".into()),
+            Value::Integer(tree_id.into()),
+        ));
+    }
+    if let Some(did) = &entry.author_did {
+        atlas_trust_core::agent_did::validate_agent_did(did)
+            .map_err(|e| ProjectorError::MalformedAuthorDid(format!("rekor anchor: {e}")))?;
+        entries.push((Value::Text("author_did".into()), Value::Text(did.clone())));
+    }
     let sorted = sort_cbor_map_entries(entries)?;
     Ok(Value::Map(sorted))
 }
@@ -359,6 +537,8 @@ mod tests {
             event_uuid: event_uuid.to_string(),
             rekor_log_index: log_index,
             author_did: None,
+            annotations: BTreeMap::new(),
+            policies: BTreeMap::new(),
         }
     }
 
@@ -565,6 +745,8 @@ mod tests {
                 "did:atlas:1111111111111111111111111111111111111111111111111111111111111111"
                     .to_string(),
             ),
+            annotations: BTreeMap::new(),
+            policies: BTreeMap::new(),
         });
 
         // Node B: V1-era event, no author_did, one label, no props
@@ -575,6 +757,8 @@ mod tests {
             event_uuid: "01HEVENT0002".to_string(),
             rekor_log_index: 1001,
             author_did: None,
+            annotations: BTreeMap::new(),
+            policies: BTreeMap::new(),
         });
 
         // Node C: edge target
@@ -585,6 +769,8 @@ mod tests {
             event_uuid: "01HEVENT0003".to_string(),
             rekor_log_index: 1002,
             author_did: None,
+            annotations: BTreeMap::new(),
+            policies: BTreeMap::new(),
         });
 
         // Edge 1: a -> b, with author_did
@@ -634,6 +820,8 @@ mod tests {
             event_uuid: "01HEVENT0003".to_string(),
             rekor_log_index: 1002,
             author_did: None,
+            annotations: BTreeMap::new(),
+            policies: BTreeMap::new(),
         });
         state_reordered.upsert_node(GraphNode {
             entity_uuid: "node-b".to_string(),
@@ -642,6 +830,8 @@ mod tests {
             event_uuid: "01HEVENT0002".to_string(),
             rekor_log_index: 1001,
             author_did: None,
+            annotations: BTreeMap::new(),
+            policies: BTreeMap::new(),
         });
         let mut node_a_props = BTreeMap::new();
         node_a_props.insert("count".to_string(), serde_json::json!(42));
@@ -656,6 +846,8 @@ mod tests {
                 "did:atlas:1111111111111111111111111111111111111111111111111111111111111111"
                     .to_string(),
             ),
+            annotations: BTreeMap::new(),
+            policies: BTreeMap::new(),
         });
         state_reordered.upsert_edge(GraphEdge {
             edge_id: "edge-bc".to_string(),

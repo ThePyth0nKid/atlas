@@ -206,13 +206,14 @@ fn trace_without_attestation_events_returns_empty_vec() {
 
 #[test]
 fn unsupported_event_kind_in_trace_surfaces_error() {
-    // Trace contains a `policy_set` event (Welle-5 doesn't handle it)
-    // + an attestation. Re-projection fails with UnsupportedEventKind;
-    // caller sees structured error.
+    // V2-β Welle 14 update: `policy_set`, `annotation_add`, and
+    // `anchor_created` are now SUPPORTED kinds. Use a deliberately
+    // V2-γ-shaped placeholder kind that remains unsupported, so this
+    // test continues to verify the fallthrough-to-error path.
     let mut events = projectable_events();
     events.push(make_event(
         "01HEVPOL",
-        json!({"type": "policy_set", "policy_cedar": "permit(...)"}),
+        json!({"type": "future_v2_gamma_kind", "payload": "..."}),
     ));
     let state = project_events(WS, &events[..3], None).unwrap();
     let attestation = make_attestation_event("01HATT1", &state, 3);

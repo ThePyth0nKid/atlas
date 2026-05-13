@@ -46,6 +46,73 @@ use std::collections::BTreeMap;
 
 use crate::error::{ProjectorError, ProjectorResult};
 
+/// V2-β Welle 14: a single annotation attached to a graph entity.
+/// Plain data — no serde derives (mirrors `GraphNode`/`GraphEdge`
+/// convention; canonical encoding lives in `canonical.rs`).
+///
+/// Multiple `AnnotationEntry` values may live under the same
+/// `annotation_kind` key in `GraphNode.annotations` — the projector
+/// appends them in event-arrival order (which is `events.jsonl`
+/// order, the deterministic Layer-1 sequence). Canonicalisation
+/// preserves that order; idempotent replay reproduces it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnnotationEntry {
+    /// Free-text annotation body (no schema imposed at this layer;
+    /// caller-domain meaning).
+    pub body: String,
+
+    /// Layer-1 event that emitted this annotation.
+    pub event_uuid: String,
+
+    /// V2-α Welle 1 optional agent-identity of the annotation
+    /// emitter. `None` for V1-era events.
+    pub author_did: Option<String>,
+}
+
+/// V2-β Welle 14: a policy reference attached to a graph entity.
+/// Last-write-wins per `policy_id` (the BTreeMap key in
+/// `GraphNode.policies`). The reference is opaque to the projector
+/// — policy evaluation is V2-δ scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyEntry {
+    /// Caller-provided policy version (defaults to `"v1"` in
+    /// upsert dispatch when payload omits the field).
+    pub policy_version: String,
+
+    /// Layer-1 event that most recently set this policy.
+    pub event_uuid: String,
+
+    /// V2-α Welle 1 optional agent-identity of the policy-set
+    /// emitter. `None` for V1-era events.
+    pub author_did: Option<String>,
+}
+
+/// V2-β Welle 14: a Sigstore Rekor anchor reference for a previously-
+/// emitted event. Keyed by `event_id` (the event being anchored) in
+/// `GraphState.rekor_anchors`. Append-only per event_id —
+/// `apply_anchor_created` refuses to re-anchor an event (Sigstore
+/// transparency-log entries are append-only; a second anchor for
+/// the same event with different log-index would indicate either
+/// tampering or replay-attack).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AnchorEntry {
+    /// Rekor log index.
+    pub rekor_log_index: u64,
+
+    /// Rekor log identifier (string handle for the log instance).
+    pub rekor_log_id: String,
+
+    /// Optional Rekor tree-id (CT-style tree identity).
+    pub rekor_tree_id: Option<u64>,
+
+    /// ISO-8601 timestamp the anchor was recorded at.
+    pub anchored_at: String,
+
+    /// V2-α Welle 1 optional agent-identity of the anchor emitter.
+    /// `None` for V1-era events.
+    pub author_did: Option<String>,
+}
+
 /// A single node in the V2-α graph projection.
 ///
 /// `entity_uuid` is the canonical-sort key (BTreeMap-keyed in
@@ -58,6 +125,11 @@ use crate::error::{ProjectorError, ProjectorResult};
 /// `Some(did:atlas:...)`. When present, the DID is canonically bound
 /// into the graph-state-hash (`canonical::build_canonical_bytes`
 /// includes the field in the per-node CBOR map only when `Some`).
+///
+/// V2-β Welle 14 schema-additive fields: `annotations` and `policies`.
+/// Both default to empty `BTreeMap` and are omitted from canonical
+/// bytes when empty — preserving byte-determinism for V1 / V2-α
+/// shape traces (mirrors the `author_did = None` omission pattern).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphNode {
     /// Logical identity of the entity this node represents. Stable
@@ -85,6 +157,17 @@ pub struct GraphNode {
     /// V2-α Welle 1 optional agent-identity (`did:atlas:<hex>`).
     /// `None` for V1-era events without agent attribution.
     pub author_did: Option<String>,
+
+    /// V2-β Welle 14 schema-additive: annotations attached to this
+    /// entity. Keyed by `annotation_kind`; each kind maps to a `Vec`
+    /// of `AnnotationEntry` appended in event-arrival order.
+    /// Empty for V1 / V2-α-shape entities (omitted from canonical bytes).
+    pub annotations: BTreeMap<String, Vec<AnnotationEntry>>,
+
+    /// V2-β Welle 14 schema-additive: policy references attached to
+    /// this entity. Keyed by `policy_id`; last-write-wins per id.
+    /// Empty for V1 / V2-α-shape entities (omitted from canonical bytes).
+    pub policies: BTreeMap<String, PolicyEntry>,
 }
 
 /// A single edge in the V2-α graph projection. Directed.
@@ -118,12 +201,19 @@ pub struct GraphEdge {
 }
 
 /// In-memory canonical graph state. Pure data — no DB connection,
-/// no I/O, no async. Welle 3 scope.
+/// no I/O, no async. Welle 3 scope; V2-β Welle 14 schema-additive
+/// `rekor_anchors` field appended.
 ///
 /// **Container invariant:** `nodes` and `edges` are `BTreeMap` so
 /// iteration produces logical-identifier-sorted output without an
 /// explicit sort step at canonicalisation time. See module
 /// docstring for why this is load-bearing.
+///
+/// V2-β Welle 14 adds `rekor_anchors: BTreeMap<String, AnchorEntry>`
+/// — keyed by the `event_id` being anchored (anchors live at the
+/// top level rather than per-entity because they describe a specific
+/// Layer-1 event rather than a graph entity; one anchor = one event).
+/// Empty for V1 / V2-α-shape traces (omitted from canonical bytes).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GraphState {
     /// Nodes keyed by `entity_uuid`. `BTreeMap` so iteration is sorted.
@@ -131,6 +221,14 @@ pub struct GraphState {
 
     /// Edges keyed by `edge_id`. `BTreeMap` so iteration is sorted.
     pub edges: BTreeMap<String, GraphEdge>,
+
+    /// V2-β Welle 14 schema-additive: Rekor anchor references keyed
+    /// by `event_id` (the event being anchored). One anchor per event
+    /// — re-anchor attempts surface a structured error rather than
+    /// last-write-wins (Sigstore transparency-log entries are
+    /// append-only by spec). Empty for V1 / V2-α-shape traces (omitted
+    /// from canonical bytes).
+    pub rekor_anchors: BTreeMap<String, AnchorEntry>,
 }
 
 impl GraphState {
@@ -159,6 +257,19 @@ impl GraphState {
         self.edges.insert(key, edge)
     }
 
+    /// V2-β Welle 14: insert a Rekor anchor. Returns the previous
+    /// anchor if the `event_id` was already anchored — caller's
+    /// dispatch layer (`upsert::apply_anchor_created`) treats a
+    /// non-`None` return as a security-conservative error (Sigstore
+    /// transparency-log entries are append-only). Welle 14 keeps the
+    /// `BTreeMap::insert` primitive here and delegates the
+    /// duplicate-rejection policy to the upsert layer (mirrors the
+    /// `upsert_node` + Welle-4-duplicate-policy split documented in
+    /// `error::ProjectorError::DuplicateNode`).
+    pub fn upsert_anchor(&mut self, event_id: String, anchor: AnchorEntry) -> Option<AnchorEntry> {
+        self.rekor_anchors.insert(event_id, anchor)
+    }
+
     /// Structural-integrity check: every edge's `from_entity` and
     /// `to_entity` MUST reference an `entity_uuid` present in `nodes`.
     /// Called by `canonical::build_canonical_bytes` before encoding
@@ -169,11 +280,21 @@ impl GraphState {
     /// `entity_uuid` non-emptiness is also enforced here as a
     /// minimal structural check; richer format-validation may be
     /// added in a later welle.
+    ///
+    /// V2-β Welle 14 extension: anchor keys (event_ids in
+    /// `rekor_anchors`) are also non-emptiness-checked here.
     pub fn check_structural_integrity(&self) -> ProjectorResult<()> {
         for node in self.nodes.values() {
             if node.entity_uuid.is_empty() {
                 return Err(ProjectorError::MalformedEntityUuid(
                     "entity_uuid is empty".to_string(),
+                ));
+            }
+        }
+        for anchor_key in self.rekor_anchors.keys() {
+            if anchor_key.is_empty() {
+                return Err(ProjectorError::MalformedEntityUuid(
+                    "rekor_anchor event_id key is empty".to_string(),
                 ));
             }
         }
@@ -220,6 +341,8 @@ mod tests {
             event_uuid: "01HEVENTAAA".to_string(),
             rekor_log_index: 100,
             author_did: None,
+            annotations: BTreeMap::new(),
+            policies: BTreeMap::new(),
         }
     }
 

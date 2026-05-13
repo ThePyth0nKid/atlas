@@ -146,6 +146,8 @@ mod tests {
             event_uuid: "01HEVENT1".to_string(),
             rekor_log_index: 0,
             author_did: None,
+            annotations: BTreeMap::new(),
+            policies: BTreeMap::new(),
         });
         s
     }
