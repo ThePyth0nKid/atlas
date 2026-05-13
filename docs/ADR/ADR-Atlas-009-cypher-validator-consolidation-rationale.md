@@ -42,7 +42,7 @@ The cross-batch consistency-reviewer flagged this as a HIGH finding. The post-ba
 
 ## 2. Decision
 
-**Extract the shared Cypher AST validator into a new monorepo package `packages/atlas-cypher-validator/` with the package name `@atlas/cypher-validator`.**
+**Extract the shared Cypher read-only validator (regex-based; AST-level parsing deferred to V2-γ — see §8 Open Questions) into a new monorepo package `packages/atlas-cypher-validator/` with the package name `@atlas/cypher-validator`.**
 
 Both inline implementations are deleted. Both consumers update their imports to `@atlas/cypher-validator`.
 
@@ -54,7 +54,7 @@ Both inline implementations are deleted. Both consumers update their imports to 
 2. **Resolve deferred HIGH findings.** Consistency-reviewer HIGH-4 (procedure regex) + HIGH-5 (string-concat rule) are resolved in the consolidated implementation by applying the union of both inline behaviours.
 3. **Explicit API surface.** A package boundary makes the validator's contract explicit: what it exports, what its invariants are, and what version it is. Both consumers pin `workspace:*` so they always pick up the monorepo-local version.
 4. **Future consumers.** A V2-γ CLI Cypher checker, a documentation linter, or any other surface that needs Cypher validation can depend on `@atlas/cypher-validator` without copying logic.
-5. **Test consolidation.** W12 had 24 test cases (vitest); W13 had 25 test cases (custom tsx runner). The package ships 45 unified cases (deduplicated + 3 union-semantics-specific) in vitest, providing one green suite that proves both W12's and W13's test coverage is met.
+5. **Test consolidation.** W12 had 25 test cases (vitest); W13 had 27 test cases (custom tsx runner). The package ships 43 unified cases (deduplicated + union-semantics-specific additions) in vitest, providing one green suite that proves both W12's and W13's test coverage is met.
 
 ---
 
@@ -118,7 +118,7 @@ packages/atlas-cypher-validator/
     validator.ts        (merged implementation; 6 invariants applied)
     index.ts            (public exports: validateReadOnlyCypher, CYPHER_MAX_LENGTH,
                           CypherValidationResult)
-    validator.test.ts   (45 unified test cases; vitest)
+    validator.test.ts   (43 unified test cases; vitest)
 ```
 
 ### 5.2 Deleted files
@@ -213,7 +213,7 @@ The ordering in the deny-list is: `apoc.*` → `db.*` → `CALL dbms.*` → `CAL
 - **Deferred HIGHs resolved.** Consistency-reviewer HIGH-4 (procedure regex) and HIGH-5 (string-concat rule) are closed.
 - **Stricter than either inline.** Union-semantics means the consolidated validator rejects MORE patterns than either W12 or W13 alone. This is the correct direction for a security-critical guard.
 - **Future surfaces unblocked.** Any V2-γ surface needing Cypher validation adds `"@atlas/cypher-validator": "workspace:*"` and imports the same contract.
-- **Test coverage unified.** 45 cases in vitest replace 24 vitest + 25 tsx-script cases across two locations.
+- **Test coverage unified.** 43 cases in vitest replace 25 vitest + 27 tsx-script cases across two locations.
 
 ### 7.2 Negative / trade-offs
 

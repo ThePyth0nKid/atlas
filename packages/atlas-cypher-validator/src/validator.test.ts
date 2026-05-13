@@ -1,17 +1,17 @@
 /**
  * @atlas/cypher-validator — unified test suite.
  *
- * Consolidates W12's 24 vitest cases
+ * Consolidates W12's 25 vitest cases
  * (`apps/atlas-web/src/app/api/atlas/_lib/cypher-validator.test.ts`)
- * and W13's 25 tsx-script cases
+ * and W13's 27 tsx-script cases
  * (`apps/atlas-mcp-server/scripts/test-cypher-validator.ts`).
  *
  * Deduplication removed identical happy-path + rejection cases that
- * appeared in both files. Three additional cases (marked "UNION") test
+ * appeared in both files. Additional cases (marked "UNION") test
  * invariants that specifically validate the W15 union semantics:
  * procedure-namespace patterns from both W12 and W13 combined.
  *
- * Total: 45 cases.
+ * Total: 43 cases.
  *
  * ADR reference: ADR-Atlas-009 §6 (the 6 consolidation invariants).
  */

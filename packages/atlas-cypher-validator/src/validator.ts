@@ -142,9 +142,20 @@ const FORBIDDEN_KEYWORDS: ReadonlyArray<{ token: RegExp; reason: string }> = [
  * No consumer test that was passing before W15 passes a bare-CALL or
  * explicit `CALL db.*` / `CALL dbms.*`, so there is zero regression.
  *
- * The procedure-deny-list runs BEFORE the write-keyword deny-list
- * because `CALL apoc.x` contains both `CALL` and `apoc.`, and the
- * more specific procedure message is more actionable.
+ * Execution order: the write-keyword deny-list (FORBIDDEN_KEYWORDS) runs
+ * FIRST in `validateReadOnlyCypher` because mutation keywords like
+ * `DELETE` / `CREATE` / `SET` are more common in production-mistake
+ * queries than procedure-namespace escapes; the procedure-namespace
+ * deny-list runs AFTER for sandbox-escape catching. `CALL apoc.x` still
+ * gets the more-specific `apoc.* procedures not allowed` reason because
+ * `CALL` is not in FORBIDDEN_KEYWORDS — only mutation keywords are.
+ *
+ * Note on overlap: the specific `CALL dbms.*` entry overlaps with the
+ * broader bare-`CALL` guard below it; both reject the same patterns.
+ * This is intentional defence-in-depth — the specific entries document
+ * which procedure namespaces are the canonical sandbox-escape vectors,
+ * and the broader bare-CALL guard is the catch-all. Do not remove the
+ * specific entries thinking they are subsumed: they encode intent.
  */
 const FORBIDDEN_PROCEDURE_NAMESPACES: ReadonlyArray<{
   token: RegExp;
