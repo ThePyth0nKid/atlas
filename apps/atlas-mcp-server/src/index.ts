@@ -32,7 +32,7 @@ import { TOOL_REGISTRY } from "./tools/index.js";
 async function main(): Promise<void> {
   const server = new McpServer({
     name: "atlas-mcp-server",
-    version: "2.0.0-alpha.1",
+    version: "2.0.0-alpha.2",
   });
 
   for (const tool of TOOL_REGISTRY) {
