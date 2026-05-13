@@ -19,6 +19,31 @@ The v1.0 public-API surface contract is documented in
 
 _V2-α work in flight on this line. The next release tag will be `v2.0.0-alpha.1` (major-bump pre-release) at the close-out of the V2-α welle bundle, not a v1.x continuation. V2-α-Additive surface items are listed in [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10. The strategic documentation landings below do not touch the v1.0 public-API surface._
 
+### Added — V2-α Welle 5 (Atlas-Projector Emission Pipeline: events.jsonl → GraphState → Attestation, 2026-05-13)
+
+- **NEW `crates/atlas-projector/src/replay.rs`** (~150 lines + tests). `parse_events_jsonl(contents: &str) -> ProjectorResult<Vec<AtlasEvent>>` library-only JSONL parser with 1-indexed line-number diagnostics, blank-line + `//` comment tolerance, fail-fast on first malformed line. 7 unit tests.
+- **NEW `crates/atlas-projector/src/upsert.rs`** (~390 lines + tests). Idempotent event-to-state upsert. `apply_event_to_state(workspace_id, event, state)` dispatches on `payload.type`: `node_create` (with `node.id` → entity_uuid OR blake3-derived fallback), `node_update` (with `node_id` → existing-entity overwrite), `edge_create` (with `from` + `to` + `relation`). `project_events(workspace_id, events, existing)` top-level convenience. author_did from Welle 1 propagates onto every node/edge upserted by an event. Unsupported event-kinds (`policy_set`, `annotation_add`, `anchor_created`) surface `UnsupportedEventKind` cleanly. 14 unit tests covering each upsert path + idempotency + author_did propagation + entity_uuid determinism + edge/node id-separation.
+- **NEW `crates/atlas-projector/src/emission.rs`** (~150 lines + tests). `build_projector_run_attestation_payload(state, projector_version, head_event_hash, projected_event_count) -> ProjectorResult<serde_json::Value>` — payload-only emission API (caller signs). Computes graph_state_hash via Welle 3, constructs JSON matching Welle 4's `PROJECTOR_RUN_ATTESTATION_KIND` shape. Schema-version + payload-kind bound to atlas-trust-core constants — emission stays in lockstep with validation. 5 unit tests including round-trip through atlas-trust-core's `parse_projector_run_attestation` + `validate_projector_run_attestation`.
+- **NEW `crates/atlas-projector/tests/projector_pipeline_integration.rs`** (~190 lines, 6 E2E tests):
+  - `full_pipeline_e2e_jsonl_to_attested_state` — 5-event JSONL → parse → project → emit → round-trip green
+  - `idempotency_same_events_twice_byte_identical_state_hash`
+  - `unsupported_event_kind_surfaces_structured_error`
+  - `malformed_jsonl_surfaces_line_number`
+  - `empty_jsonl_produces_empty_state_and_emission_rejects_zero_count`
+  - `pipeline_preserves_existing_state` (checkpoint-resume scenario)
+- **`ProjectorError` new variants:** `ReplayMalformed { line_number, reason }`, `UnsupportedEventKind { kind, event_id }`, `MissingPayloadField { event_id, field }`. Additive under `#[non_exhaustive]`.
+
+### Notes — V2-α Welle 5
+
+- **End-to-end pipeline complete.** After Welle 5 Atlas demonstrates the full chain: signed events.jsonl → parse → idempotent projection → emit attestation payload → round-trip through verifier. Welles 1 + 3 + 4 now have a working producer connecting them.
+- **entity_uuid convention:** prefer issuer-supplied `node.id` (matches user mental model); fall back to `hex(blake3(workspace_id || 0x1f || event_uuid || 0x1f || ":node"))` when absent (per Welle 2 §3.5 logical-identifier sort key requirement). edge_id always blake3-derived (`":edge"` suffix). Documented in `upsert.rs` module docstring.
+- **node_update V2-α-MVP semantics:** REPLACE (not merge). Future welles may add patch-merge; documented as Welle-5 limitation.
+- **Library-only — no `std::fs` dependency.** Callers handle file I/O. Keeps atlas-projector WASM-friendly for future wellen.
+- **Welle 5 does NOT sign.** Emission produces a `serde_json::Value` payload; caller (atlas-signer or future SDK) assembles + signs the wrapping AtlasEvent.
+- **Welle 5 does NOT re-verify event signatures during replay.** That's the verifier's responsibility (`atlas_trust_core::verify_trace`). Replay assumes the caller has chosen whether to validate.
+- **V1 backward-compat preserved.** All 7 byte-determinism pins byte-identical (V1 cose + Welle 1 author_did + V1.7 anchor-canonical-body + V1.7 anchor-head + V1.9 pubkey-bundle + Welle 3 graph-state-hash + Welle 4 attestation-signing-input). 169 atlas-trust-core unit tests unchanged. 5 attestation integration tests unchanged. 46 atlas-projector unit tests (was 20, +26 for Welle 5). 6 new E2E integration tests. Zero regression.
+- **V2-α progress: 5 of 5-8 wellen shipped** (Welle 1 Agent-DID, Welle 2 DB spike, Welle 3 projector skeleton, Welle 4 attestation, Welle 5 emission pipeline). **Lower bound of V2-α range complete.**
+
 ### Added — V2-α Welle 4 (ProjectorRunAttestation Event-Schema + Verifier-Side Parsing, 2026-05-12)
 
 - **NEW `crates/atlas-trust-core/src/projector_attestation.rs` module** (~370 lines + tests). Public surface: `PROJECTOR_RUN_ATTESTATION_KIND = "projector_run_attestation"` (payload `type` discriminator); `PROJECTOR_RUN_ATTESTATION_SCHEMA_VERSION = "atlas-projector-run-attestation/v1-alpha"` (envelope schema-version, separate from `atlas-projector::PROJECTOR_SCHEMA_VERSION` which versions the GraphState canonical form); `ProjectorRunAttestation` typed struct (5 fields: `projector_version`, `projector_schema_version`, `head_event_hash`, `graph_state_hash`, `projected_event_count`); `parse_projector_run_attestation(payload)` JSON-to-typed parser with strict-mode unknown-field rejection; `validate_projector_run_attestation(att)` strict format-validator (non-empty projector_version, schema-version match, 64-lowercase-hex hashes, non-zero event count).

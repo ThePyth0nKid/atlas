@@ -408,6 +408,20 @@ Reviewer checklist for surface-touching PRs:
 | `verify_trace` pre-signature attestation format-validation | **V2-α-Additive (NEW REJECT PATH)** | When event's `payload.type` is `projector_run_attestation`, runs `parse_projector_run_attestation` + `validate_projector_run_attestation` before signature check. Malformed attestation surfaces structured `ProjectorAttestationInvalid` ahead of downstream errors. V1 payloads (`node.create` / `node.update` / etc.) pass through unchanged. |
 | `cose::tests::signing_input_byte_determinism_pin_with_projector_attestation` — pinned blake3 `8fbe734511c6347a5fe18476d7fb32a6b6650652e9319dcb8f91d4ba70865557` | **CI gate** | Drift detection for events with ProjectorRunAttestation payload. Co-equal with the 5 prior byte-determinism pins. |
 
+### 10.7c V2-α Welle 5 — atlas-projector emission pipeline (2026-05-13)
+
+| Item | Tag | Notes |
+|---|---|---|
+| NEW `pub mod replay` in atlas-projector | **V2-α-Additive** | Line-by-line events.jsonl parser. Library-only (no `std::fs`); operates on `&str`. |
+| `pub fn parse_events_jsonl(contents: &str) -> ProjectorResult<Vec<AtlasEvent>>` | **V2-α-Additive** | 1-indexed line-number diagnostics; tolerates blank lines and `//` comments; fail-fast on first malformed line. |
+| NEW `pub mod upsert` in atlas-projector | **V2-α-Additive** | Idempotent event-to-state upsert. Welle-5-MVP supports `node_create`, `node_update`, `edge_create`. Other kinds surface `UnsupportedEventKind`. |
+| `pub fn apply_event_to_state(workspace_id, event, state) -> ProjectorResult<()>` | **V2-α-Additive** | Single-event upsert primitive. |
+| `pub fn project_events(workspace_id, events, existing: Option<GraphState>) -> ProjectorResult<GraphState>` | **V2-α-Additive** | Top-level convenience: project an entire event sequence. |
+| NEW `pub mod emission` in atlas-projector | **V2-α-Additive** | ProjectorRunAttestation payload constructor. Payload-only — caller signs. |
+| `pub fn build_projector_run_attestation_payload(state, projector_version, head_event_hash, projected_event_count) -> ProjectorResult<serde_json::Value>` | **V2-α-Additive** | Round-trip-compatible with atlas-trust-core's `parse_projector_run_attestation` + `validate_projector_run_attestation`. Integration test enforces the contract. |
+| `ProjectorError` new variants: `ReplayMalformed { line_number, reason }`, `UnsupportedEventKind { kind, event_id }`, `MissingPayloadField { event_id, field }` | **V2-α-Additive (SemVer-minor under `#[non_exhaustive]`)** | Structured failure paths for replay + upsert. |
+| `crates/atlas-projector/tests/projector_pipeline_integration.rs` — 6 E2E tests | **CI gate** | Full pipeline: events.jsonl → parse → project → emit → round-trip through atlas-trust-core. Includes idempotency, unsupported-event-kind, malformed-line, empty-state-with-count, checkpoint-resume tests. |
+
 ### 10.7 What `v2.0.0-alpha.1` will bring (forecast, not committed)
 
 Pending the close-out of the V2-α welle bundle (Welle 1 = this surface; future Wellen = Projector + FalkorDB + ArcadeDB spike + content-hash separation if counsel-approved):

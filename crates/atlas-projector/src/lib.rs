@@ -10,22 +10,41 @@
 //! events (Welle 4 candidate) will cryptographically bind into the
 //! trust chain.
 //!
-//! ## Scope of V2-α Welle 3 (skeleton)
+//! ## Scope through V2-α Welle 5 (current)
 //!
-//! This welle delivers the **load-bearing canonicalisation primitive
-//! only**. Out of scope for Welle 3:
+//! **Shipped:**
 //!
-//! - Reading or replaying `events.jsonl` (Welle 4 candidate)
-//! - Idempotent upsert logic from events to graph state (Welle 4)
-//! - `ProjectorRunAttestation` event-kind emission to Layer 1 (Welle 4)
-//! - ArcadeDB driver integration (Welle 5)
-//! - Parallel-projection design for >10M event scenarios (Welle 5)
-//! - DB-specific dump-to-canonical adapter (Welle 5)
-//! - projector-state-hash CI gate enforcement (Welle 6)
+//! - Welle 3: load-bearing canonicalisation primitive
+//!   (`canonical::build_canonical_bytes` + `canonical::graph_state_hash`,
+//!   plus byte-determinism CI pin); in-memory `GraphState` /
+//!   `GraphNode` / `GraphEdge` types backed by `BTreeMap` keyed on
+//!   logical identifier (`entity_uuid` / `edge_id`).
+//! - Welle 5: `events.jsonl` line parser (`replay::parse_events_jsonl`),
+//!   idempotent event-to-state upsert (`upsert::apply_event_to_state` +
+//!   `upsert::project_events`), ProjectorRunAttestation payload
+//!   emitter (`emission::build_projector_run_attestation_payload`).
+//!   Together: Welle 5 delivers the full pipeline `events.jsonl →
+//!   GraphState → signed attestation payload`. Caller (atlas-signer)
+//!   wraps the payload in an `AtlasEvent` and signs.
 //!
-//! Welle 3 establishes the byte-pin pattern + the in-memory graph
-//! state representation so that every later welle has a stable target
-//! to build against.
+//! **Out of scope for the current welle range** (deferred to V2-α
+//! Welles 6-8 / V2-β):
+//!
+//! - ArcadeDB driver integration (Welle 6+ candidate) — replace
+//!   in-memory `GraphState` with ArcadeDB-backed implementation;
+//!   operator-runbook for deployment; SQL deterministic-dump
+//!   adapter.
+//! - projector-state-hash CI gate enforcement (Welle 7+ candidate)
+//!   — comparing attested `graph_state_hash` from a
+//!   `ProjectorRunAttestation` event against locally-recomputed
+//!   value from fresh re-projection.
+//! - Parallel-projection design for >10M event scenarios (Welle
+//!   7+ candidate).
+//! - DB-specific dump-to-canonical adapter for the eventual
+//!   ArcadeDB Layer-2 (Welle 6+).
+//! - Expanded event-kind support (annotation, policy, anchor) —
+//!   V2-β.
+//! - Cedar policy at write-time (V2-δ).
 //!
 //! ## Design invariants
 //!
@@ -87,12 +106,18 @@
 #![warn(missing_docs)]
 
 pub mod canonical;
+pub mod emission;
 pub mod error;
+pub mod replay;
 pub mod state;
+pub mod upsert;
 
 pub use canonical::{build_canonical_bytes, graph_state_hash};
+pub use emission::build_projector_run_attestation_payload;
 pub use error::{ProjectorError, ProjectorResult};
+pub use replay::parse_events_jsonl;
 pub use state::{GraphEdge, GraphNode, GraphState};
+pub use upsert::{apply_event_to_state, project_events};
 
 /// V2-α canonical-form schema identifier. Bound into every
 /// `graph_state_hash` computation as the first map entry, so any
