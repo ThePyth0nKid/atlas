@@ -90,6 +90,23 @@ describe("POST /api/atlas/query", () => {
     expect(res.status).toBe(413);
   });
 
+  it("returns 413 on oversized body even when Content-Length header is absent", async () => {
+    // Some HTTP clients (and chunked / streaming) omit Content-Length.
+    // The post-read raw-text cap must still fire — otherwise an
+    // attacker can bypass the cap by stripping the header.
+    const bigCypher = "MATCH (n) RETURN n // " + "x".repeat(300_000);
+    const req = new Request("http://localhost/api/atlas/query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace: "ws-test", cypher: bigCypher }),
+    });
+    // Sanity: the test harness must not have auto-injected Content-Length.
+    // Even if it did, the post-read check is what we're asserting — the
+    // body length itself exceeds the cap so the route must return 413.
+    const res = await POST(req);
+    expect(res.status).toBe(413);
+  });
+
   it("rejects extra fields per Zod strict()", async () => {
     const res = await POST(
       jsonReq({

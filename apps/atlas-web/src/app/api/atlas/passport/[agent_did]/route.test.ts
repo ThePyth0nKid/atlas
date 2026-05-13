@@ -32,4 +32,25 @@ describe("GET /api/atlas/passport/[agent_did]", () => {
     const body = await res.json();
     expect(body.agent_did).toBe("did:atlas:bar");
   });
+
+  it("echoes an at-cap (512-char) agent_did verbatim", async () => {
+    const justUnderCap = "did:atlas:" + "x".repeat(502); // 512 chars total
+    const res = await GET(
+      new Request(`http://localhost/api/atlas/passport/${justUnderCap}`),
+      { params: Promise.resolve({ agent_did: justUnderCap }) },
+    );
+    const body = await res.json();
+    expect(body.agent_did).toBe(justUnderCap);
+  });
+
+  it("replaces over-length agent_did with '<invalid>' to prevent reflection", async () => {
+    const overCap = "x".repeat(1000);
+    const res = await GET(
+      new Request(`http://localhost/api/atlas/passport/${overCap}`),
+      { params: Promise.resolve({ agent_did: overCap }) },
+    );
+    expect(res.status).toBe(501);
+    const body = await res.json();
+    expect(body.agent_did).toBe("<invalid>");
+  });
 });

@@ -70,11 +70,16 @@ export function isResponse(v: unknown): v is NextResponse {
  * handling; matches the conventions already used by `write-node`.
  */
 export function handleStoreError(e: unknown): NextResponse {
+  // Defence-in-depth: apply `redactPaths` to ALL surfaced messages,
+  // not just the catch-all. Today `WorkspacePathError.message` and
+  // `StorageError.message` do not contain absolute paths — but future
+  // refactors of `@atlas/bridge` could change that, and a one-line
+  // `redactPaths` wrap closes that drift before it ships.
   if (e instanceof WorkspacePathError) {
-    return jsonError(400, e.message);
+    return jsonError(400, redactPaths(e.message));
   }
   if (e instanceof StorageError) {
-    return jsonError(500, `storage: ${e.message}`);
+    return jsonError(500, `storage: ${redactPaths(e.message)}`);
   }
   const msg = e instanceof Error ? e.message : String(e);
   return jsonError(500, `unexpected: ${redactPaths(msg)}`);

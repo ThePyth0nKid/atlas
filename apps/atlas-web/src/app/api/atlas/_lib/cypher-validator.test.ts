@@ -89,6 +89,22 @@ describe("validateReadOnlyCypher — write-side keyword rejection", () => {
     const r = validateReadOnlyCypher("match (n) delete n");
     expect(r.ok).toBe(false);
   });
+
+  it("rejects DROP (DDL — drops indexes / constraints)", () => {
+    const r = validateReadOnlyCypher("DROP INDEX node_index_name");
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/DROP/);
+  });
+
+  it("rejects FOREACH (composes with inner writes for iterated mutation)", () => {
+    const r = validateReadOnlyCypher(
+      "MATCH p = (a)-[*]->(b) FOREACH (n in nodes(p) | SET n.foo = 1)",
+    );
+    expect(r.ok).toBe(false);
+    // FOREACH appears before SET in the deny-list, but either match
+    // is acceptable — both indicate the rejection is real.
+    expect(r.reason).toMatch(/FOREACH|SET/);
+  });
 });
 
 describe("validateReadOnlyCypher — procedure namespace rejection", () => {

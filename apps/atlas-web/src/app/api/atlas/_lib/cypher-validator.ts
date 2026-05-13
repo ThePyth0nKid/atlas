@@ -11,7 +11,13 @@
  *   1. **Read-side only.** Reject any write-side keyword the user
  *      could embed in a parameter, comment, or string-concatenated
  *      tail to mutate the graph: `DELETE`, `DETACH DELETE`, `CREATE`,
- *      `MERGE`, `SET`, `REMOVE`, `LOAD CSV`, `USING PERIODIC COMMIT`.
+ *      `MERGE`, `SET`, `REMOVE`, `DROP`, `FOREACH`, `LOAD CSV`,
+ *      `USING PERIODIC COMMIT`. `DROP` is DDL (drops indexes /
+ *      constraints in Neo4j / ArcadeDB dialects). `FOREACH` alone is
+ *      benign but is the canonical composition pattern for iterated
+ *      writes (`FOREACH (n IN ... | SET n.x = 1)`), so we reject it
+ *      defensively — defence-in-depth even though the inner `SET` /
+ *      `CREATE` / `MERGE` would also trip the deny-list.
  *
  *   2. **No procedure escape.** Reject `apoc.*` and `CALL db.*` —
  *      the procedure surface is a documented sandbox-escape vector
@@ -81,6 +87,8 @@ const FORBIDDEN_KEYWORDS = [
   "MERGE",
   "SET",
   "REMOVE",
+  "DROP",
+  "FOREACH",
   "LOAD\\s+CSV",
   "USING\\s+PERIODIC\\s+COMMIT",
 ];

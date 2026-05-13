@@ -60,7 +60,11 @@ const InputSchema = z
   .strict();
 
 export async function POST(req: Request): Promise<NextResponse> {
-  // Belt-and-braces body cap before reading.
+  // Belt-and-braces body cap. We check Content-Length first as a cheap
+  // pre-read gate, then *also* enforce the cap on the raw body length
+  // after reading. Some HTTP clients (and chunked / streaming clients)
+  // omit Content-Length entirely; without the post-read check those
+  // requests would bypass the cap and reach `JSON.parse` unbounded.
   const contentLength = req.headers.get("content-length");
   if (contentLength !== null) {
     const len = Number(contentLength);
@@ -72,9 +76,22 @@ export async function POST(req: Request): Promise<NextResponse> {
     }
   }
 
+  let rawText: string;
+  try {
+    rawText = await req.text();
+  } catch (e) {
+    return jsonError(400, `failed to read request body: ${(e as Error).message}`);
+  }
+  if (rawText.length > REQUEST_BODY_MAX_BYTES) {
+    return jsonError(
+      413,
+      `request body exceeds ${REQUEST_BODY_MAX_BYTES} bytes`,
+    );
+  }
+
   let body: unknown;
   try {
-    body = await req.json();
+    body = JSON.parse(rawText);
   } catch (e) {
     return jsonError(400, `request body is not valid JSON: ${(e as Error).message}`);
   }
