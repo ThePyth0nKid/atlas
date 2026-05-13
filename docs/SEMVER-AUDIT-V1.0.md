@@ -1,6 +1,8 @@
 # SemVer Audit — Atlas v1.0.0 Public-API Surface
 
 > **Status: V1.19 Welle 12 deliverable, finalised 2026-05-11.** This document is the v1.0 baseline contract for Atlas's public-API surface. After v1.0.0 ships (V1.19 Welle 13), no item listed as **Locked** below changes without a SemVer-major bump.
+>
+> **v2.0.0-alpha.1 release marker (2026-05-13):** Atlas v2.0.0-alpha.1 shipped. The v2.0 SemVer-major bump was triggered by intentional wire-format break: `AtlasEvent.author_did` field + new `AtlasPayload::ProjectorRunAttestation` variant cause `#[serde(deny_unknown_fields)]` rejection in V1.0 verifiers reading V2-α events. **Sections §1–§9 below remain the v1.0 baseline contract** — they describe the v1.0 surface as it shipped on 2026-05-12. **§10 V2-α Additions** documents the additive V2-α public-API surface in subsections §10.1–§10.7e. Future V2-β / V2-γ / V2-δ welles will continue appending to §10 (or a successor doc) without rewriting §1-§9. See [`docs/V2-ALPHA-1-RELEASE-NOTES.md`](V2-ALPHA-1-RELEASE-NOTES.md) for the v2.0.0-alpha.1 release content.
 
 This audit surveys five public-API surface categories and assigns each item one of four risk tags:
 

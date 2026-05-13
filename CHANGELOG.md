@@ -17,7 +17,24 @@ The v1.0 public-API surface contract is documented in
 
 ## [Unreleased]
 
-_V2-α work in flight on this line. The next release tag will be `v2.0.0-alpha.1` (major-bump pre-release) at the close-out of the V2-α welle bundle, not a v1.x continuation. V2-α-Additive surface items are listed in [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10. The strategic documentation landings below do not touch the v1.0 public-API surface._
+_No unreleased changes since v2.0.0-alpha.1. Next release on this line will be `v2.0.0-alpha.2` or `v2.0.0-beta.1` depending on scope. Public-API contract per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10 (V2-α Additive surface)._
+
+## [2.0.0-alpha.1] — 2026-05-13
+
+**V2-α-alpha.1 Release Summary.** Atlas's first pre-release of the V2 line. Ships the **cryptographic projection-state verification primitive end-to-end**: a third-party verifier with the offline WASM verifier + `events.jsonl` + `pubkey-bundle.json` can independently re-project a trace and produce a structured `Match` / `Mismatch` outcome per `ProjectorRunAttestation` event — drift detected cryptographically, not just by CI convention. Atlas's V1 trust property (signed events + Ed25519 + COSE_Sign1 + deterministic CBOR + blake3 hash chain + Sigstore Rekor anchoring + witness cosignature + offline WASM verifier) is preserved unchanged; V2-α-alpha.1 is an additive cryptographic layer on top.
+
+The V2-α-alpha.1 surface delivers 8 wellen shipped in one sprint (2026-05-12 to 2026-05-13): Agent-DID Schema Foundation (`did:atlas:<blake3-pubkey-hash>`) → ArcadeDB vs FalkorDB spike with ArcadeDB-primary recommendation flip → Atlas Projector skeleton with canonicalisation byte-determinism pin → `ProjectorRunAttestation` event-schema + verifier-side parser → emission pipeline (`events.jsonl` → `GraphState` → attestation payload) → projector-state-hash CI gate (closes V2-α security loop) → `atlas-signer emit-projector-attestation` CLI subcommand → v2.0.0-alpha.1 ship. **7 byte-determinism CI gates** now cover V1 + V2-α canonicalisation surfaces.
+
+**Wire-format note:** V2-α events with `author_did` field set OR `payload.type = "projector_run_attestation"` are intentionally non-deserialisable by V1.0 verifiers (per `#[serde(deny_unknown_fields)]` policy). This is the explicit SemVer-major break committed by V2.0.0-alpha.1. V1-shaped events (no `author_did`, no V2-α-only payload kinds) remain forward-compatible across both verifier generations. Full details in [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10 + [`docs/V2-ALPHA-1-RELEASE-NOTES.md`](docs/V2-ALPHA-1-RELEASE-NOTES.md).
+
+**Pre-counsel-review disclaimer:** Public marketing claims about V2-α-alpha.1's EU AI Act / GDPR posture are pre-counsel-review (per Master Plan §5 + `DECISION-COUNSEL-1`). This release is suitable for engineering / auditor / operator evaluation; external-public-materials require counsel-validated language refinement before publication.
+
+### Added — V2-α Welle 8 (v2.0.0-alpha.1 Ship, 2026-05-13)
+
+- **Cargo workspace version bump 1.0.1 → 2.0.0-alpha.1.** Single source of truth via `workspace.package.version`; all 6 workspace crates inherit through `version.workspace = true`.
+- **npm version bumps** for `atlas-web`, `atlas-mcp-server`, `@atlas/bridge`, root monorepo manifest, and MCP SDK introspection string.
+- **NEW `docs/V2-ALPHA-1-RELEASE-NOTES.md`** (~250 lines) — comprehensive engineering-perspective release notes: V2-α security model, public-API additions per Welle, V1-backward-compat boundary, operator-runbook pointers, demo CLI invocation, pre-counsel-review disclaimer.
+- **CHANGELOG.md `[Unreleased]` promoted to `[2.0.0-alpha.1]`** with this release-summary header.
 
 ### Added — V2-α Welle 7 (atlas-signer `emit-projector-attestation` Subcommand, 2026-05-13)
 

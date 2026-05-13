@@ -1,6 +1,6 @@
 {
   "name": "atlas-web",
-  "version": "1.0.1",
+  "version": "2.0.0-alpha.1",
   "private": true,
   "license": "SEE LICENSE-SUSTAINABLE-USE IN ROOT",
   "scripts": {
