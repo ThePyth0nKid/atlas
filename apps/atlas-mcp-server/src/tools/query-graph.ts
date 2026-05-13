@@ -21,7 +21,7 @@ import { optionalWorkspaceIdSchema } from "./schema.js";
 import {
   CYPHER_MAX_LENGTH,
   validateReadOnlyCypher,
-} from "./_lib/cypher-validator.js";
+} from "@atlas/cypher-validator";
 import {
   getProjectionStore,
   PROJECTION_STORE_STUB_MESSAGE,

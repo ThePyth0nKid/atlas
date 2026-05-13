@@ -1,0 +1,28 @@
+{
+  "name": "@atlas/cypher-validator",
+  "version": "2.0.0-alpha.2",
+  "private": true,
+  "license": "SEE LICENSE-SUSTAINABLE-USE IN ROOT",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

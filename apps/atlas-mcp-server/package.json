@@ -16,13 +16,13 @@
     "test:redact-paths": "tsx scripts/test-redact-paths.ts",
     "test:signer-cache": "tsx scripts/test-signer-binary-cache.ts",
     "test:ulid": "tsx scripts/test-ulid.ts",
-    "test:cypher-validator": "tsx scripts/test-cypher-validator.ts",
     "test:mcp-v2-tools": "tsx scripts/test-mcp-v2-tools.ts",
-    "test": "tsx scripts/test-anchor-json.ts && tsx scripts/test-redact-paths.ts && tsx scripts/test-signer-binary-cache.ts && tsx scripts/test-ulid.ts && tsx scripts/test-cypher-validator.ts && tsx scripts/test-mcp-v2-tools.ts",
+    "test": "tsx scripts/test-anchor-json.ts && tsx scripts/test-redact-paths.ts && tsx scripts/test-signer-binary-cache.ts && tsx scripts/test-ulid.ts && tsx scripts/test-mcp-v2-tools.ts",
     "lint": "tsc -p tsconfig.lint.json"
   },
   "dependencies": {
     "@atlas/bridge": "workspace:*",
+    "@atlas/cypher-validator": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.4.0",
     "zod": "^3.23.8"
   },
