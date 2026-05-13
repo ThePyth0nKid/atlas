@@ -464,14 +464,66 @@ jobs:
       # this holds for both tag-push and dispatch-from-tag paths
       # (V1.19 Welle 14a extended the verify-tag step's `if:`).
       #
-      # The publish targets BOTH the web and node builds under the
-      # same package name. The web build is the canonical default
-      # tag (browser is the primary distribution channel for
-      # in-browser auditor tooling); the node target ships under
-      # the `node` dist-tag, available via
-      # `npm install @atlas-trust/verify-wasm@node`. A future
-      # iteration may merge both into a single package with
-      # conditional exports — out of scope for V1.14.
+      # V2-β Welle 11 — Dual-publish race fix. See
+      # `docs/ADR/ADR-Atlas-008-wasm-publish-race-postmortem.md`
+      # for the full postmortem.
+      #
+      # PRE-FIX (broken) behaviour: this step invoked `npm publish`
+      # TWICE — once for pkg-web at default `latest`, once for
+      # pkg-node at `--tag node`. The second invocation failed with
+      # `E403 — cannot publish over the previously published
+      # versions` because npm's data model treats a `version` as
+      # an immutable row and dist-tags as MUTABLE POINTERS at
+      # already-published versions. `npm publish --tag X` of an
+      # already-published version under a different dist-tag is
+      # NOT a supported re-publish; it is treated as a republish
+      # attempt and rejected.
+      #
+      # Observed on `v2.0.0-alpha.1` tag-push (run_id 25788574299,
+      # 2026-05-13): first publish succeeded (logIndex 1523498404,
+      # registry row created, `latest` dist-tag pointed at the new
+      # version); second publish failed E403 (logIndex 1523498503 is
+      # the ORPHAN Sigstore provenance attestation — the OIDC mint
+      # + Rekor write completed BEFORE the npm 409 returned, so a
+      # transparency-log entry exists with no corresponding registry
+      # artefact). The package was LIVE on npm despite a red CI run.
+      #
+      # POST-FIX behaviour: publish the version ONCE (pkg-web is the
+      # canonical tarball — browser is the primary distribution
+      # channel for in-browser auditor tooling), then add the `node`
+      # dist-tag as a pointer via `npm dist-tag add`. dist-tags are
+      # the correct mechanism for "alias this version under another
+      # name"; they are idempotent (re-setting to the same target is
+      # a no-op exit 0) and they do not create a new registry row.
+      #
+      # TRADE-OFF: Node consumers (`npm install @atlas-trust/verify-wasm@node`)
+      # receive the pkg-web tarball instead of a separately-built
+      # pkg-node tarball. This is fine because: (a) the dual-publish
+      # bug means the pkg-node-specific tarball NEVER successfully
+      # shipped to the registry since v1.0.0 — the de-facto state
+      # has been "node consumers get pkg-web or get nothing" for the
+      # entire history of the published package; (b) the pkg-web
+      # build's wasm-bindgen ESM glue functions under Node when the
+      # operator passes raw WASM bytes to `init({ module_or_path })`,
+      # as exercised by the `Node.js smoke (target web — via direct
+      # WASM bytes)` step earlier in this workflow. A future welle
+      # may unify both into a single package with conditional
+      # exports (`"exports": { "import": ..., "require": ... }`) —
+      # tracked in ADR-Atlas-008 §8 as a follow-up.
+      #
+      # The pkg-node build is still produced, still smoke-tested,
+      # and still attached to the GH-Release backup-channel + the
+      # workflow-artifact upload — see the pack/upload steps below.
+      # Only the npm-registry upload is single-tarball now.
+      #
+      # `--provenance` (npm >=9.5) attaches an OIDC-signed attestation
+      # linking this tarball to the GitHub Actions run + repo + commit
+      # SHA. Downstream consumers verify via `npm audit signatures` or
+      # by inspecting the package provenance on the npm registry. The
+      # `id-token: write` permission required for the OIDC token mint
+      # is granted at workflow level — see the `permissions:` block
+      # at the top of this file. Single publish ⇒ single Sigstore
+      # provenance attestation per release (no orphans).
       - name: Publish to npm
         id: publish
         # V1.19 Welle 14a post-merge fixup: switched from `startsWith(github.ref,
@@ -487,20 +539,46 @@ jobs:
             echo "did_publish=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
-          # `--provenance` (npm >=9.5) attaches an OIDC-signed
-          # attestation linking this tarball to the GitHub Actions
-          # run + repo + commit SHA. Downstream consumers can verify
-          # via `npm audit signatures` or by inspecting the package
-          # provenance on the npm registry. This is the single most
-          # important supply-chain signal for `@atlas-trust/verify-wasm`.
-          # The `id-token: write` permission required for the OIDC
-          # token mint is granted at workflow level — see the
-          # `permissions:` block at the top of this file.
+          # Single publish — pkg-web is the canonical tarball.
           cd crates/atlas-verify-wasm/pkg-web
           npm publish --access public --provenance
           cd "${GITHUB_WORKSPACE}"
-          cd crates/atlas-verify-wasm/pkg-node
-          npm publish --access public --provenance --tag node
+          # Derive the version we just published from the BUILT artifact
+          # (same source as the verify-publish-landed step's
+          # EXPECTED_VERSION — keeps both steps in lockstep). `wasm-pack`
+          # writes pkg-{web,node}/package.json with the Cargo workspace
+          # version; either pkg-* package.json yields the same value.
+          PUBLISHED_VERSION="$(node -p "require('./crates/atlas-verify-wasm/pkg-web/package.json').version")"
+          PACKAGE_NAME="${NPM_PACKAGE_SCOPE}/${NPM_PACKAGE_NAME}"
+          # Post-publish dist-tag pointer for `node` consumers. dist-tag
+          # add is idempotent (no-op on re-set) and does NOT create a
+          # new registry row — it only updates the mutable pointer.
+          # A brief sleep absorbs any npm-side replication latency
+          # between publish and dist-tag visibility; the retry loop
+          # matches the V1.19 Welle 14a verify-publish-landed pattern
+          # below. Failure here fails the workflow red (so the release
+          # operator sees that the `node` dist-tag pointer wasn't placed
+          # and can re-fire the step), while the underlying `latest`
+          # publish remains landed.
+          echo "Pointing 'node' dist-tag at ${PACKAGE_NAME}@${PUBLISHED_VERSION}..."
+          MAX_ATTEMPTS=6
+          ATTEMPT_DELAY=5
+          DIST_TAG_OK=false
+          for i in $(seq 1 "${MAX_ATTEMPTS}"); do
+            if npm dist-tag add "${PACKAGE_NAME}@${PUBLISHED_VERSION}" node; then
+              echo "✓ 'node' dist-tag → ${PUBLISHED_VERSION} (attempt ${i}/${MAX_ATTEMPTS})"
+              DIST_TAG_OK=true
+              break
+            fi
+            echo "Attempt ${i}/${MAX_ATTEMPTS}: dist-tag add failed — sleeping ${ATTEMPT_DELAY}s..."
+            sleep "${ATTEMPT_DELAY}"
+          done
+          if [ "${DIST_TAG_OK}" != "true" ]; then
+            echo "::error::Failed to set 'node' dist-tag on ${PACKAGE_NAME}@${PUBLISHED_VERSION} after $((MAX_ATTEMPTS * ATTEMPT_DELAY))s."
+            echo "::error::The publish itself landed (registry row exists, 'latest' dist-tag set)."
+            echo "::error::Re-run this workflow step manually via 'npm dist-tag add ${PACKAGE_NAME}@${PUBLISHED_VERSION} node' against a maintainer-authenticated session, or re-fire the workflow_dispatch path on the same tag."
+            exit 1
+          fi
           echo "did_publish=true" >> "${GITHUB_OUTPUT}"
 
       # V1.19 Welle 14a — post-publish assertion (security-reviewer F-4 closing).
@@ -563,12 +641,26 @@ jobs:
           # not produced by us. `dist.tarball` existence is the sanity
           # check that the package metadata landed correctly.
           npm view "${PACKAGE_NAME}@${EXPECTED_VERSION}" dist.tarball --silent
-          # The publish step publishes TWO packages: pkg-web at the
-          # default `latest` dist-tag and pkg-node at the `node` dist-tag.
-          # The version-loop above only checks `latest`. Verify the
-          # `node` dist-tag also resolves to the same version (post-
-          # publish-step partial-success guard). Per Welle 14a review
-          # MEDIUM (CR #6).
+          # V2-β Welle 11 update — semantics of this check changed.
+          #
+          # PRE-WELLE-11: the publish step published TWO tarballs
+          # (pkg-web at `latest`, pkg-node at `node`); this check
+          # verified the second publish landed. The dual-publish
+          # was broken — see ADR-Atlas-008 — and the second publish
+          # ALWAYS failed E403, so this check effectively never
+          # passed against a real publish path (only against the
+          # never-fired-pre-v1.0.0 path).
+          #
+          # POST-WELLE-11: the publish step publishes ONE tarball
+          # at `latest` and adds the `node` dist-tag as a pointer
+          # via `npm dist-tag add`. This check now verifies the
+          # POINTER is correctly placed — that `npm view ...@node`
+          # returns the same version as `npm view ...` (i.e. the
+          # `latest` row). It still serves as a partial-success
+          # guard: if dist-tag-add failed silently in some future
+          # workflow edit, this check would catch it. Per Welle 14a
+          # review MEDIUM (CR #6) — invariant preserved across the
+          # internal mechanism change.
           NODE_TAG_VERSION="$(npm view "${PACKAGE_NAME}@node" version --silent 2>/dev/null || echo "")"
           if [ "${NODE_TAG_VERSION}" != "${EXPECTED_VERSION}" ]; then
             echo "::error::npm 'node' dist-tag mismatch. Expected '${EXPECTED_VERSION}', got '${NODE_TAG_VERSION}'"
