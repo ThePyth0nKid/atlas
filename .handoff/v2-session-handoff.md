@@ -1,8 +1,8 @@
-# Atlas V2 — Session Handoff (V2-α SHIPPED + V2-β Phase 0–8.5 SHIPPED, v2.0.0-alpha.2 LIVE)
+# Atlas V2 — Session Handoff (V2-α SHIPPED + V2-β Phase 0–9.5 SHIPPED, v2.0.0-alpha.2 LIVE)
 
-> **🎯 FRESH-AGENT BOOTSTRAP DOC.** Wenn du diese Datei zum ersten Mal liest mit leerem Kontext: lies §0 "Fresh-Context Onboarding" zuerst (current state), dann §0a–§0d (Phase 1–4 of strategic-iteration SHIPPED narratives, historical), dann **`docs/V2-MASTER-PLAN.md`** für den master-resident strategischen Plan, dann **`docs/V2-BETA-ORCHESTRATION-PLAN.md`** + **`docs/V2-BETA-DEPENDENCY-GRAPH.md`** für V2-β welle orchestration + dispatch architecture. Dann optional **`.handoff/v2-master-vision-v1.md`** für die volle V2-Vision-Begründung und **`.handoff/decisions.md`** für die 23 expliciten Entscheidungen. Damit bist du bereit für V2-β-Phase-6 (W15 Cypher-validator consolidation, rule-of-three extraction) ohne strategischen Kontext nochmal abzufragen.
+> **🎯 FRESH-AGENT BOOTSTRAP DOC.** Wenn du diese Datei zum ersten Mal liest mit leerem Kontext: lies §0 "Fresh-Context Onboarding" zuerst (current state), dann §0a–§0d (Phase 1–4 of strategic-iteration SHIPPED narratives, historical), dann **`docs/V2-MASTER-PLAN.md`** für den master-resident strategischen Plan, dann **`docs/V2-BETA-ORCHESTRATION-PLAN.md`** + **`docs/V2-BETA-DEPENDENCY-GRAPH.md`** für V2-β welle orchestration + dispatch architecture. Dann optional **`.handoff/v2-master-vision-v1.md`** für die volle V2-Vision-Begründung und **`.handoff/decisions.md`** für die 23 expliciten Entscheidungen. Damit bist du bereit für V2-β-Phase-10 (W17b ArcadeDB driver implementation) ohne strategischen Kontext nochmal abzufragen.
 
-**Erstellt:** 2026-05-12. **V2-α-α.1 SHIPPED:** 2026-05-13 (8 Welles). **V2-β Phase 0–8.5 SHIPPED:** 2026-05-13 (one extraordinary work-day, 17 PRs merged: #67-#83). **Status:** v2.0.0-alpha.2 LIVE on master + GitHub + npm `@atlas-trust/verify-wasm@2.0.0-alpha.2` with Sigstore Build L3 provenance. Master HEAD post-Phase-8.5 = the PR that merges this commit. **Was als nächstes:** V2-β Phase 9 = W17a ArcadeDB driver scaffold + `GraphStateBackend` trait + InMemoryBackend wire-up + ArcadeDbBackend stub + ADR-Atlas-011. Architectural decisions locked by W16 (`docs/V2-BETA-ARCADEDB-SPIKE.md` + ADR-010): server mode, `reqwest`, one-database-per-workspace, byte-determinism adapter contract (`ORDER BY entity_uuid ASC` + stored `edge_id` property), 3-layer tenant-isolation defence. Then W17b (full driver impl) → W17c (Docker-Compose CI + integration tests + benchmark capture) → W18 Mem0g cache → W19 v2.0.0-beta.1 ship. Counsel-Engagement-Kickoff parallel-track ongoing (Nelson-led).
+**Erstellt:** 2026-05-12. **V2-α-α.1 SHIPPED:** 2026-05-13 (8 Welles). **V2-β Phase 0–9.5 SHIPPED:** 2026-05-13 (one extraordinary work-day, 18 PRs merged: #67-#85, plus the Phase-9.5 consolidation PR that merges this commit). **Status:** v2.0.0-alpha.2 LIVE on master + GitHub + npm `@atlas-trust/verify-wasm@2.0.0-alpha.2` with Sigstore Build L3 provenance. Master HEAD post-Phase-9 includes the production `GraphStateBackend` trait + `InMemoryBackend` + `ArcadeDbBackend` stub from PR #85; the existing `graph_state_hash` byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` is reproduced through the new trait surface (no drift). **Was als nächstes:** V2-β Phase 10 = W17b ArcadeDB driver implementation. SERIAL `general-purpose` subagent fills the `ArcadeDbBackend` stub with `reqwest`-based HTTP calls to ArcadeDB's `/api/v1/begin/{db}` + Cypher endpoints per ADR-Atlas-010 §4 sub-decisions. Must pass cross-backend byte-determinism test (`InMemoryBackend::canonical_state()` byte-identical to `ArcadeDbBackend::canonical_state()` for same input `events.jsonl`) before merge. Pre-flight reading mandatory: (1) `docs/ADR/ADR-Atlas-010-...md` §4 sub-decisions 1-8 (binding for W17b); (2) `docs/ADR/ADR-Atlas-011-arcadedb-driver-scaffold.md` (W17a's trait shape + OQ-1/OQ-2 resolutions); (3) `.handoff/v2-beta-welle-17a-plan.md` "Post-merge: reviewer findings deferred to W17b" section (4 carry-over MEDIUMs MUST be addressed); (4) `crates/atlas-projector/src/backend/{mod.rs,in_memory.rs,arcadedb.rs}` (trait surface + stub to fill). Then W17c (Docker-Compose CI + integration tests + benchmark capture) → W18 Mem0g cache → W19 v2.0.0-beta.1 ship. Counsel-Engagement-Kickoff parallel-track ongoing (Nelson-led).
 
 ---
 
@@ -11,7 +11,7 @@
 **Wer bist du, wo bist du, was tust du?**
 
 - **Repo:** `C:/Users/nelso/Desktop/atlas` (Windows-Host, bash/MSYS verfügbar, `cargo` lebt unter `/c/Users/nelso/.cargo/bin/cargo.exe`, `gh` lebt unter `/c/Program Files/GitHub CLI/gh.exe` — beide NICHT im default PATH).
-- **State:** Atlas v2.0.0-alpha.2 ist LIVE auf master + GitHub + npm `@atlas-trust/verify-wasm@2.0.0-alpha.2` seit 2026-05-13 (Sigstore Build L3 provenance preserved; W11 wasm-publish race fix validated end-to-end). V1 abgeschlossen (v1.0.1 LIVE 2026-05-12). V2-Strategie 4-phasig komplettiert. V2-α 8-Welles SHIPPED 2026-05-12 → 2026-05-13. **V2-β Phase 0 + 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 8.5 ALL SHIPPED 2026-05-13** in 17 PRs (#67-#83). Key landings: PR #71 orchestration framework; PRs #72/#73/#74 W9-W11 docs+workflow parallel batch (v2.0.0-alpha.2 candidate); PR #76 v2.0.0-alpha.2 release; PRs #77/#78/#79 W12-W14 code parallel batch; PR #81 W15 Cypher-validator consolidation into `packages/atlas-cypher-validator/`; PR #83 W16 ArcadeDB spike + ADR-Atlas-010 (locks W17 architectural decisions). **Nächste Implementierungsarbeit = V2-β Phase 9 = W17a ArcadeDB driver scaffold.** Pre-flight reading mandatory: (1) `docs/V2-BETA-ARCADEDB-SPIKE.md` §7 (trait sketch), §4.3 (Layer 3 actually enforces mutation hardening NOT workspace_id presence), §4.9 (byte-determinism adapter contract); (2) `docs/ADR/ADR-Atlas-010-...md` §4 sub-decisions 1-8 (binding for W17a); (3) `docs/V2-BETA-ORCHESTRATION-PLAN.md` §2 (W17a row); (4) `.handoff/v2-beta-welle-N-plan.md.template` for plan-doc skeleton.
+- **State:** Atlas v2.0.0-alpha.2 ist LIVE auf master + GitHub + npm `@atlas-trust/verify-wasm@2.0.0-alpha.2` seit 2026-05-13 (Sigstore Build L3 provenance preserved; W11 wasm-publish race fix validated end-to-end). V1 abgeschlossen (v1.0.1 LIVE 2026-05-12). V2-Strategie 4-phasig komplettiert. V2-α 8-Welles SHIPPED 2026-05-12 → 2026-05-13. **V2-β Phase 0 + 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 8.5 + 9 + 9.5 ALL SHIPPED 2026-05-13** in 18 PRs (#67-#85, plus the Phase-9.5 consolidation PR that merges this commit). Key landings: PR #71 orchestration framework; PRs #72/#73/#74 W9-W11 docs+workflow parallel batch (v2.0.0-alpha.2 candidate); PR #76 v2.0.0-alpha.2 release; PRs #77/#78/#79 W12-W14 code parallel batch; PR #81 W15 Cypher-validator consolidation into `packages/atlas-cypher-validator/`; PR #83 W16 ArcadeDB spike + ADR-Atlas-010 (locks W17 architectural decisions); **PR #85 W17a `GraphStateBackend` trait + `InMemoryBackend` + `ArcadeDbBackend` stub + ADR-Atlas-011 (the Layer-2 abstraction boundary that lets W17b wire the ArcadeDB driver behind a one-trait-impl swap).** **Nächste Implementierungsarbeit = V2-β Phase 10 = W17b ArcadeDB driver implementation.** Pre-flight reading mandatory: (1) `docs/ADR/ADR-Atlas-011-arcadedb-driver-scaffold.md` (W17a's trait shape + the binding OQ-1/OQ-2 resolutions: `Box<dyn WorkspaceTxn>` for object safety + `batch_upsert` vertices-before-edges); (2) `crates/atlas-projector/src/backend/{mod.rs,in_memory.rs,arcadedb.rs}` (production trait surface + the stub W17b fills); (3) `.handoff/v2-beta-welle-17a-plan.md` "Post-merge: reviewer findings deferred to W17b" section (4 carry-over MEDIUMs W17b MUST address: serde_json depth cap on HTTP responses, WorkspaceId validation guard at `begin()`, `begin()` lifetime `'_` vs `'static` decision BEFORE first method body, error-enum variant naming defer-to-V2-γ); (4) `docs/ADR/ADR-Atlas-010-...md` §4 sub-decisions 1-8 (binding); (5) `crates/atlas-projector/tests/backend_trait_conformance.rs` (existing tests W17b extends with cross-backend byte-determinism); (6) `.handoff/v2-beta-welle-N-plan.md.template` for plan-doc skeleton.
 - **Methodik:** 4-Phasen-Framework aus `.handoff/v2-iteration-framework.md` (jetzt auch dokumentiert als reusable pattern in `docs/WORKING-METHODOLOGY.md`). Phase 1 = parallel-foundation-docs. Phase 2 = parallel-multi-angle-crits. Phase 3 = semi-manual synthesis. Phase 4 = master-plan + working-methodology landen auf master.
 - **Was bereits passiert ist (Phase 1+2+3+4 alle 2026-05-12):**
   - **Phase 1** — 5 Foundation Docs parallel von 5 Subagents in eigenen Worktrees geschrieben (~2811 Zeilen). Auf PR #59 (draft, no-merge — work-product).
@@ -19,8 +19,8 @@
   - **Phase 3** — Master Vision v1 (~615 Zeilen) + decisions.md (22 Entscheidungen, ~284 Zeilen) durch semi-manual synthesis erstellt. Auf PR #62 (draft, no-merge, base=PR-61-branch — work-product).
   - **Phase 4** — `docs/V2-MASTER-PLAN.md` (~300 Zeilen) + `docs/WORKING-METHODOLOGY.md` (~200 Zeilen) auf master via PR #60 gemerged. Plus `.handoff/v2-master-vision-v1.md` + `.handoff/decisions.md` mitgemerged für master-reference-ability.
 - **Was als nächstes ansteht (V2-α + parallel-Counsel-Track):**
-  - **V2-β Phase 9** = **W17a ArcadeDB driver scaffold + `GraphStateBackend` trait + ADR-Atlas-011.** SERIAL `architect` subagent. Writes: (1) `crates/atlas-projector/src/backend/mod.rs` — production `GraphStateBackend` trait per spike §7 sketch (Vertex/Edge structs with V2-α Welle 1 stamping fields, `WorkspaceTxn` per-task transaction handle, `vertices_sorted`/`edges_sorted` byte-determinism-adapter methods, default `canonical_state()` impl); (2) `crates/atlas-projector/src/backend/in_memory.rs` — `InMemoryBackend` impl wrapping existing V2-α state.rs+upsert.rs+canonical.rs logic (preserves byte-determinism — same `graph_state_hash` hex `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4`); (3) `crates/atlas-projector/src/backend/arcadedb.rs` — stub (compiles, all methods `unimplemented!()` with W17b placeholder docs); (4) `docs/ADR/ADR-Atlas-011-arcadedb-driver-scaffold.md` — trait design rationale (object-safety choice for `WorkspaceTxn`, batch-upsert ergonomics for Option-A parallel projection, integration with existing ProjectorRunAttestation chain); (5) `.handoff/v2-beta-welle-17a-plan.md` plan-doc. Acceptance: existing 169+85 V2-α tests still green; new InMemoryBackend trait-conformance tests added; ArcadeDbBackend stub compiles. ~1 session.
-  - **V2-β Phase 10** = W17b ArcadeDB driver impl using `reqwest` + Cypher per ADR-010 §4 sub-decisions. Cross-backend byte-determinism test `tests/cross_backend_byte_determinism.rs` MUST pass (`InMemoryBackend::canonical_state()` byte-identical to `ArcadeDbBackend::canonical_state()` for same input events.jsonl).
+  - **V2-β Phase 9 SHIPPED 2026-05-13** = W17a ArcadeDB driver scaffold + `GraphStateBackend` trait + ADR-Atlas-011 (PR #85). Production trait surface + `InMemoryBackend` impl + `ArcadeDbBackend` stub, all SSH-Ed25519 signed via fix-commit `08167fc` on top of subagent's `4bac0b3`, squash-merged as commit `dec6234`. Parallel external code-reviewer + security-reviewer both APPROVED (0 CRITICAL / 0 HIGH); 1 MEDIUM applied in-commit (`#[doc(hidden)]` on `snapshot()`), 4 MEDIUMs documented as W17b/V2-γ carry-overs in `.handoff/v2-beta-welle-17a-plan.md`. Byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduced through trait surface.
+  - **V2-β Phase 10 next** = **W17b ArcadeDB driver implementation.** SERIAL `general-purpose` subagent. Fills the `ArcadeDbBackend` stub in `crates/atlas-projector/src/backend/arcadedb.rs` with `reqwest`-based HTTP calls to ArcadeDB's `/api/v1/begin/{db}` + `/api/v1/command/{db}` + `/api/v1/commit/{db}` endpoints per ADR-Atlas-010 §4 sub-decisions 1-8. Adds `reqwest` with `rustls-tls` feature to `crates/atlas-projector/Cargo.toml` (~2 MB binary cost, server-mode constraint). MUST apply the 4 carry-over MEDIUMs from W17a plan-doc: (a) `serde_json::Value` depth + size cap before `Vertex::properties` / `Edge::properties` deserialisation; (b) `WorkspaceId` validation guard at `ArcadeDbBackend::begin()` rejecting empty / enforcing UUID-or-equivalent format BEFORE HTTP request construction; (c) evaluate `begin()` lifetime `'_` vs `'static` BEFORE first method body (SemVer-breaking trait change risk if delayed); (d) ProjectorError variant naming defer-to-V2-γ acceptable. Cross-backend byte-determinism test `tests/cross_backend_byte_determinism.rs` MUST pass (`InMemoryBackend::canonical_state()` byte-identical to `ArcadeDbBackend::canonical_state()` for same input `events.jsonl`). ~2-3 sessions.
   - **V2-β Phase 11** = W17c integration tests + new `.github/workflows/atlas-arcadedb-smoke.yml` (Docker-Compose with ArcadeDB sidecar) + benchmark capture (replaces ADR-010 §4.10 estimates with measured numbers; embedded-mode reconsideration trigger at p99 > 15 ms).
   - **V2-β Phase 12** = W18 Mem0g Layer-3 cache. Depends on W17 ArcadeDB stable. ADR-Atlas-012 reserved.
   - **V2-β Phase 13** = W19 v2.0.0-beta.1 ship. Convergence milestone — ArcadeDB-backed Layer 2 operational, all V2-β wellen merged.
@@ -106,9 +106,9 @@ Keep PR branches intact (don't `git push origin --delete`) — the draft PRs the
 
 ---
 
-## 0z. V2-β-α.2 + V2-β Phase 0-8.5 SHIPPED narrative (2026-05-13 work-day)
+## 0z. V2-β-α.2 + V2-β Phase 0-9.5 SHIPPED narrative (2026-05-13 work-day)
 
-> **Read this first** if you're a fresh agent continuing the V2-β work. Everything below §0z is historical V2-α / strategic-iteration context. §0z captures the most recent operational state + the W17a ready-to-dispatch prompt skeleton.
+> **Read this first** if you're a fresh agent continuing the V2-β work. Everything below §0z is historical V2-α / strategic-iteration context. §0z captures the most recent operational state + the W17b ready-to-dispatch prompt skeleton.
 
 ### What landed today (master timeline 2026-05-13)
 
@@ -128,8 +128,10 @@ Keep PR branches intact (don't `git push origin --delete`) — the draft PRs the
 | `77afaf8` | #81 | V2-β Welle 15 | Cypher-validator consolidation — NEW `packages/atlas-cypher-validator/` shared monorepo package + ADR-Atlas-009 (321 lines) + 43 unified tests + 2 callsite updates. Required 2 reviewer-driven hotfixes (tsc build step matching `packages/atlas-bridge/` convention + workflow build-step propagation to wave3-smoke + sigstore-rekor-nightly). |
 | `f901296` | #82 | V2-β Phase 7 | Post-W15 single-welle consolidation commit |
 | `4a1e431` | #83 | V2-β Welle 16 | ArcadeDB embedded-mode spike (`docs/V2-BETA-ARCADEDB-SPIKE.md`, 460 lines, 11 sections) + ADR-Atlas-010 (285 lines, 9 sections). 2 reviewer-driven HIGH fixes: Layer 3 truth correction (validator does NOT enforce workspace_id presence) + perf number consistency (~6-10 min workspace-parallel re-projection). |
+| `eb16631` | #84 | V2-β Phase 8.5 | Phase-8 consolidation commit + bulletproof W17a handoff. CHANGELOG + master-plan §6 + orchestration-plan + handoff §0z + dependency-graph + W17a entry-criteria. |
+| `dec6234` | #85 | V2-β Welle 17a | **GraphStateBackend trait + InMemoryBackend + ArcadeDbBackend stub + ADR-Atlas-011 + 8 trait-conformance tests + plan-doc.** ~2177 LOC across 9 files. Parallel external code-reviewer + security-reviewer both APPROVE (0 CRITICAL / 0 HIGH; 1 MEDIUM in-commit-fix `#[doc(hidden)]` on snapshot, 4 MEDIUMs documented as W17b/V2-γ carry-overs in plan-doc). Byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduced through trait surface (new `byte_pin_through_in_memory_backend` test). OQ-1 resolved: `Box<dyn WorkspaceTxn>` over associated type. OQ-2 resolved: `batch_upsert` with vertices-before-edges. 2 SSH-Ed25519 signed commits squashed (subagent `4bac0b3` + fix-commit `08167fc`). |
 
-**Day total:** 17 PRs merged (#67-#83), 1 GitHub Release (v2.0.0-alpha.2), 1 npm publish, 9 ADRs total in repo (5 V2-β ADRs added: 007/008/009/010 + 011 reserved for W17a). 30+ reviewer-agent dispatches (per-welle + cross-batch consistency). ~15 reviewer-driven fix-commits applied in-commit before merge. **0 CRITICAL findings missed. 0 byte-determinism CI pin drifts.** All 7 V2-α byte-determinism pins byte-identical end-to-end.
+**Day total:** 18 PRs merged (#67-#85, plus the Phase-9.5 consolidation PR that merges this commit), 1 GitHub Release (v2.0.0-alpha.2), 1 npm publish, 10 ADRs total in repo (5 V2-β ADRs added: 007/008/009/010/011). 32+ reviewer-agent dispatches (per-welle + cross-batch consistency + W17a parent-dispatched external reviewers after subagent self-audit). ~16 reviewer-driven fix-commits applied in-commit before merge. **0 CRITICAL findings missed. 0 byte-determinism CI pin drifts.** All 7 V2-α byte-determinism pins byte-identical end-to-end through both the legacy test path AND the new W17a trait-conformance test.
 
 ### Session lessons learned (load-bearing for future welles)
 
@@ -147,50 +149,57 @@ Keep PR branches intact (don't `git push origin --delete`) — the draft PRs the
 
 7. **strict_required_status_checks_policy + trust-root-verify interaction.** When `gh pr update-branch` creates a GitHub-generated merge commit (signed by GitHub's RSA key, not the Atlas SSH-Ed25519 allowed signer), trust-root-verify FAILS for PRs that touch trust-root files (.github/workflows/wasm-publish.yml in W11's case). **Fix pattern:** rebase the welle branch locally onto fresh master (preserves SSH-signed commit), force-push. W17b will likely hit this if W17b touches anything in `.github/workflows/`.
 
-### W17a ready-to-dispatch subagent prompt skeleton
+8. **Subagent's `Agent` tool may not have access to dispatch reviewer subagents — parent MUST dispatch externals post-implementation.** W17a's subagent reported "parallel `code-reviewer` + `security-reviewer` Agent dispatch was not possible in this environment" and only performed self-audit. Parent dispatched both reviewers post-implementation (in parallel, single message), both APPROVED with 4 W17b-carry-over MEDIUMs documented, 1 in-commit fix applied. **Lesson:** parent's W17 dispatch prompt MUST treat the subagent's self-audit as a "best-effort" pre-check, and parent ALWAYS runs the external code-reviewer + security-reviewer dispatch post-implementation as a non-optional Standing Protocol step. Don't assume the subagent succeeded at this — verify by parent-dispatch every time.
+
+9. **Branch protection rules block admin-merge while required CI checks are in-progress (even with admin override).** Atlas-web-playwright is a required check; even though W17a had zero atlas-web changes, the rule fired. **Resolution:** `gh run watch <run-id> --exit-status` in background lets parent agent wait for completion without polling. Once the run was green, `gh pr merge 85 --squash --admin --delete-branch` succeeded (the post-merge local cleanup `gh` does fails on Windows multi-worktree setups — error is cosmetic, merge already went through; verify with `gh pr view <n> --json state`).
+
+### W17b ready-to-dispatch subagent prompt skeleton
 
 ```
-Atlas project at C:\Users\nelso\Desktop\atlas. V2-β Welle 17a — ArcadeDB driver scaffold + GraphStateBackend trait + InMemoryBackend wire-up + ArcadeDbBackend stub.
+Atlas project at C:\Users\nelso\Desktop\atlas. V2-β Welle 17b — ArcadeDB driver implementation. Fills the W17a-shipped ArcadeDbBackend stub with reqwest-based HTTP calls.
 
-## Pre-flight (FIRST 3 actions)
+## Pre-flight (FIRST 3 actions — non-negotiable)
 1. `git fetch origin`
-2. `git checkout -B feat/v2-beta/welle-17a-arcadedb-scaffold origin/master` (master HEAD at dispatch: <current-master-sha>)
+2. `git checkout -B feat/v2-beta/welle-17b-arcadedb-impl origin/master` (master HEAD at dispatch: <current-master-sha-post-W17a-merge>)
 3. `git status` → clean
 
 ## Pre-flight reading (master-resident, mandatory)
-1. `docs/V2-BETA-ARCADEDB-SPIKE.md` §7 (trait sketch — your starting point), §4.3 (Layer 3 caveat — read carefully), §4.9 (byte-determinism adapter contract), §10 (W17 entry criteria), §11 (V2-γ open questions)
-2. `docs/ADR/ADR-Atlas-010-arcadedb-backend-choice-and-embedded-mode-tradeoff.md` §4 (8 binding sub-decisions for W17), §5.3 (W17b/W17c dependencies), §7 (reversibility)
-3. `crates/atlas-projector/src/state.rs` + `upsert.rs` + `canonical.rs` (V2-α logic you'll wrap behind the trait)
-4. `crates/atlas-projector/src/emission.rs` + `gate.rs` (consumers of the projector state — should still work via InMemoryBackend)
-5. `.handoff/v2-beta-welle-N-plan.md.template` (your plan-doc skeleton)
+1. `docs/ADR/ADR-Atlas-011-arcadedb-driver-scaffold.md` (W17a's trait shape + the binding OQ-1/OQ-2 resolutions: Box<dyn WorkspaceTxn> for object safety + batch_upsert vertices-before-edges + open questions OQ-7..OQ-11 for W17b/V2-γ tracking)
+2. `docs/ADR/ADR-Atlas-010-arcadedb-backend-choice-and-embedded-mode-tradeoff.md` §4 (8 binding sub-decisions — esp. #5 transaction model, #6 byte-determinism adapter ORDER BY entity_uuid/edge_id, #7 layered tenant isolation)
+3. `.handoff/v2-beta-welle-17a-plan.md` "Post-merge: reviewer findings deferred to W17b" section — the 4 carry-over MEDIUMs W17b MUST address (serde_json depth cap, WorkspaceId validation, begin() lifetime evaluation, error-enum cleanup is V2-γ-deferred)
+4. `crates/atlas-projector/src/backend/mod.rs` (production GraphStateBackend trait + WorkspaceTxn trait + Vertex/Edge/UpsertResult — the surface you implement)
+5. `crates/atlas-projector/src/backend/in_memory.rs` (reference impl — your ArcadeDbBackend must produce byte-identical canonical_state() output for the same workspace contents)
+6. `crates/atlas-projector/src/backend/arcadedb.rs` (the stub you fill — unimplemented!() bodies show the contract)
+7. `crates/atlas-projector/tests/backend_trait_conformance.rs` (existing 8 tests; W17b extends with cross-backend byte-determinism test)
+8. `docs/V2-BETA-ARCADEDB-SPIKE.md` §3 (ArcadeDB primer — Cypher subset, HTTP API endpoints), §8 (CI strategy — Docker-Compose sketch W17c implements)
+9. `.handoff/v2-beta-welle-N-plan.md.template` (plan-doc skeleton — you write `.handoff/v2-beta-welle-17b-plan.md`)
 
-## In-scope files (write these only — plus .handoff/v2-beta-welle-17a-plan.md)
-- NEW `crates/atlas-projector/src/backend/mod.rs` — production GraphStateBackend trait + Vertex/Edge structs + WorkspaceTxn handle. ~150-200 LOC.
-- NEW `crates/atlas-projector/src/backend/in_memory.rs` — InMemoryBackend impl wrapping existing state.rs+upsert.rs+canonical.rs. Preserves byte-determinism (graph_state_hash hex 8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4 unchanged). ~250-350 LOC.
-- NEW `crates/atlas-projector/src/backend/arcadedb.rs` — stub. All trait methods `unimplemented!()` with W17b TODO docs. ~100 LOC.
-- MODIFY `crates/atlas-projector/src/lib.rs` — `pub mod backend;` export
-- MODIFY `crates/atlas-projector/src/emission.rs` — refactor to consume GraphStateBackend trait (default = InMemoryBackend; same behaviour as today)
-- NEW `crates/atlas-projector/tests/backend_trait_conformance.rs` — trait-conformance tests for both backends (InMemory passes; ArcadeDb stub asserts `unimplemented!()` panic)
-- NEW `docs/ADR/ADR-Atlas-011-arcadedb-driver-scaffold.md` (~250-300 lines, mirror ADR-010 structure)
-- NEW `.handoff/v2-beta-welle-17a-plan.md` (use template)
+## In-scope files (write/modify these only — plus .handoff/v2-beta-welle-17b-plan.md)
+- MODIFY `crates/atlas-projector/src/backend/arcadedb.rs` — replace all `unimplemented!()` bodies with `reqwest`-based HTTP calls per ADR-Atlas-010 §4 sub-decisions. ~600-900 LOC. INCLUDE: HTTP client with rustls-tls + Basic auth (OQ-5 starts with HTTP Basic; JWT is V2-γ); per-workspace database management (create + connect on demand per sub-decision #4); transaction handle wrapping `/api/v1/begin/{db}` session; Cypher query builders for vertex/edge upsert + sorted reads (ORDER BY entity_uuid/edge_id per sub-decision #6); commit/rollback via `/api/v1/commit/{db}` + `/api/v1/rollback/{db}`; canonical_state() override calling vertices_sorted + edges_sorted + delegating to V2-α canonical::graph_state_hash for byte-identical output.
+- MODIFY `crates/atlas-projector/Cargo.toml` — add `reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }` (~2 MB binary cost; tokio-aligned async). Adds 1 dep; no other dep changes.
+- MODIFY `crates/atlas-projector/src/backend/mod.rs` IF necessary for the 4 W17a carry-over MEDIUMs — apply BEFORE first method body in arcadedb.rs lands so SemVer-breaking changes don't bite mid-implementation: (a) evaluate begin() lifetime — switch `'_` → `'static` OR explicit named lifetime if needed; (b) consider depth+size cap helper for serde_json::Value deserialisation from HTTP (could live in arcadedb.rs as a private fn).
+- NEW `crates/atlas-projector/src/backend/arcadedb/` (sub-module dir, optional) — break up arcadedb.rs into client.rs, cypher.rs, transaction.rs sub-modules if size exceeds ~800 LOC.
+- NEW `crates/atlas-projector/tests/cross_backend_byte_determinism.rs` — projects same `events.jsonl` fixture through BOTH InMemoryBackend AND ArcadeDbBackend, asserts byte-identical canonical_state() output. MUST run against a real ArcadeDB instance (gated behind env var, e.g. `ATLAS_ARCADEDB_URL` — skipped in local cargo test unless env set; W17c wires Docker-Compose to set it in CI).
+- NEW `.handoff/v2-beta-welle-17b-plan.md` (use template; carry forward W17a's "open questions for W17c" section)
 
-## Forbidden files (parent consolidates these in Phase 9.5)
-- CHANGELOG.md, docs/V2-MASTER-PLAN.md status, docs/SEMVER-AUDIT-V1.0.md, .handoff/decisions.md, .handoff/v2-session-handoff.md, docs/V2-BETA-ORCHESTRATION-PLAN.md
+## Forbidden files (parent consolidates in Phase 10.5)
+- CHANGELOG.md, docs/V2-MASTER-PLAN.md (status), docs/SEMVER-AUDIT-V1.0.md, .handoff/decisions.md, .handoff/v2-session-handoff.md, docs/V2-BETA-ORCHESTRATION-PLAN.md
+- .github/workflows/* (W17c's job — DON'T add atlas-arcadedb-smoke.yml or Docker-Compose CI in W17b; that's a separate welle to keep blast radius small)
 
-## Acceptance criteria
+## Acceptance criteria (parent verifies all before approving merge)
 - `cargo check --workspace` green
-- `cargo test --workspace` green; specifically `cargo test -p atlas-trust-core -p atlas-projector` shows 169 + 85 tests pass (or higher with new trait-conformance tests added)
-- `graph_state_hash_byte_determinism_pin` hex unchanged at `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4`
-- Existing emission.rs + gate.rs consumers work via the new trait (refactored to use trait, default InMemoryBackend; no behaviour change)
-- ArcadeDbBackend stub compiles (all methods `unimplemented!()`)
-- Parallel `code-reviewer` + `security-reviewer` dispatched. Fix CRITICAL/HIGH in-commit BEFORE PR. Single SSH-Ed25519 signed commit. DRAFT PR base=master.
+- `cargo test -p atlas-trust-core -p atlas-projector` green — including 169 trust-core unit + 8 trait-conformance unchanged (byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` still reproduced through trait)
+- `cargo test -p atlas-projector --test cross_backend_byte_determinism -- --ignored` green AGAINST A LIVE ArcadeDB instance (W17b dispatcher provides instance URL or notes a follow-up validation step)
+- 4 W17a carry-over MEDIUMs all addressed: serde_json depth cap applied at HTTP-response boundary; WorkspaceId validation guard at ArcadeDbBackend::begin() rejecting empty / enforcing format; begin() lifetime evaluated + decided BEFORE method bodies land (with note in ADR if signature changes); error-enum cleanup defer-to-V2-γ acceptable.
+- ArcadeDbBackend NO LONGER calls `unimplemented!()` in any method
+- Parent dispatches parallel `code-reviewer` + `security-reviewer` post-implementation (subagent's self-audit insufficient per W17a lesson #8). Fix CRITICAL/HIGH in-commit. Single SSH-Ed25519 signed commit (squash-merge will collapse subagent-commit + parent-fix-commit). DRAFT PR base=master.
 
-## Reviewer focus (when you dispatch them)
-- code-reviewer: trait object-safety, lifetime correctness on `vertices_sorted`/`edges_sorted` iterators, default `canonical_state()` impl uses byte-identical canonicalisation to existing canonical.rs, no public-API breakage on existing atlas-projector consumers
-- security-reviewer: byte-determinism preservation (Welle 1 author_did signing-input stamping + Welle 3 canonicalisation byte-pin unchanged), Vertex/Edge struct field set matches V2-α event payloads exactly (no new attack surface), trait object-safety doesn't break #[non_exhaustive] discipline
+## Reviewer focus (when parent dispatches them)
+- code-reviewer: reqwest async lifecycle correctness, Cypher query construction (no string-concat injection paths even for non-user-supplied input — use parameterised queries throughout per ADR-010 #6), error-mapping from reqwest errors to ProjectorError variants without leaking internal HTTP detail, byte-determinism preservation (canonical_state() output exact-match InMemoryBackend), no public-API breakage on the trait surface.
+- security-reviewer: tenant isolation (per-database-per-workspace operator runbook requirement enforced at ArcadeDbBackend::begin(); no cross-tenant query paths), serde_json::Value depth attack surface (W17a carry-over MED #1) addressed at HTTP-response boundary, WorkspaceId validation (W17a carry-over MED #2) at the trait boundary closes the W17a-flagged gap, no panic paths reachable from public API via HTTP error mapping, Cypher parameter binding ensures workspace_id-as-Cypher-param cannot be sub'd to leak data, Basic-Auth credentials redacted from any log output (OQ-5).
 
-## Output
-PR number + line counts + test pass count + confirmation of byte-determinism hex unchanged. Under 250 words.
+## Output (under 350 words)
+PR number + URL, line counts per new/modified file (totals only), test count, cross-backend byte-determinism evidence (hex from both backends), 4 W17a carry-over MEDIUMs resolution status each, reviewer-finding counts + resolutions, any unexpected deviations (e.g. ArcadeDB Cypher subset surprise).
 ```
 
 ### Pre-flight checklist for next session (any agent)
@@ -199,22 +208,24 @@ PR number + line counts + test pass count + confirmation of byte-determinism hex
 cd C:/Users/nelso/Desktop/atlas
 git status                          # → clean
 git checkout master && git pull origin master   # → up-to-date with master HEAD
-git log --oneline -3                # → top is Phase-8.5 consolidation commit
+git log --oneline -3                # → top is Phase-9.5 consolidation commit, then dec6234 W17a feat, then eb16631 Phase-8.5 consolidation
 "/c/Program Files/GitHub CLI/gh.exe" pr list --state open --json number,title  # → ~12 ancient drafts (#59-#62 etc.); zero NEW V2-β open
 "/c/Program Files/GitHub CLI/gh.exe" release view v2.0.0-alpha.2  # → confirms prerelease LIVE
 curl -s "https://registry.npmjs.org/@atlas-trust/verify-wasm" | python -c "import json,sys; d=json.load(sys.stdin); print('latest:', d['dist-tags'].get('latest'))"  # → "2.0.0-alpha.2"
 git verify-tag v2.0.0-alpha.2       # → Good ed25519 sig
-/c/Users/nelso/.cargo/bin/cargo.exe test -p atlas-trust-core -p atlas-projector --quiet  # → 169 + 85 tests pass (byte-determinism CI pin intact)
+/c/Users/nelso/.cargo/bin/cargo.exe test -p atlas-trust-core -p atlas-projector --quiet  # → 169 trust-core + 88 projector unit + 8 trait-conformance + integration binaries all pass (byte-determinism CI pin intact through trait surface)
 ```
 
-### Critical files for V2-β Phase 9+ reference (read-only)
+### Critical files for V2-β Phase 10+ reference (read-only)
 
-- `docs/V2-BETA-ORCHESTRATION-PLAN.md` §2 (W17a row) + §3 (dispatch architecture + forbidden-files rule)
-- `docs/V2-BETA-DEPENDENCY-GRAPH.md` §5 (critical path: Phase 9 unblocks Phase 10 unblocks Phase 11)
-- `docs/V2-BETA-ARCADEDB-SPIKE.md` §7 (`GraphStateBackend` trait sketch — W17a's starting point)
-- `docs/ADR/ADR-Atlas-010-arcadedb-backend-choice-and-embedded-mode-tradeoff.md` §4 (8 binding sub-decisions)
-- `crates/atlas-projector/src/` (V2-α state.rs+upsert.rs+canonical.rs+emission.rs+gate.rs — W17a wraps these behind the trait)
-- `packages/atlas-bridge/` (V1 monorepo-package convention — W17a does NOT touch this; it's the reference pattern that W15's `packages/atlas-cypher-validator/` already mirrored)
+- `docs/V2-BETA-ORCHESTRATION-PLAN.md` §2 (W17b row) + §3 (dispatch architecture + forbidden-files rule)
+- `docs/V2-BETA-DEPENDENCY-GRAPH.md` §5 (critical path: Phase 10 unblocks Phase 11 unblocks Phase 12)
+- `docs/ADR/ADR-Atlas-011-arcadedb-driver-scaffold.md` (W17a's trait shape; W17b implements the contract)
+- `docs/ADR/ADR-Atlas-010-arcadedb-backend-choice-and-embedded-mode-tradeoff.md` §4 (8 binding sub-decisions for W17b implementation)
+- `crates/atlas-projector/src/backend/` (W17a's mod.rs trait + in_memory.rs reference impl + arcadedb.rs stub W17b fills)
+- `crates/atlas-projector/tests/backend_trait_conformance.rs` (8 existing tests; W17b extends with cross-backend byte-determinism)
+- `.handoff/v2-beta-welle-17a-plan.md` "Post-merge: reviewer findings deferred to W17b" section (the 4 carry-over MEDIUMs W17b MUST address)
+- `docs/V2-BETA-ARCADEDB-SPIKE.md` §3 (ArcadeDB Cypher subset + HTTP API primer), §8 (W17c CI sketch — W17b reads as forward-context)
 
 ---
 
