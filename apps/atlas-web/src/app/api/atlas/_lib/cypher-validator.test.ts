@@ -166,6 +166,17 @@ describe("validateReadOnlyCypher — input hygiene", () => {
     expect(r.reason).toMatch(/exceeds/);
   });
 
+  it("rejects a 4097-char query (one over the 4096-char floor shared with W13)", () => {
+    // Cross-batch consistency-reviewer HIGH-1: W12's cap was reduced
+    // from 16 KB to 4096 to match W13's stricter floor. This test
+    // pins the exact boundary so future drift trips a clear failure.
+    expect(CYPHER_MAX_LENGTH).toBe(4096);
+    const query = "x".repeat(4097);
+    const r = validateReadOnlyCypher(query);
+    expect(r.ok).toBe(false);
+    expect(r.reason).toMatch(/exceeds|too long/i);
+  });
+
   it("rejects DELETE hidden in a block comment trailer", () => {
     // The validator strips comments BEFORE keyword check, so this
     // commented-out DELETE is effectively benign. Asserts the

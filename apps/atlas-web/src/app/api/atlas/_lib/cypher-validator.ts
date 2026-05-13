@@ -53,10 +53,14 @@
  *     the four classes above match, we reject. False positives are
  *     better than false negatives for v2.0.0-beta.1.
  *
- *   - Maximum query length is 16 KB. The route handler also caps
+ *   - Maximum query length is 4096 chars. The route handler also caps
  *     request body bytes at 256 KB before this function runs (matches
  *     write-node's belt-and-braces cap). Beyond DoS, an oversized
- *     query indicates an automated-attack or a misuse.
+ *     query indicates an automated-attack or a misuse. The 4096 floor
+ *     is shared with W13 (atlas-mcp-server) — cross-batch consistency
+ *     reviewer HIGH-1 finding: W12 had drifted to 16 KB and was
+ *     converged to the stricter W13 floor. W15 (rule-of-three
+ *     consolidation) will extract the shared cap constant.
  */
 
 export interface CypherValidationResult {
@@ -69,7 +73,7 @@ export interface CypherValidationResult {
  * well under this; anything larger is a likely DoS attempt or
  * machine-generated cypher that should not be hitting a read API.
  */
-export const CYPHER_MAX_LENGTH = 16 * 1024;
+export const CYPHER_MAX_LENGTH = 4096;
 
 /**
  * Forbidden write-side keywords. Each is matched as a whole-word
