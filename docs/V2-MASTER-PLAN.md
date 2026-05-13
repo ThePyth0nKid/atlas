@@ -129,14 +129,20 @@ Full risk matrix with 13+ entries in `.handoff/v2-master-vision-v1.md` §6.
 
 **Expected PR count:** 5–8 (one per session, ~Welle-14c/d/e size). **All 8 wellen shipped 2026-05-12 to 2026-05-13.** V2-α-α.1 release tag `v2.0.0-alpha.1` LIVE on master + GitHub + npm.
 
-### V2-β Read-Side (10 phases, 11 wellen W9-W19, ~12 sessions with parallel dispatch) — **Phase 0 + Phase 1 + Phase 2 SHIPPED 2026-05-13**
+### V2-β Read-Side (10 phases, 11 wellen W9-W19, ~12 sessions with parallel dispatch) — **Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 SHIPPED 2026-05-13**
 **Scope (full):** Mem0g cache integration + 6 Read-API endpoints (AST-validated Cypher) + MCP V2 tools + ArcadeDB embedded-mode backend + secure-deletion mechanism + parallel-projection design + expanded projector event-kinds + wasm-publish-race fix + v2.0.0-beta.1 ship.
 
 **Orchestration:** see [`docs/V2-BETA-ORCHESTRATION-PLAN.md`](V2-BETA-ORCHESTRATION-PLAN.md) (master-resident, Phase-0 output 2026-05-13) and [`docs/V2-BETA-DEPENDENCY-GRAPH.md`](V2-BETA-DEPENDENCY-GRAPH.md) (Mermaid + critical-path analysis). V2-β welle-progress tracker lives in the Orchestration Plan §2 + §3.4 (ADR-number reservation).
 
-**Phase 1 SHIPPED 2026-05-13 (`v2.0.0-alpha.2` candidate):** W9 Operator Runbook + W10 Parallel-Projection Design ADR-Atlas-007 + W11 wasm-publish.yml dual-publish race fix + ADR-Atlas-008. Three subagents in parallel worktrees, 6 per-welle reviewers (3 × code + 3 × security), 1 cross-batch consistency-reviewer (V2-β NEW invariant per Orchestration Plan §3.5). All 7 V2-α byte-determinism CI pins byte-identical post-merge.
+**Phase 1 SHIPPED 2026-05-13 (`v2.0.0-alpha.2`):** W9 Operator Runbook + W10 Parallel-Projection Design ADR-Atlas-007 + W11 wasm-publish.yml dual-publish race fix + ADR-Atlas-008. Three subagents in parallel worktrees, 6 per-welle reviewers (3 × code + 3 × security), 1 cross-batch consistency-reviewer (V2-β NEW invariant per Orchestration Plan §3.5). All 7 V2-α byte-determinism CI pins byte-identical post-merge.
 
-**Phase 3 next:** v2.0.0-alpha.2 ship welle (promotes Phase-1-batch to released pre-release, validates the W11 wasm-publish.yml fix end-to-end).
+**Phase 3 SHIPPED 2026-05-13:** `v2.0.0-alpha.2` released — workspace version bump + signed tag + GitHub Release (prerelease) + `@atlas-trust/verify-wasm@2.0.0-alpha.2` LIVE on npm with Sigstore Build L3 provenance. Validation event: W11 wasm-publish.yml race fix proven correct end-to-end on real npm registry behaviour (first race-free Atlas wasm-publish run overall).
+
+**Phase 4 SHIPPED 2026-05-13:** W12 Read-API endpoints (6 Next.js routes + inline Cypher AST validator) + W13 MCP V2 tools (5 tools + inline Cypher AST validator, rule-of-three with W12) + W14 expanded projector event-kinds (`annotation_add` + `policy_set` + `anchor_created` additive dispatch arms with byte-determinism preservation). Three subagents in parallel worktrees, 6 per-welle reviewers, 1 cross-batch consistency-reviewer. All 7 V2-α byte-determinism CI pins byte-identical post-merge.
+
+**Phase 5 SHIPPED 2026-05-13:** this consolidation commit. CHANGELOG promoted Phase-4 wellen to `[Unreleased]`; master-plan §6, orchestration-plan welle-progress, handoff doc all synchronised.
+
+**Phase 6 next:** W15 Cypher-validator consolidation (rule-of-three extraction after W12 + W13 each ship inline; W15 entry criteria documented in CHANGELOG `[Unreleased]`).
 
 **Dependencies:** V2-α (Mem0g indexes FalkorDB which depends on projector — per Phase 2 Architect H-3 correction, NOT parallel as Phase 1 implied).
 
