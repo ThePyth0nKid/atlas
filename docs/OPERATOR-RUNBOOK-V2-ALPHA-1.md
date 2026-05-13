@@ -40,7 +40,7 @@ computed on-demand from events.
 **No-op upgrade:** If you are currently running Atlas v1.0.1 and do NOT want to
 use V2-α features, you can upgrade to v2.0.0-alpha.1 and continue producing
 V1-shaped events (no `author_did` field, V1-only payload kinds). The v2.0.0-alpha.1
-verifier accepts these unchanged. See §7 below for wire-format compatibility.
+verifier accepts these unchanged. See §6 below for wire-format compatibility.
 
 ---
 
@@ -70,7 +70,7 @@ tail -1 trace/events.jsonl | jq -r '.event_hash'
 # 3. Emit the projector attestation.
 atlas-signer emit-projector-attestation \
   --events-jsonl trace/events.jsonl \
-  --workspace-id ws-q1-2026 \
+  --workspace ws-q1-2026 \
   --derive-from-workspace ws-q1-2026 \
   --head-event-hash abc123def456... \
   >> trace/events.jsonl
@@ -83,7 +83,7 @@ tail -1 trace/events.jsonl | jq '.payload.type'
 ### Flags
 
 - `--events-jsonl <path>` — Path to the signed events file (required).
-- `--workspace-id <id>` — Workspace identifier this attestation is for (required).
+- `--workspace <id>` — Workspace identifier this attestation is for (required). Bound into the signing input AND used for atlas-projector's entity_uuid derivation.
 - `--derive-from-workspace <id>` OR `--kid <kid>` — Standard signer auth (required; see V1 runbook §1 for master-seed gate).
 - `--head-event-hash <hex>` — blake3 hash of the last projectable event (64 lowercase hex, required). The attestation asserts that the projector consumed events up to and including this hash.
 - `--projector-version <string>` — (Optional, defaults to `atlas-projector/<version>`). Identity string bound into the signed attestation. You may override for custom projector implementations.
@@ -95,7 +95,7 @@ One JSON line on stdout, suitable for `>> events.jsonl` append:
 
 ```json
 {
-  "event_id": "01H...",
+  "event_id": "01H<ulid-here>",
   "parent_hashes": [],
   "ts": "2026-05-13T14:30:00Z",
   "workspace_id": "ws-q1-2026",
@@ -240,6 +240,12 @@ graph-state hashes for the same event set. This indicates:
 4. If you are a third-party verifier: escalate to the issuer's operator to
    compare CI logs + bytecode + byte-determinism pin results.
 
+> **Do NOT edit or delete lines from `events.jsonl` to resolve a Mismatch.**
+> The file is an append-only hash-chained log; modifications break chain
+> integrity and may constitute evidence tampering. The correct resolution is
+> to identify the projector version divergence and re-emit a corrected
+> attestation (a new appended event, not a rewrite of existing lines).
+
 **`GateStatus::AttestationParseFailed`**
 
 The attestation event's payload could not be parsed as a valid
@@ -359,15 +365,15 @@ V2-α attestations are themselves signed Atlas events and are therefore eligible
 for Sigstore Rekor anchoring, just like any other event. The anchor ceremony is
 **unchanged** from V1.
 
-See [OPERATOR-RUNBOOK.md §8](OPERATOR-RUNBOOK.md) (or whichever section covers
-Rekor anchoring in your V1 reference) for the full Rekor ceremony. The
-v2.0.0-alpha.1 addition is:
+See [OPERATOR-RUNBOOK.md §8](OPERATOR-RUNBOOK.md) (CI lanes — the
+`sigstore-rekor-nightly.yml` lane is the operational Rekor anchor-verification
+reference) for the full Rekor ceremony. The v2.0.0-alpha.1 addition is:
 
 ```bash
 # 1. Emit attestations (see § 2 above).
 atlas-signer emit-projector-attestation \
   --events-jsonl trace/events.jsonl \
-  --workspace-id ws-q1-2026 \
+  --workspace ws-q1-2026 \
   --derive-from-workspace ws-q1-2026 \
   --head-event-hash abc123... \
   >> trace/events.jsonl
@@ -381,7 +387,9 @@ atlas-signer anchor \
 The `anchor` subcommand will find all unanonymized events (including your new
 `ProjectorRunAttestation` events) and submit them to Rekor. The returned
 `pubkey-bundle.json` includes the Rekor anchors for all submitted events,
-including attestations.
+including attestations. Verifiers should confirm the Rekor inclusion proof
+(log index + tree hash) against the public Rekor instance before accepting the
+temporal anchor.
 
 **Immutability benefit:** Anchoring the attestation in Rekor means a third-party
 verifier can confirm that the projector was invoked at a specific wall-clock time
@@ -444,7 +452,7 @@ full rationale).
 
 ---
 
-## § 7. Pre-counsel-review disclaimer
+## § 8. Pre-counsel-review disclaimer
 
 Per [`docs/V2-MASTER-PLAN.md`](V2-MASTER-PLAN.md) §5 + [`.handoff/decisions.md`](../.handoff/decisions.md)
 (`DECISION-COUNSEL-1`): Atlas commits to a €30–80K counsel engagement (6–8 weeks
@@ -465,11 +473,11 @@ stable; the regulatory-claim phrasing is the layer subject to counsel review.
 
 ---
 
-## § 8. Quick reference: V2-α operator workflows
+## § 9. Quick reference: V2-α operator workflows
 
 | Workflow | Command | Notes |
 |---|---|---|
-| Emit a projector attestation | `atlas-signer emit-projector-attestation --events-jsonl <path> --workspace-id <id> --derive-from-workspace <id> --head-event-hash <hex> >> events.jsonl` | See §2; outputs one JSON line |
+| Emit a projector attestation | `atlas-signer emit-projector-attestation --events-jsonl <path> --workspace <id> --derive-from-workspace <id> --head-event-hash <hex> >> events.jsonl` | See §2; outputs one JSON line |
 | Verify attestations (library API) | `atlas_projector::verify_attestations_in_trace(workspace_id, events_jsonl_str)?` | See §3; returns `Vec<GateResult>` |
 | Anchor attestations (unchanged from V1) | `atlas-signer anchor --workspace <id> --events-jsonl <path>` | Attestation events are eligible; see §5 |
 | Verify trace offline (WASM) | npm `@atlas-trust/verify-wasm@2.0.0-alpha.1`; call `verifyTrace(events, bundle, opts)` | See §4; validates signatures + attestation schema |
