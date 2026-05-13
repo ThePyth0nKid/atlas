@@ -1,0 +1,178 @@
+# V2-β Welle N — <Welle Title> Plan-Doc Template
+
+> **THIS IS A TEMPLATE.** Subagents executing a V2-β welle MUST copy this template, rename to `.handoff/v2-beta-welle-N-plan.md` (replacing `N` with their welle number), and fill in each section. The structure mirrors V2-α Welles 1-8 (all 8 plan-docs in `.handoff/v2-alpha-welle-{1..8}-plan.md` are exemplars).
+
+## Header
+
+```
+# V2-β Welle <N> — Plan-Doc (<Welle Title>)
+
+> **Status:** DRAFT <YYYY-MM-DD>. Awaiting parent agent's confirmation before merge.
+> **Orchestration:** part of Phase <X> (parallel batch <Y> | serial) per `docs/V2-BETA-ORCHESTRATION-PLAN.md`.
+> **Driving decisions:** <cross-ref to relevant DECISION-* entries in `.handoff/decisions.md`>.
+
+<1-paragraph context: what V2-β security primitive this welle extends; how it relates to V2-α + the broader v2.0.0-beta.1 milestone>
+
+**Why this as Welle N:** <1-paragraph justification — what dependencies are satisfied, what later wellen this unblocks>
+```
+
+## Scope (table)
+
+```
+| In-Scope | Out-of-Scope |
+|---|---|
+| <concrete file/feature 1> | <future-welle-deferred item 1> |
+| ... | ... |
+```
+
+**Hard rule:** the "Out-of-Scope" column must include the V2-β-Orchestration-Plan §3.3 forbidden files (CHANGELOG.md, V2-MASTER-PLAN.md status table, etc.) — parent agent edits those post-consolidation.
+
+## Decisions (final, pending parent confirmation)
+
+```
+- **<decision-topic>:** <choice + rationale>
+- **<decision-topic>:** <choice + rationale>
+```
+
+## Files
+
+```
+| Status | Pfad | Inhalt |
+|---|---|---|
+| NEW | <path> | <description + line estimate> |
+| MODIFY | <path> | <description> |
+```
+
+**Total estimated diff:** <X-Y lines>.
+
+## Test impact (V1 + V2-α assertions to preserve)
+
+```
+| Surface | Drift risk under Welle N | Mitigation |
+|---|---|---|
+| All 7 byte-determinism CI pins | NONE — <reason> | Tests confirm |
+| <existing test surface> | <risk + reason> | <mitigation> |
+```
+
+**Mandatory check:** all 7 byte-determinism CI pins (cose × 3 + anchor × 2 + pubkey-bundle × 1 + graph-state-hash × 1) MUST remain byte-identical after this welle's merge.
+
+## Implementation steps (TDD order)
+
+```
+1. Write failing tests FIRST (RED)
+2. Implement minimum to make tests pass (GREEN)
+3. Refactor for clarity (IMPROVE)
+4. Run full workspace test suite — green
+5. Run parallel reviewer agents (code-reviewer + security-reviewer)
+6. Fix CRITICAL/HIGH in-commit
+7. SSH-signed single coherent commit
+8. Push + open DRAFT PR with base=master
+9. Parent agent dispatches consistency-reviewer (if part of parallel batch) + decides merge timing
+```
+
+## Acceptance criteria
+
+```
+- [ ] `cargo check --workspace` green
+- [ ] `cargo test --workspace` green; all 7 byte-determinism CI pins byte-identical
+- [ ] <welle-specific success criteria>
+- [ ] Plan-doc on welle's own branch
+- [ ] Parallel `code-reviewer` + `security-reviewer` agents dispatched; CRITICAL = 0, HIGH fixed in-commit
+- [ ] Single SSH-Ed25519 signed commit (`SHA256:qq/VVJYpsgEdeQSLqU0QS/gKn6ohXJHio+VkzVX+4Zg`)
+- [ ] DRAFT PR open with base=master
+- [ ] Forbidden-files rule honoured (no touches to CHANGELOG.md, V2-MASTER-PLAN.md status, decisions.md, semver-audit, handoff doc)
+```
+
+## Risks
+
+```
+| Risk | Probability | Impact | Mitigation |
+|---|---|---|---|
+| <risk 1> | LOW/MED/HIGH | LOW/MED/HIGH | <mitigation> |
+```
+
+## Out-of-scope this welle (later phases)
+
+```
+- **Phase <X> later welle:** <deferred item + rationale>
+```
+
+## Reference pointers
+
+```
+| Concept | Source-of-truth |
+|---|---|
+| V2-β Orchestration Plan | `docs/V2-BETA-ORCHESTRATION-PLAN.md` |
+| V2-β Dependency Graph | `docs/V2-BETA-DEPENDENCY-GRAPH.md` |
+| Master Plan | `docs/V2-MASTER-PLAN.md` §6 |
+| Working Methodology | `docs/WORKING-METHODOLOGY.md` |
+| <welle-specific concept> | <path> |
+```
+
+---
+
+## Implementation Notes (Post-Code) — fill AFTER tests pass
+
+```
+### What actually shipped
+
+| Concrete | File | Lines added |
+|---|---|---|
+| ... | ... | ... |
+
+### Test outcome
+
+- <welle-specific test summary>
+- All 7 byte-determinism CI pins unchanged
+- <V1 + V2-α surface impact summary>
+
+### Risk mitigations validated post-implementation
+
+| Plan-stage risk | Resolution |
+|---|---|
+
+### Deviations from plan
+
+<deviations + rationale, or "None of substance">
+```
+
+---
+
+## Subagent dispatch prompt skeleton (anti-divergence enforcement)
+
+When the parent agent dispatches a subagent for this welle, the prompt MUST include:
+
+```
+Atlas project at C:\Users\nelso\Desktop\atlas. V2-β Welle <N> (<title>).
+Master HEAD at time of dispatch: <commit-sha>.
+
+## Your goal
+<welle-specific scope, distilled from this plan-doc>
+
+## Pre-flight (FIRST actions in your worktree)
+1. `git fetch && git checkout master` — ensure you start from the correct base
+2. Read `docs/V2-BETA-ORCHESTRATION-PLAN.md` (master-resident)
+3. Read `docs/V2-BETA-DEPENDENCY-GRAPH.md` (master-resident)
+4. Read `.handoff/v2-beta-welle-N-plan.md.template` and produce your welle's plan-doc
+
+## Forbidden files (parent consolidates these post-batch)
+- CHANGELOG.md
+- docs/V2-MASTER-PLAN.md (status table in §6)
+- docs/SEMVER-AUDIT-V1.0.md
+- .handoff/decisions.md
+- .handoff/v2-session-handoff.md
+
+## In-scope files (ONLY these)
+<welle-specific scope list>
+
+## Reviewer expectations
+After implementation, dispatch parallel `code-reviewer` + `security-reviewer` agents per Atlas standing protocol. Fix CRITICAL/HIGH findings in-commit BEFORE creating PR.
+
+## Output
+- Single SSH-Ed25519 signed commit on your worktree branch `feat/v2-beta/welle-<N>-<name>`
+- Open DRAFT PR with base=master
+- Report PR number to parent agent
+- DO NOT merge; parent agent decides merge timing
+```
+
+This skeleton is mandatory; deviations are flagged by the parent agent's review.
