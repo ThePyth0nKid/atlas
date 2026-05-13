@@ -125,7 +125,12 @@ export function validateReadOnlyCypher(query: string): CypherValidationResult {
     };
   }
 
-  const stripped = stripComments(trimmed);
+  // Re-trim AFTER comment stripping: a leading block-comment (e.g.
+  // `/* */MATCH (n) RETURN n`) becomes ` MATCH (n) RETURN n`, which would
+  // otherwise fail the `^MATCH\b` opener check as a false-negative.
+  // The forbidden-keyword scan is unaffected (it scans the full string,
+  // not from `^`).
+  const stripped = stripComments(trimmed).trimStart();
 
   for (const { token, reason } of FORBIDDEN_KEYWORDS) {
     if (token.test(stripped)) {

@@ -22,7 +22,10 @@ import {
   CYPHER_MAX_LENGTH,
   validateReadOnlyCypher,
 } from "./_lib/cypher-validator.js";
-import { getProjectionStore } from "./_lib/projection-store.js";
+import {
+  getProjectionStore,
+  PROJECTION_STORE_STUB_MESSAGE,
+} from "./_lib/projection-store.js";
 import type { ToolDefinition, ToolHandlerResult } from "./types.js";
 
 export const queryGraphInputSchema = {
@@ -105,8 +108,15 @@ export const queryGraphTool: ToolDefinition<typeof queryGraphInputSchema> = {
         ],
       };
     } catch (e: unknown) {
+      // Only the documented stub sentinel is allowed to pass through to
+      // MCP clients. All other errors (including future ArcadeDB driver
+      // exceptions in W17) are swallowed to a generic string so internal
+      // detail — connection strings, schema names, file paths, version
+      // strings — never reaches the caller. See decisions.md DECISION-SEC-4.
+      const isKnownStub =
+        e instanceof Error && e.message === PROJECTION_STORE_STUB_MESSAGE;
       return toolError(
-        e instanceof Error ? e.message : "projection-store call failed",
+        isKnownStub ? e.message : "projection-store call failed",
       );
     }
   },

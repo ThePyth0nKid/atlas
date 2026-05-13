@@ -14,7 +14,10 @@
 import { z } from "zod";
 import { DEFAULT_WORKSPACE } from "@atlas/bridge";
 import { optionalWorkspaceIdSchema } from "./schema.js";
-import { getProjectionStore } from "./_lib/projection-store.js";
+import {
+  getProjectionStore,
+  PROJECTION_STORE_STUB_MESSAGE,
+} from "./_lib/projection-store.js";
 import type { ToolDefinition, ToolHandlerResult } from "./types.js";
 
 /**
@@ -105,8 +108,13 @@ export const getTimelineTool: ToolDefinition<typeof getTimelineInputSchema> = {
         ],
       };
     } catch (e: unknown) {
+      // Allowlist: only the documented stub sentinel passes through to
+      // MCP clients. All other errors swallowed to a generic string so
+      // W17's ArcadeDB driver internals do not leak. See DECISION-SEC-4.
+      const isKnownStub =
+        e instanceof Error && e.message === PROJECTION_STORE_STUB_MESSAGE;
       return toolError(
-        e instanceof Error ? e.message : "projection-store call failed",
+        isKnownStub ? e.message : "projection-store call failed",
       );
     }
   },

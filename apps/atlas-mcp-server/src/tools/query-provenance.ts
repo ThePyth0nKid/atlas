@@ -17,16 +17,23 @@
 import { z } from "zod";
 import { DEFAULT_WORKSPACE } from "@atlas/bridge";
 import { optionalWorkspaceIdSchema } from "./schema.js";
-import { getProjectionStore } from "./_lib/projection-store.js";
+import {
+  getProjectionStore,
+  PROJECTION_STORE_STUB_MESSAGE,
+} from "./_lib/projection-store.js";
 import type { ToolDefinition, ToolHandlerResult } from "./types.js";
 
 /**
  * UUIDs come in a few flavours; we accept the standard 36-char hyphen-
- * separated form plus the 32-char hexless form. Strict regex at the Zod
- * boundary closes off arbitrary string-injection.
+ * separated form (RFC-4122 layout 8-4-4-4-12) plus the 32-char hexless
+ * form. The previous version used a single regex with optional hyphens
+ * which accepted malformed hyphen placement (e.g. only some hyphens
+ * present); the strict disjunction below admits ONLY the two canonical
+ * shapes. Closes off arbitrary string-injection at the Zod boundary
+ * BEFORE W17's ArcadeDB driver wires up.
  */
 const ENTITY_UUID_PATTERN =
-  /^[a-fA-F0-9]{8}-?[a-fA-F0-9]{4}-?[a-fA-F0-9]{4}-?[a-fA-F0-9]{4}-?[a-fA-F0-9]{12}$/;
+  /^[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}$|^[a-fA-F0-9]{32}$/;
 
 export const queryProvenanceInputSchema = {
   workspace_id: optionalWorkspaceIdSchema
@@ -93,8 +100,13 @@ export const queryProvenanceTool: ToolDefinition<typeof queryProvenanceInputSche
         ],
       };
     } catch (e: unknown) {
+      // Allowlist: only the documented stub sentinel passes through to
+      // MCP clients. All other errors swallowed to a generic string so
+      // W17's ArcadeDB driver internals do not leak. See DECISION-SEC-4.
+      const isKnownStub =
+        e instanceof Error && e.message === PROJECTION_STORE_STUB_MESSAGE;
       return toolError(
-        e instanceof Error ? e.message : "projection-store call failed",
+        isKnownStub ? e.message : "projection-store call failed",
       );
     }
   },

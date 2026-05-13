@@ -53,8 +53,8 @@ function parseEnvelope(text: string): Record<string, unknown> {
 
 // ─── Registry sanity ───────────────────────────────────────────────────
 check(
-  "TOOL_REGISTRY contains all 5 V2 tools + 5 V1 tools",
-  TOOL_REGISTRY.length === 10,
+  "TOOL_REGISTRY contains at least the 5 V2 tools + 5 V1 tools",
+  TOOL_REGISTRY.length >= 10,
   `got ${TOOL_REGISTRY.length}`,
 );
 

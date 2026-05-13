@@ -161,6 +161,26 @@ expectReject("empty string rejected", "", "empty");
 expectReject("whitespace-only rejected", "   \n\t  ", "empty");
 expectReject("non-MATCH/UNWIND opener rejected (sanity)", "SELECT * FROM nodes", "must begin");
 
+// ─── Comment-stripping interactions with opener check ─────────────────
+// Regression: a leading block-comment used to cause the opener check to
+// false-negative-reject a legitimate read-only query because `stripComments`
+// replaced the comment with a single space, leaving leading whitespace
+// before `MATCH`. The validator now re-trims after stripping. The inverse
+// (leading comment + forbidden CREATE opener) must still reject.
+expectOk(
+  "leading block comment before MATCH allowed after re-trim",
+  "/* preface */ MATCH (n) RETURN n LIMIT 5",
+);
+expectOk(
+  "leading block comment directly adjacent to MATCH allowed",
+  "/* */MATCH (n) RETURN n",
+);
+expectReject(
+  "leading block comment before CREATE still rejected",
+  "/* preface */ CREATE (n:Node) RETURN n",
+  "create",
+);
+
 // ─── Case-insensitive matching ────────────────────────────────────────
 expectReject(
   "lowercase delete still rejected",
