@@ -11,7 +11,7 @@ Atlas itself nor for auditors verifying a trace bundle. For those audiences see
 [ARCHITECTURE.md](ARCHITECTURE.md) and [SECURITY-NOTES.md](SECURITY-NOTES.md).
 
 **Status:** Engineering-perspective. Any public marketing material derived from
-this document MUST be counsel-validated before publication. See §8 below.
+this document MUST be counsel-validated before publication. See §7 below.
 
 ---
 
@@ -452,7 +452,7 @@ full rationale).
 
 ---
 
-## § 8. Pre-counsel-review disclaimer
+## § 7. Pre-counsel-review disclaimer
 
 Per [`docs/V2-MASTER-PLAN.md`](V2-MASTER-PLAN.md) §5 + [`.handoff/decisions.md`](../.handoff/decisions.md)
 (`DECISION-COUNSEL-1`): Atlas commits to a €30–80K counsel engagement (6–8 weeks
@@ -473,7 +473,7 @@ stable; the regulatory-claim phrasing is the layer subject to counsel review.
 
 ---
 
-## § 9. Quick reference: V2-α operator workflows
+## § 8. Quick reference: V2-α operator workflows
 
 | Workflow | Command | Notes |
 |---|---|---|
