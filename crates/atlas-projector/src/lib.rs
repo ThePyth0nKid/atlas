@@ -109,6 +109,7 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod backend;
 pub mod canonical;
 pub mod emission;
 pub mod error;
@@ -117,10 +118,21 @@ pub mod replay;
 pub mod state;
 pub mod upsert;
 
+pub use backend::arcadedb::ArcadeDbBackend;
+pub use backend::in_memory::InMemoryBackend;
+pub use backend::{
+    Edge as BackendEdge, EdgeId, EntityUuid, GraphStateBackend, UpsertResult,
+    Vertex as BackendVertex, WorkspaceId, WorkspaceTxn,
+};
 pub use canonical::{build_canonical_bytes, graph_state_hash};
-pub use emission::build_projector_run_attestation_payload;
+pub use emission::{
+    build_projector_run_attestation_payload, build_projector_run_attestation_payload_from_backend,
+};
 pub use error::{ProjectorError, ProjectorResult};
-pub use gate::{verify_attestations_in_trace, GateResult, GateStatus};
+pub use gate::{
+    verify_attestations_in_trace, verify_attestations_in_trace_with_backend, GateResult,
+    GateStatus,
+};
 pub use replay::parse_events_jsonl;
 pub use state::{GraphEdge, GraphNode, GraphState};
 pub use upsert::{apply_event_to_state, project_events};

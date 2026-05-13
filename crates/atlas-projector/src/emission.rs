@@ -40,6 +40,7 @@ use atlas_trust_core::projector_attestation::{
 };
 use serde_json::{json, Value};
 
+use crate::backend::{GraphStateBackend, WorkspaceId};
 use crate::canonical::graph_state_hash;
 use crate::error::{ProjectorError, ProjectorResult};
 use crate::state::GraphState;
@@ -111,6 +112,60 @@ pub fn build_projector_run_attestation_payload(
     let state_hash_bytes = graph_state_hash(state)?;
     let state_hash_hex = hex::encode(state_hash_bytes);
 
+    Ok(json!({
+        "type": PROJECTOR_RUN_ATTESTATION_KIND,
+        "projector_version": projector_version,
+        "projector_schema_version": PROJECTOR_RUN_ATTESTATION_SCHEMA_VERSION,
+        "head_event_hash": head_event_hash,
+        "graph_state_hash": state_hash_hex,
+        "projected_event_count": projected_event_count,
+    }))
+}
+
+/// V2-β Welle 17a: backend-aware variant of
+/// [`build_projector_run_attestation_payload`].
+///
+/// Reads the workspace's canonical graph-state hash via the
+/// `GraphStateBackend` trait (W17a abstraction). For
+/// [`crate::backend::in_memory::InMemoryBackend`] this is **byte-
+/// identical** to the legacy `&GraphState` path because the in-memory
+/// impl's `canonical_state` delegates to
+/// `canonical::graph_state_hash` on the underlying `GraphState` —
+/// see `InMemoryBackend::canonical_state` for the proof.
+///
+/// W17b will switch to this entry point as the production path; the
+/// legacy `build_projector_run_attestation_payload(&state, ...)`
+/// remains supported for callers that hold a `GraphState` directly
+/// (read-API + tests).
+///
+/// All other validation (projector_version non-empty,
+/// projected_event_count > 0, head_event_hash exactly 64 lowercase-
+/// hex chars) mirrors the legacy entry point.
+pub fn build_projector_run_attestation_payload_from_backend(
+    backend: &dyn GraphStateBackend,
+    workspace_id: &WorkspaceId,
+    projector_version: &str,
+    head_event_hash: &str,
+    projected_event_count: u64,
+) -> ProjectorResult<Value> {
+    if projector_version.trim().is_empty() {
+        return Err(ProjectorError::CanonicalisationFailed(
+            "projector_version is empty".to_string(),
+        ));
+    }
+    if projected_event_count == 0 {
+        return Err(ProjectorError::CanonicalisationFailed(
+            "projected_event_count must be >= 1".to_string(),
+        ));
+    }
+    if !is_blake3_hex(head_event_hash) {
+        return Err(ProjectorError::CanonicalisationFailed(format!(
+            "head_event_hash must be exactly 64 lowercase-hex characters (got {} chars)",
+            head_event_hash.len()
+        )));
+    }
+    let state_hash_bytes = backend.canonical_state(workspace_id)?;
+    let state_hash_hex = hex::encode(state_hash_bytes);
     Ok(json!({
         "type": PROJECTOR_RUN_ATTESTATION_KIND,
         "projector_version": projector_version,

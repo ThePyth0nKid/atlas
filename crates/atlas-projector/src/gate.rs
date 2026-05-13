@@ -72,6 +72,7 @@ use atlas_trust_core::projector_attestation::{
 use atlas_trust_core::trace_format::{AtlasEvent, AtlasTrace};
 use serde_json::Value;
 
+use crate::backend::{GraphStateBackend, WorkspaceId};
 use crate::canonical::graph_state_hash;
 use crate::error::ProjectorResult;
 use crate::upsert::project_events;
@@ -188,6 +189,59 @@ pub fn verify_attestations_in_trace(
     Ok(results)
 }
 
+/// V2-β Welle 17a: backend-aware variant of
+/// [`verify_attestations_in_trace`].
+///
+/// Instead of re-projecting trace events into a fresh in-memory
+/// `GraphState`, this variant reads the workspace's canonical hash
+/// from the supplied `GraphStateBackend` (e.g.
+/// [`crate::backend::in_memory::InMemoryBackend`] in V2-β-α or
+/// `ArcadeDbBackend` in W17b+). The recomputed hash is the backend's
+/// `canonical_state(workspace_id)`; everything else matches the
+/// legacy semantics.
+///
+/// **Important pre-condition:** the backend MUST have already been
+/// populated with the trace's non-attestation events (e.g. via
+/// `apply_event_to_state` over the trait surface, or via an upstream
+/// projector run). This function does NOT re-apply the trace events
+/// — that's a deliberate change from the legacy variant. For traces
+/// whose state isn't yet in the backend, the caller should use the
+/// legacy `verify_attestations_in_trace` (which re-projects in
+/// memory) until W17b adds a backend-aware projector.
+///
+/// The `actual_event_count` reported in each `GateResult` is the
+/// count of non-attestation events in the trace (same as the legacy
+/// variant); count comparison is unchanged.
+pub fn verify_attestations_in_trace_with_backend(
+    backend: &dyn GraphStateBackend,
+    workspace_id: &WorkspaceId,
+    trace: &AtlasTrace,
+) -> ProjectorResult<Vec<GateResult>> {
+    let mut attestation_events: Vec<&AtlasEvent> = Vec::new();
+    let mut projectable_count: u64 = 0;
+    for ev in &trace.events {
+        if event_is_projector_attestation(ev) {
+            attestation_events.push(ev);
+        } else {
+            projectable_count += 1;
+        }
+    }
+
+    if attestation_events.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let recomputed_hash_bytes = backend.canonical_state(workspace_id)?;
+    let recomputed_hex = hex::encode(recomputed_hash_bytes);
+
+    let mut results = Vec::with_capacity(attestation_events.len());
+    for att_event in attestation_events {
+        let result = compare_one_attestation(att_event, &recomputed_hex, projectable_count);
+        results.push(result);
+    }
+    Ok(results)
+}
+
 fn event_is_projector_attestation(ev: &AtlasEvent) -> bool {
     ev.payload
         .get("type")
@@ -286,6 +340,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     const FIXTURE_HEAD: &str = "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
 
     #[test]
