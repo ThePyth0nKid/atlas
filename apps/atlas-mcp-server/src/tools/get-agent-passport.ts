@@ -12,7 +12,14 @@
  * and warn end-users that the real implementation is V2-γ work. The
  * handler returns a stable shape every call:
  *
- *   { agent_did, status: "stub", message: "Agent Passport tool is V2-γ scope" }
+ *   { ok: false, agent_did, status: "stub", message: "Agent Passport tool is V2-γ scope; ..." }
+ *
+ * The in-payload `ok: false` mirrors the W12 HTTP route's
+ * `{ ok: false, status: "stub" }` response (HTTP 501) so HTTP + MCP
+ * consumers see identical "not implemented yet" semantics. The MCP
+ * `isError` flag remains unset on the stub response because the handler
+ * succeeded at returning the stub envelope — only `ok` signals
+ * implementation status.
  *
  * DO NOT remove or rename this tool when V2-γ ships — replace the handler
  * body in-place so MCP clients with pre-discovered tool definitions
@@ -24,16 +31,18 @@ import type { ToolDefinition, ToolHandlerResult } from "./types.js";
 
 /**
  * DID syntax — coarse check at the Zod boundary. The full RFC-3986-ish
- * grammar is large; we cap length at 1024 chars and require the `did:`
- * scheme. V2-γ will replace with a strict per-method resolver.
+ * grammar is large; we cap length at 512 chars (matching the W12 HTTP
+ * entry point in `apps/atlas-bridge`'s passport route for echo-surface
+ * consistency across HTTP + MCP) and require the `did:` scheme. V2-γ
+ * will replace with a strict per-method resolver.
  */
-const AGENT_DID_PATTERN = /^did:[a-z0-9]+:[A-Za-z0-9._:%-]{1,1014}$/;
+const AGENT_DID_PATTERN = /^did:[a-z0-9]+:[A-Za-z0-9._:%-]{1,502}$/;
 
 export const getAgentPassportInputSchema = {
   agent_did: z
     .string()
     .min(5)
-    .max(1024)
+    .max(512)
     .regex(AGENT_DID_PATTERN, "agent_did: must be a `did:<method>:<id>` URI")
     .describe(
       "DID identifying the agent (e.g. `did:key:z6Mki...`). " +
@@ -85,10 +94,11 @@ export const getAgentPassportTool: ToolDefinition<typeof getAgentPassportInputSc
           type: "text" as const,
           text: JSON.stringify(
             {
-              ok: true,
+              ok: false as const,
               agent_did: args.agent_did,
               status: "stub",
-              message: "Agent Passport tool is V2-γ scope",
+              message:
+                "Agent Passport tool is V2-γ scope; see docs/V2-MASTER-PLAN.md §6 V2-γ Identity + Federation",
             },
             null,
             2,

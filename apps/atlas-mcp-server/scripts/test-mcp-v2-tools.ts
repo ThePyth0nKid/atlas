@@ -204,7 +204,11 @@ function installFakeStore() {
   const tool = findTool("atlas_get_agent_passport");
   const res = await tool.handler({ agent_did: "did:key:z6MkiABCDEF" });
   const env = parseEnvelope(res.content[0].text);
-  check("get_agent_passport ok=true (stub)", env.ok === true);
+  // Cross-batch consistency-reviewer HIGH-2: in-payload `ok` must be
+  // `false` to mirror W12's HTTP 501 stub response. The MCP `isError`
+  // flag remains unset because the handler succeeded at returning a
+  // structured envelope — only `ok` signals "not implemented yet".
+  check("get_agent_passport ok=false (stub)", env.ok === false);
   check("get_agent_passport status='stub'", env.status === "stub");
   check(
     "get_agent_passport message references V2-γ",
@@ -222,6 +226,25 @@ function installFakeStore() {
   const tool = findTool("atlas_get_agent_passport");
   const res = await tool.handler({ agent_did: "not-a-did" });
   check("get_agent_passport invalid DID -> isError=true", res.isError === true);
+}
+
+{
+  // Cross-batch consistency-reviewer HIGH-3: agent_did length cap
+  // matches W12 HTTP route (512 chars). A 513-char DID must be
+  // rejected by the Zod boundary before the handler body runs.
+  const tool = findTool("atlas_get_agent_passport");
+  const oversize = "did:key:z" + "A".repeat(513 - "did:key:z".length);
+  const res = await tool.handler({ agent_did: oversize });
+  check(
+    "get_agent_passport DID > 512 chars -> isError=true",
+    res.isError === true,
+    `length=${oversize.length}`,
+  );
+  const env = parseEnvelope(res.content[0].text);
+  check(
+    "get_agent_passport oversize DID envelope ok=false",
+    env.ok === false,
+  );
 }
 
 // ─── get_timeline ──────────────────────────────────────────────────────
