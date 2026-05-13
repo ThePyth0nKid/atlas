@@ -19,6 +19,30 @@ The v1.0 public-API surface contract is documented in
 
 _V2-α work in flight on this line. The next release tag will be `v2.0.0-alpha.1` (major-bump pre-release) at the close-out of the V2-α welle bundle, not a v1.x continuation. V2-α-Additive surface items are listed in [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10. The strategic documentation landings below do not touch the v1.0 public-API surface._
 
+### Added — V2-α Welle 6 (Projector-State-Hash CI Gate Enforcement, 2026-05-13)
+
+- **NEW `crates/atlas-projector/src/gate.rs`** (~280 lines + 2 unit tests) — closes the V2-α security loop. `verify_attestations_in_trace(workspace_id, trace) -> ProjectorResult<Vec<GateResult>>` partitions the trace's events into projectable + attestation sets, re-projects all projectable events via Welle 5's `project_events`, recomputes `graph_state_hash` via Welle 3, then parses each `ProjectorRunAttestation` event via Welle 4 and compares attested vs recomputed. Returns one `GateResult` per attestation event with structured `Match` / `Mismatch` / `AttestationParseFailed` status.
+- **`GateResult` struct** with per-attestation comparison fields: `event_id`, `attested_hash`, `recomputed_hash`, `attested_event_count`, `actual_event_count`, `status`. Auditor-friendly diagnostics.
+- **`GateStatus` enum** (`#[non_exhaustive]`) — additive-safe outcome discriminator. Welle-6-MVP variants: `Match` / `Mismatch` / `AttestationParseFailed`. Future welles may add states like `HeadEventHashNotFound` or `IncrementalCoverageGap` additively.
+- **NEW `crates/atlas-projector/tests/projection_gate_integration.rs`** (~210 lines, 8 E2E tests):
+  - `happy_path_attestation_matches_reprojection` — full V2-α security loop green
+  - `tampered_attestation_hash_mismatch_detected` — flipping the attested hash flips status to Mismatch
+  - `mismatched_projected_event_count_detected` — claim N events but trace has M ≠ N
+  - `multiple_attestation_events_each_verified` — N attestations → N GateResults
+  - `malformed_attestation_payload_surfaces_parse_failed_status`
+  - `trace_without_attestation_events_returns_empty_vec`
+  - `unsupported_event_kind_in_trace_surfaces_error` — re-projection fails cleanly
+  - `end_to_end_jsonl_parse_project_emit_then_gate_verifies` — headline demo path
+
+### Notes — V2-α Welle 6
+
+- **DECISION-ARCH-1 triple-hardening completion advances.** Welle 3 ✓ canonicalisation byte-pin, Welles 4+5 ✓ ProjectorRunAttestation event-binding, Welle 6 ✓ projector-state-hash CI gate. Combined: drift between an issuer's projector and a verifier's fresh re-projection is now **detectable cryptographically**, not just by CI convention. (The remaining triple-hardening leg — parallel-projection design for >10M event scenarios — is deferred to V2-β / Welle 8+.)
+- **Strategic milestone:** Welle 6 is the cryptographic-verification primitive Atlas's V2-α architecture has been building toward. After Welle 6 a third-party verifier can independently re-project a trace and produce a structured `Match` / `Mismatch` outcome per ProjectorRunAttestation event. **This is what makes V2-α projection "trustworthy without trusting Atlas operator."**
+- **Caller contract:** trace must be pre-verified by `atlas_trust_core::verify_trace` (V1 signature + hash chain + anchor checks). Welle 6 does not re-check signatures — it focuses on projection-state verification. Documented in module-doc.
+- **Welle-6-MVP semantics:** each `ProjectorRunAttestation` event asserts the FULL projection state at its `head_event_hash`. For incremental-attestation semantics (each attestation only covers events since the last one), future welles may add a different comparison mode. Welle 6 covers the common case.
+- **V1 backward-compat preserved.** atlas-trust-core untouched. All 7 byte-determinism CI pins byte-identical. 169 atlas-trust-core unit tests + 5 attestation integration tests unchanged. 52 atlas-projector unit tests (was 50, +2 gate tests). 14 atlas-projector integration tests (was 6, +8 gate integration tests). Zero V1 or V2-α regression.
+- **V2-α progress: 6 of 5-8 wellen shipped** (Welle 1 Agent-DID, Welle 2 DB spike, Welle 3 projector skeleton, Welle 4 attestation parser, Welle 5 emission pipeline, Welle 6 CI gate). **V2-α range now upper-mid complete.**
+
 ### Added — V2-α Welle 5 (Atlas-Projector Emission Pipeline: events.jsonl → GraphState → Attestation, 2026-05-13)
 
 - **NEW `crates/atlas-projector/src/replay.rs`** (~150 lines + tests). `parse_events_jsonl(contents: &str) -> ProjectorResult<Vec<AtlasEvent>>` library-only JSONL parser with 1-indexed line-number diagnostics, blank-line + `//` comment tolerance, fail-fast on first malformed line. 7 unit tests.
