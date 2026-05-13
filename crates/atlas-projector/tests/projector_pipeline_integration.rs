@@ -99,11 +99,14 @@ fn idempotency_same_events_twice_byte_identical_state_hash() {
 
 #[test]
 fn unsupported_event_kind_surfaces_structured_error() {
-    let jsonl = r#"{"event_id":"01HE001","event_hash":"h1","parent_hashes":[],"payload":{"type":"policy_set","policy_cedar":"permit(...)"},"signature":{"alg":"EdDSA","kid":"atlas-anchor:ws-e2e","sig":"AA"},"ts":"2026-05-13T10:00:00Z"}"#;
+    // V2-β Welle 14 update: `policy_set` is now a supported kind.
+    // Use a deliberately V2-γ-shaped placeholder kind that remains
+    // unsupported, preserving this regression test's intent.
+    let jsonl = r#"{"event_id":"01HE001","event_hash":"h1","parent_hashes":[],"payload":{"type":"future_v2_gamma_kind","payload":"..."},"signature":{"alg":"EdDSA","kid":"atlas-anchor:ws-e2e","sig":"AA"},"ts":"2026-05-13T10:00:00Z"}"#;
     let events = parse_events_jsonl(jsonl).unwrap();
     match project_events(WS, &events, None) {
         Err(ProjectorError::UnsupportedEventKind { kind, event_id }) => {
-            assert_eq!(kind, "policy_set");
+            assert_eq!(kind, "future_v2_gamma_kind");
             assert_eq!(event_id, "01HE001");
         }
         other => panic!("expected UnsupportedEventKind; got {other:?}"),
@@ -176,6 +179,8 @@ fn pipeline_preserves_existing_state() {
         event_uuid: "01HEPREV".to_string(),
         rekor_log_index: 0,
         author_did: None,
+        annotations: BTreeMap::new(),
+        policies: BTreeMap::new(),
     });
 
     let jsonl = fixture_jsonl();
