@@ -129,7 +129,7 @@ Full risk matrix with 13+ entries in `.handoff/v2-master-vision-v1.md` §6.
 
 **Expected PR count:** 5–8 (one per session, ~Welle-14c/d/e size). **All 8 wellen shipped 2026-05-12 to 2026-05-13.** V2-α-α.1 release tag `v2.0.0-alpha.1` LIVE on master + GitHub + npm.
 
-### V2-β Read-Side (10 phases, 11 wellen W9-W19, ~12 sessions with parallel dispatch) — **Phase 0 + 1 + 2 + 3 + 4 + 5 + 6 + 7 SHIPPED 2026-05-13**
+### V2-β Read-Side (10 phases, 11 wellen W9-W19, ~12 sessions with parallel dispatch) — **Phase 0 through Phase 8 SHIPPED 2026-05-13**
 **Scope (full):** Mem0g cache integration + 6 Read-API endpoints (AST-validated Cypher) + MCP V2 tools + ArcadeDB embedded-mode backend + secure-deletion mechanism + parallel-projection design + expanded projector event-kinds + wasm-publish-race fix + v2.0.0-beta.1 ship.
 
 **Orchestration:** see [`docs/V2-BETA-ORCHESTRATION-PLAN.md`](V2-BETA-ORCHESTRATION-PLAN.md) (master-resident, Phase-0 output 2026-05-13) and [`docs/V2-BETA-DEPENDENCY-GRAPH.md`](V2-BETA-DEPENDENCY-GRAPH.md) (Mermaid + critical-path analysis). V2-β welle-progress tracker lives in the Orchestration Plan §2 + §3.4 (ADR-number reservation).
@@ -144,9 +144,13 @@ Full risk matrix with 13+ entries in `.handoff/v2-master-vision-v1.md` §6.
 
 **Phase 6 SHIPPED 2026-05-13:** W15 Cypher-validator consolidation. Shared `@atlas/cypher-validator` monorepo package extracts the rule-of-three-aligned validators from W12 + W13 inlines. 43 unified tests; ADR-Atlas-009 documents the 10-section rationale. Two reviewer-driven hotfixes in PR #81 (proper `tsc` build step + workflow build-step propagation to wave3-smoke + sigstore-rekor-nightly). Byte-determinism unchanged (no Rust touched).
 
-**Phase 7 SHIPPED 2026-05-13:** this consolidation commit (post-W15 single-welle parent-consolidation).
+**Phase 7 SHIPPED 2026-05-13:** Post-W15 single-welle parent-consolidation (PR #82).
 
-**Phase 8 next:** W16 ArcadeDB embedded-mode spike-doc (`docs/V2-BETA-ARCADEDB-SPIKE.md`, analog V2-α Welle 2 FalkorDB spike). Resolves JVM-dependency footprint, embedded vs server mode, FalkorDB fallback trigger criteria, Rust HTTP client choice. ADR-Atlas-010 reserved.
+**Phase 8 SHIPPED 2026-05-13:** W16 ArcadeDB embedded-mode spike + ADR-Atlas-010 (PR #83). Resolves 10 architectural questions (incl. 5 from ADR-007 §6). Locks: ArcadeDB Apache-2.0 primary CONFIRMED, server mode (embedded blocked on Hermes-skill JVM incompatibility), `reqwest` async HTTP client, one-database-per-workspace pattern, byte-determinism adapter contract (`ORDER BY entity_uuid ASC` + stored `edge_id`), 3-layer tenant-isolation defence. `GraphStateBackend` Rust trait sketched. 5 FalkorDB fallback triggers (T1-T5) measurable; none fired. ADR-Atlas-011 reserved for W17a.
+
+**Phase 8.5 SHIPPED 2026-05-13:** this consolidation commit + bulletproof handoff for next session.
+
+**Phase 9 next:** W17a ArcadeDB driver scaffold + ADR-Atlas-011. SERIAL `architect` subagent. Writes production `GraphStateBackend` trait in `crates/atlas-projector/src/backend/mod.rs` + `InMemoryBackend` impl (wraps existing V2-α state.rs/upsert.rs/canonical.rs logic; preserves byte-determinism) + `ArcadeDbBackend` stub (compiles, `unimplemented!()`-methods for W17b to fill). Then W17b (full driver impl using `reqwest` + Cypher) → W17c (Docker-Compose CI workflow + integration tests + benchmark capture).
 
 **Dependencies:** V2-α (Mem0g indexes FalkorDB which depends on projector — per Phase 2 Architect H-3 correction, NOT parallel as Phase 1 implied).
 
