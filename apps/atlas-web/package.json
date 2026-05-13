@@ -12,7 +12,10 @@
     "e2e:write": "tsx scripts/e2e-write-roundtrip.ts",
     "e2e:edge-cases": "tsx scripts/e2e-write-edge-cases.ts",
     "e2e:playwright": "playwright test",
-    "e2e:playwright:install": "playwright install --with-deps chromium firefox"
+    "e2e:playwright:install": "playwright install --with-deps chromium firefox",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@atlas/bridge": "workspace:*",
@@ -31,8 +34,10 @@
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@vitest/coverage-v8": "^2.1.0",
     "tailwindcss": "^4",
     "tsx": "^4.19.0",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^2.1.0"
   }
 }
