@@ -65,6 +65,13 @@ impl InMemoryBackend {
     /// Not part of the public trait surface (would force every
     /// backend to support raw-state export, which ArcadeDb cannot
     /// cheaply provide).
+    ///
+    /// `#[doc(hidden)]` because this exposes the raw `GraphState`
+    /// internals — production callers MUST go through the
+    /// `GraphStateBackend` trait surface (which presents `Vertex` /
+    /// `Edge` + workspace-scoped iterators). Diagnostic + test-only.
+    /// (Reviewer-MED resolved 2026-05-13.)
+    #[doc(hidden)]
     #[must_use]
     pub fn snapshot(&self, workspace_id: &WorkspaceId) -> Option<GraphState> {
         let guard = self

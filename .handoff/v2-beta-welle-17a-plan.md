@@ -177,3 +177,31 @@ W17a adds the production `GraphStateBackend` trait surface to `atlas-projector` 
 ## Subagent dispatch prompt skeleton (anti-divergence enforcement)
 
 This welle's prompt is captured in the parent agent's dispatch record. Subsequent welle prompts should mirror the structure: pre-flight reading list, in-scope files, forbidden files, reviewer expectations, output spec.
+
+---
+
+## Post-merge: reviewer findings deferred to W17b (carry-over)
+
+External `code-reviewer` + `security-reviewer` agents reviewed PR #85 in the parent dispatch (2026-05-13). Both verdicts: **APPROVE** — 0 CRITICAL / 0 HIGH. Five MEDIUM findings split into one-in-commit-fix + four W17b carry-overs:
+
+### Applied in-commit on PR #85 (fix commit on `feat/v2-beta/welle-17a-arcadedb-scaffold`)
+
+1. **`#[doc(hidden)]` on `InMemoryBackend::snapshot()`** (`crates/atlas-projector/src/backend/in_memory.rs:69`). Security-reviewer MEDIUM: the method is `pub` for diagnostic use but exposes raw `GraphState` internals. Added `#[doc(hidden)]` + clarifying doc note so production paths are routed through the trait surface only.
+
+### Deferred to W17b (when `.handoff/v2-beta-welle-17b-plan.md` is created, lift these in)
+
+2. **`serde_json::Value` depth limit at the trait surface.** Security-reviewer MEDIUM: `Vertex::properties` / `Edge::properties` are `BTreeMap<String, serde_json::Value>` with no depth-cap. W17a path is in-memory only (depth bounded by upstream V2-α event-ingestion limits in `canonical.rs`). **W17b risk:** ArcadeDB HTTP responses deserialized into `Vertex::properties` BEFORE `canonical.rs`-limits apply could DoS the projector. **Fix-in-W17b:** apply explicit depth + size cap when parsing ArcadeDB Cypher result JSON into `Vertex` / `Edge`.
+
+3. **`WorkspaceId` String validation at the trait boundary.** Security-reviewer MEDIUM: `WorkspaceId = String` with no validation. For `InMemoryBackend` this is harmless (HashMap key). **W17b risk:** an empty / path-traversal-like / adversarially-long `workspace_id` reaching ArcadeDB's HTTP `/api/v1/begin/{db}` endpoint or appearing as a Cypher parameter (`MATCH (n) WHERE n.workspace_id = $ws`) could behave unexpectedly. **Fix-in-W17b:** validation guard at `ArcadeDbBackend::begin()` rejecting empty / enforcing UUID-or-equivalent format BEFORE constructing the HTTP request.
+
+4. **`begin()` lifetime bound (`'_` vs `'static`).** Code-reviewer MEDIUM: the trait signature `fn begin(&self, ...) -> ProjectorResult<Box<dyn WorkspaceTxn + '_>>` ties txn lifetime to backend reference. `InMemoryBackend` doesn't need it (txn holds an `Arc` clone). `ArcadeDbBackend`'s HTTP session handle won't borrow from `&self` either. The `'_` is artificially conservative. **W17b risk:** if `ArcadeDbBackend` needs `'static` and the trait has `'_`, the trait signature must change — that's a SemVer-breaking refactor mid-W17b. **Fix-in-W17b:** evaluate `'static` vs explicit named lifetime BEFORE writing the first `ArcadeDbBackend::begin()` body. If a change is needed, version-bump `atlas-projector` accordingly.
+
+5. **Error-enum cleanup: `MalformedEntityUuid` umbrella variant for edges.** Code-reviewer MEDIUM: `upsert_edge_inner` returns `ProjectorError::MalformedEntityUuid` for empty `edge_id` — operator-diagnostic ergonomics, not correctness. NOT fixed in W17a because the V2-α convention already reuses this variant for both vertex + edge logical-id violations (`state.rs:289`, `state.rs:308`); changing only the W17a path would create internal inconsistency. **Defer to a broader error-enum refactor welle (V2-γ scope or whenever the existing V2-α convention is revisited).** The error MESSAGE is already correct (`"edge_id is empty (edge ...)")` — only the variant NAME is umbrella.
+
+### LOW (documented, not actioned)
+
+- `gate.rs:344` carries `#[allow(dead_code)]` on `FIXTURE_HEAD`. Constant is used in `emission.rs` tests but unused in `gate.rs` tests after the `*_with_backend` refactor. Minor noise; defer to dead-code sweep welle.
+
+### Reviewer-verdict summary
+
+Both reviewers APPROVE. Byte-determinism-pin hex `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` verified intact through TWO independent test paths. Multi-tenant isolation PASS (no cross-workspace bleed in any read path or commit path). V2-α stamping-field integrity (event_uuid / rekor_log_index / author_did) PASS. Send/Sync correctness PASS. No `unsafe` blocks introduced. `#[non_exhaustive]` discipline verified on `Vertex` / `Edge` / `UpsertResult` / `GateStatus`.
