@@ -14,6 +14,13 @@ path = "src/main.rs"
 
 [dependencies]
 atlas-trust-core = { path = "../atlas-trust-core" }
+# V2-α Welle 7: atlas-signer becomes the first in-tree consumer of
+# atlas-projector. The emit-projector-attestation subcommand uses
+# parse_events_jsonl + project_events + build_projector_run_attestation_payload
+# to compose a signed attestation event end-to-end.
+atlas-projector = { path = "../atlas-projector" }
+chrono = { workspace = true }
+ulid = { workspace = true }
 ed25519-dalek = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

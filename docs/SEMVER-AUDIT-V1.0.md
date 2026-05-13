@@ -432,6 +432,16 @@ Reviewer checklist for surface-touching PRs:
 | `pub enum GateStatus` (`#[non_exhaustive]`) — variants: `Match`, `Mismatch`, `AttestationParseFailed` | **V2-α-Additive (SemVer-minor under `#[non_exhaustive]`)** | Outcome discriminator. Future welles may add `HeadEventHashNotFound` / `IncrementalCoverageGap` etc. additively. |
 | `crates/atlas-projector/tests/projection_gate_integration.rs` — 8 E2E tests | **CI gate** | Full V2-α security loop: events.jsonl → project → emit → gate verifies match. Plus 4 negative-path tests (hash tampered, count tampered, malformed attestation, unsupported event kind). |
 
+### 10.7e V2-α Welle 7 — atlas-signer `emit-projector-attestation` subcommand (2026-05-13)
+
+| Item | Tag | Notes |
+|---|---|---|
+| NEW `atlas-signer emit-projector-attestation` subcommand | **V2-α-Additive** | First in-tree consumer of atlas-projector. CLI flags: `--events-jsonl <path>`, `--workspace <id>`, `--head-event-hash <hex>`, `--projector-version <string, optional>`, `--ts <iso8601, optional>`, `--event-id <ulid, optional>`, plus standard signer args (`--kid` OR `--derive-from-workspace` + master-seed gate). |
+| Output: ONE JSON line on stdout | **V2-α-Additive** | Compatible with `>> events.jsonl` shell append. Operator runs `atlas-signer emit-projector-attestation ... >> trace/events.jsonl` and the trace gains a signed `ProjectorRunAttestation` event that passes Welle 6's gate. |
+| atlas-signer's `Cargo.toml` adds `atlas-projector = { path = "../atlas-projector" }` dependency | **V2-α-Additive** | First in-tree consumer validates the atlas-projector public surface from a real downstream. Clean DAG: atlas-trust-core ← atlas-projector ← atlas-signer. |
+| Existing `ProjectorRunAttestation` events in the input JSONL are filtered out before projection | **V2-α-Additive (semantic)** | Same partition behaviour Welle 6's gate uses: attestation events are claims, not state mutations. |
+| 8 unit tests | **CI gate** | Happy path, malformed JSONL, malformed head_event_hash (defence-in-depth), existing-attestation-filtered, default projector_version, empty-JSONL-rejected, payload-kind constant, and the headline `output_passes_welle_6_gate_in_round_trip` — proves V2-α producer (Welle 7) → consumer (Welle 6) loop closes cleanly. |
+
 ### 10.7 What `v2.0.0-alpha.1` will bring (forecast, not committed)
 
 Pending the close-out of the V2-α welle bundle (Welle 1 = this surface; future Wellen = Projector + FalkorDB + ArcadeDB spike + content-hash separation if counsel-approved):

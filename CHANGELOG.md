@@ -19,6 +19,32 @@ The v1.0 public-API surface contract is documented in
 
 _V2-α work in flight on this line. The next release tag will be `v2.0.0-alpha.1` (major-bump pre-release) at the close-out of the V2-α welle bundle, not a v1.x continuation. V2-α-Additive surface items are listed in [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10. The strategic documentation landings below do not touch the v1.0 public-API surface._
 
+### Added — V2-α Welle 7 (atlas-signer `emit-projector-attestation` Subcommand, 2026-05-13)
+
+- **NEW `atlas-signer emit-projector-attestation` subcommand** (clap-registered). Operators can now in one shell command read an `events.jsonl` file, project the events via atlas-projector, build a ProjectorRunAttestation payload, and emit a signed AtlasEvent on stdout ready for `>> events.jsonl` append. Closes the V2-α producer-side CLI ergonomic.
+- **atlas-signer becomes the first in-tree consumer of atlas-projector.** `Cargo.toml` adds `atlas-projector = { path = "../atlas-projector" }` + `chrono` + `ulid`. Clean DAG: `atlas-trust-core ← atlas-projector ← atlas-signer`.
+- **CLI flags:** `--events-jsonl <path>` (required), `--workspace <id>` (required), `--head-event-hash <hex>` (required, 64-lowercase-hex), `--projector-version <string>` (optional; default `atlas-projector/<crate-version>`), `--ts <iso8601>` (optional; default `chrono::Utc::now().to_rfc3339()`), `--event-id <ulid>` (optional; default freshly generated), plus standard signer args (`--kid` OR `--derive-from-workspace` + master-seed gate).
+- **NEW pure orchestration helper** `build_projector_attestation_payload_from_jsonl(events_jsonl, workspace_id, head_event_hash, projector_version_override)` — testable boundary; no I/O, no signing, no stdout. Filters existing attestation events before projection.
+- **NEW dispatcher `run_emit_projector_attestation_dispatch(args)`** reuses the existing `run_sign_dispatch` machinery via synthesised `SignArgs` — zero duplication of key-management, secret-handling, signing-pipeline code.
+- **8 unit tests** in `welle_7_tests` module covering:
+  - `happy_path_builds_well_formed_attestation_payload` (round-trip parse + validate)
+  - `malformed_jsonl_surfaces_error`
+  - `malformed_head_event_hash_rejected_at_emission_boundary` (defence-in-depth)
+  - `existing_attestation_events_filtered_out_before_projection`
+  - `default_projector_version_uses_crate_version`
+  - `empty_jsonl_with_count_zero_would_be_rejected_by_emission_boundary`
+  - `payload_kind_matches_atlas_trust_core_constant`
+  - **`output_passes_welle_6_gate_in_round_trip`** — headline V2-α contract test: an attestation produced by Welle 7's producer code, when included in a trace with its source events, MUST pass Welle 6's `verify_attestations_in_trace` gate with `GateStatus::Match`. Closes the V2-α producer-consumer loop end-to-end.
+
+### Notes — V2-α Welle 7
+
+- **End-to-end producer-side CLI complete.** After Welle 7 the V2-α producer-side flow is one shell command: `atlas-signer emit-projector-attestation --events-jsonl trace/events.jsonl --workspace ws-q1-2026 --derive-from-workspace ws-q1-2026 --head-event-hash <hex> >> trace/events.jsonl`. The `--kid` flag is auto-derived from `--derive-from-workspace` (Welle 7 reviewer fix; mirrors operator expectation that `--derive-from-workspace` alone is sufficient for the hot path). Operators / auditors / regulators see an immediate, demonstrable signed attestation in one invocation.
+- **Structural `projector_version` honesty.** Default `--projector-version` binds to `atlas_projector::CRATE_VERSION` (newly exported as `pub const`), NOT atlas-signer's `CARGO_PKG_VERSION`. The attested `projector_version` field now structurally reflects the actual projection-logic version even if the two crates ever diverge (Welle 7 reviewer fix).
+- **First in-tree atlas-projector consumer.** Welle 7 exercises atlas-projector's public API (`parse_events_jsonl`, `project_events`, `build_projector_run_attestation_payload`) from a real downstream binary, surfacing any ergonomic gaps that would otherwise wait until external consumers adopted the crate. No gaps surfaced; existing surface holds.
+- **Round-trip property cemented in unit test.** `output_passes_welle_6_gate_in_round_trip` proves the Welle 7 producer → Welle 6 consumer chain is correct by construction: producer output matches consumer expectations, validated at compile-test-time on every CI run.
+- **V1 backward-compat preserved.** atlas-trust-core untouched. atlas-projector untouched. All 7 byte-determinism CI pins byte-identical. 169 atlas-trust-core unit tests unchanged. 52 atlas-projector unit tests unchanged. 10 atlas-projector gate integration tests unchanged. 6 atlas-projector pipeline integration tests unchanged. Welle 7 adds 8 atlas-signer unit tests; zero V1 or V2-α regression.
+- **V2-α progress: 7 of 5-8 wellen shipped** (Welle 1 Agent-DID, Welle 2 DB spike, Welle 3 projector skeleton, Welle 4 attestation parser, Welle 5 emission pipeline, Welle 6 CI gate, Welle 7 signer CLI). **V2-α producer + consumer surfaces both complete end-to-end.**
+
 ### Added — V2-α Welle 6 (Projector-State-Hash CI Gate Enforcement, 2026-05-13)
 
 - **NEW `crates/atlas-projector/src/gate.rs`** (~280 lines + 2 unit tests) — closes the V2-α security loop. `verify_attestations_in_trace(workspace_id, trace) -> ProjectorResult<Vec<GateResult>>` partitions the trace's events into projectable + attestation sets, re-projects all projectable events via Welle 5's `project_events`, recomputes `graph_state_hash` via Welle 3, then parses each `ProjectorRunAttestation` event via Welle 4 and compares attested vs recomputed. Returns one `GateResult` per attestation event with structured `Match` / `Mismatch` / `AttestationParseFailed` status.
