@@ -178,6 +178,14 @@ enum Command {
     /// `PubkeyBundle` read from stdin, emit the updated bundle on
     /// stdout. Idempotent.
     RotatePubkeyBundle(RotatePubkeyBundleArgs),
+    /// V2-α Welle 7: read an `events.jsonl` file, project its events
+    /// via atlas-projector, and emit a signed
+    /// `ProjectorRunAttestation` event on stdout, ready for append
+    /// to `events.jsonl`. The emitted event passes Welle 6's
+    /// `verify_attestations_in_trace` gate when included in the
+    /// original trace. Uses the standard signing pipeline
+    /// (`--kid` OR `--derive-from-workspace` + master-seed gate).
+    EmitProjectorAttestation(EmitProjectorAttestationArgs),
 }
 
 #[derive(clap::Args)]
@@ -217,6 +225,65 @@ struct AnchorArgs {
     /// Stdout shape (`[AnchorEntry]`) is unchanged for backward compat.
     #[arg(long)]
     chain_path: Option<std::path::PathBuf>,
+}
+
+#[derive(clap::Args)]
+struct EmitProjectorAttestationArgs {
+    /// Path to events.jsonl input. Read via `std::fs::read_to_string`.
+    /// Existing `ProjectorRunAttestation` events in the input are
+    /// filtered out before projection (the new attestation attests
+    /// the state derived from the projectable events only).
+    #[arg(long)]
+    events_jsonl: std::path::PathBuf,
+
+    /// Workspace identifier — bound into the signing input AND used
+    /// for atlas-projector's entity_uuid derivation. Required.
+    #[arg(long)]
+    workspace: String,
+
+    /// blake3 hex of the last event the projector consumed before
+    /// computing the attestation. Exactly 64 lowercase-hex characters.
+    /// Format-validated at emission boundary by atlas-projector.
+    #[arg(long)]
+    head_event_hash: String,
+
+    /// Projector binary identifier. Default:
+    /// `"atlas-projector/<atlas-projector-crate-version>"` via
+    /// `atlas_projector::CRATE_VERSION` (structural binding to the
+    /// projection-logic crate's own version, not atlas-signer's).
+    #[arg(long)]
+    projector_version: Option<String>,
+
+    /// ISO-8601 timestamp. Default: `chrono::Utc::now().to_rfc3339()`.
+    #[arg(long)]
+    ts: Option<String>,
+
+    /// Event ID (ULID). Default: freshly generated via `ulid::Ulid::new()`.
+    #[arg(long)]
+    event_id: Option<String>,
+
+    /// Key-id used to sign the resulting AtlasEvent (e.g.
+    /// `"atlas-anchor:<workspace_id>"` when using
+    /// `--derive-from-workspace`, or a legacy SPIFFE-ID).
+    #[arg(long)]
+    kid: Option<String>,
+
+    /// 32-byte hex-encoded secret key via stdin (PREFERRED for
+    /// legacy SPIFFE kids).
+    #[arg(long, default_value_t = false)]
+    secret_stdin: bool,
+
+    /// 32-byte hex-encoded secret key via argv (DEPRECATED — leaks
+    /// to OS process listing). Use --secret-stdin or
+    /// --derive-from-workspace instead.
+    #[arg(long)]
+    secret_hex: Option<String>,
+
+    /// V1.9: derive the per-tenant Ed25519 secret internally from
+    /// the master seed for `<workspace>` and sign with it. Mutually
+    /// exclusive with --secret-stdin and --secret-hex.
+    #[arg(long)]
+    derive_from_workspace: Option<String>,
 }
 
 #[derive(clap::Args, Default)]
@@ -287,8 +354,165 @@ fn main() -> ExitCode {
                 run_rotate_pubkey_bundle(args, signer)
             })
         }
+        Some(Command::EmitProjectorAttestation(args)) => {
+            run_emit_projector_attestation_dispatch(args)
+        }
         None => run_sign_dispatch(cli.legacy_sign),
     }
+}
+
+/// V2-α Welle 7: emit a signed `ProjectorRunAttestation` event from
+/// an `events.jsonl` input.
+///
+/// Pipeline:
+///   1. Read `events.jsonl` from filesystem path
+///   2. Parse via `atlas_projector::parse_events_jsonl`
+///   3. Filter out existing attestation events (the new attestation
+///      attests state derived from the projectable events only)
+///   4. Project via `atlas_projector::project_events` → `GraphState`
+///   5. Build attestation payload via
+///      `atlas_projector::build_projector_run_attestation_payload`
+///      (incorporates `graph_state_hash` via Welle 3)
+///   6. Synthesise a `SignArgs` with `payload` = serialised JSON of
+///      the attestation payload, then dispatch to the existing
+///      `run_sign_dispatch` — this reuses ALL of atlas-signer's
+///      key-management, secret-handling, and signing-pipeline code
+///      without duplication
+///
+/// Emits one JSON line on stdout (via the existing `run_sign`
+/// output path), suitable for `>>` append to events.jsonl.
+fn run_emit_projector_attestation_dispatch(args: EmitProjectorAttestationArgs) -> ExitCode {
+    // Step 1: read events.jsonl
+    let contents = match std::fs::read_to_string(&args.events_jsonl) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "emit-projector-attestation: failed to read {}: {e}",
+                args.events_jsonl.display()
+            );
+            return ExitCode::from(2);
+        }
+    };
+
+    // Build the attestation payload using the pure orchestration helper.
+    // This is the testable boundary — given JSONL contents + projector
+    // metadata, produce the attestation payload JSON Value. No I/O,
+    // no signing, no stdout. Tested in unit tests.
+    let payload = match build_projector_attestation_payload_from_jsonl(
+        &contents,
+        &args.workspace,
+        &args.head_event_hash,
+        args.projector_version.as_deref(),
+    ) {
+        Ok(p) => p,
+        Err(msg) => {
+            eprintln!("emit-projector-attestation: {msg}");
+            return ExitCode::from(2);
+        }
+    };
+
+    // Step 6: synthesise SignArgs and reuse run_sign_dispatch.
+    let payload_json = match serde_json::to_string(&payload) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("emit-projector-attestation: failed to serialise payload: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let ts = args.ts.unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+    let event_id = args.event_id.unwrap_or_else(|| ulid::Ulid::new().to_string());
+
+    // V2-α Welle 7 reviewer fix: auto-derive `kid` from
+    // `--derive-from-workspace` when caller omits `--kid`. Mirrors
+    // the operator-expected ergonomic that `--derive-from-workspace`
+    // alone is sufficient for the hot path. Without this, an
+    // operator who omits `--kid` runs the full read+parse+project
+    // cycle before `run_sign` rejects with `"--kid is required"`
+    // — actionable error but expensive-after-the-fact.
+    let kid = args.kid.or_else(|| {
+        args.derive_from_workspace
+            .as_deref()
+            .map(|ws| format!("atlas-anchor:{ws}"))
+    });
+
+    let synthesised = SignArgs {
+        workspace: Some(args.workspace),
+        event_id: Some(event_id),
+        ts: Some(ts),
+        kid,
+        parents: String::new(),
+        payload: Some(payload_json),
+        secret_stdin: args.secret_stdin,
+        secret_hex: args.secret_hex,
+        derive_from_workspace: args.derive_from_workspace,
+    };
+
+    run_sign_dispatch(synthesised)
+}
+
+/// Pure orchestration: events.jsonl text + projector metadata →
+/// attestation payload JSON. Testable without filesystem access or
+/// signing. Filters out any existing `ProjectorRunAttestation`
+/// events in the input before projection.
+///
+/// Returns a `Result<serde_json::Value, String>` where the error
+/// is a human-readable diagnostic suitable for CLI stderr.
+fn build_projector_attestation_payload_from_jsonl(
+    events_jsonl: &str,
+    workspace_id: &str,
+    head_event_hash: &str,
+    projector_version_override: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let events = atlas_projector::parse_events_jsonl(events_jsonl)
+        .map_err(|e| format!("parse events.jsonl: {e}"))?;
+
+    // Filter out existing ProjectorRunAttestation events before
+    // projection. They are claims about state, not events that
+    // mutate state, so they don't enter the upsert pipeline. This
+    // also matches Welle 6's gate partition behaviour.
+    let projectable: Vec<atlas_trust_core::trace_format::AtlasEvent> = events
+        .into_iter()
+        .filter(|ev| {
+            ev.payload
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(|t| {
+                    t != atlas_trust_core::projector_attestation::PROJECTOR_RUN_ATTESTATION_KIND
+                })
+                .unwrap_or(true)
+        })
+        .collect();
+
+    let state = atlas_projector::project_events(workspace_id, &projectable, None)
+        .map_err(|e| format!("project events: {e}"))?;
+
+    let projector_version_owned;
+    let projector_version: &str = match projector_version_override {
+        Some(s) => s,
+        None => {
+            // V2-α Welle 7 reviewer fix: bind to atlas-projector's
+            // OWN crate version (re-exported as `CRATE_VERSION`), not
+            // atlas-signer's. This makes the projector_version field
+            // in the signed attestation structurally reflect the
+            // actual projection-logic version, eliminating the
+            // earlier "proxy via workspace.package.version" honesty
+            // gap. If the two crates ever diverge (e.g. a signer-
+            // only patch bump), the attestation's projector_version
+            // will still accurately name the projector logic in use.
+            projector_version_owned =
+                format!("atlas-projector/{}", atlas_projector::CRATE_VERSION);
+            projector_version_owned.as_str()
+        }
+    };
+
+    atlas_projector::build_projector_run_attestation_payload(
+        &state,
+        projector_version,
+        head_event_hash,
+        projectable.len() as u64,
+    )
+    .map_err(|e| format!("build attestation payload: {e}"))
 }
 
 /// V1.11 M-4 — single-load helper for per-tenant subcommands.
@@ -1039,5 +1263,259 @@ fn run_bundle_hash() -> ExitCode {
             eprintln!("bundle-hash: deterministic_hash failed: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod welle_7_tests {
+    //! V2-α Welle 7: unit tests for the pure orchestration helper
+    //! `build_projector_attestation_payload_from_jsonl`. These tests
+    //! validate the payload-construction boundary without any
+    //! signing, filesystem access, or stdout emission.
+
+    use super::*;
+    use atlas_trust_core::projector_attestation::{
+        parse_projector_run_attestation, validate_projector_run_attestation,
+        PROJECTOR_RUN_ATTESTATION_KIND, PROJECTOR_RUN_ATTESTATION_SCHEMA_VERSION,
+    };
+
+    const WS: &str = "ws-w7-test";
+    const FIXTURE_HEAD: &str =
+        "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a";
+
+    /// 3-event JSONL: 2 node_create + 1 edge_create. All V1-shape
+    /// (no author_did). No existing attestation events.
+    fn fixture_jsonl_3_events() -> String {
+        [
+            r#"{"event_id":"01HW701","event_hash":"h1","parent_hashes":[],"payload":{"type":"node_create","node":{"id":"alice"}},"signature":{"alg":"EdDSA","kid":"atlas-anchor:ws-w7-test","sig":"AA"},"ts":"2026-05-13T10:00:00Z"}"#,
+            r#"{"event_id":"01HW702","event_hash":"h2","parent_hashes":["h1"],"payload":{"type":"node_create","node":{"id":"bob"}},"signature":{"alg":"EdDSA","kid":"atlas-anchor:ws-w7-test","sig":"BB"},"ts":"2026-05-13T10:01:00Z"}"#,
+            r#"{"event_id":"01HW703","event_hash":"h3","parent_hashes":["h2"],"payload":{"type":"edge_create","from":"alice","to":"bob","relation":"knows"},"signature":{"alg":"EdDSA","kid":"atlas-anchor:ws-w7-test","sig":"CC"},"ts":"2026-05-13T10:02:00Z"}"#,
+        ].join("\n")
+    }
+
+    #[test]
+    fn happy_path_builds_well_formed_attestation_payload() {
+        let payload = build_projector_attestation_payload_from_jsonl(
+            &fixture_jsonl_3_events(),
+            WS,
+            FIXTURE_HEAD,
+            Some("atlas-projector/test-fixture"),
+        )
+        .expect("happy path must succeed");
+
+        // The payload must parse + validate via atlas-trust-core
+        // round-trip — this is the load-bearing contract Welle 7
+        // signs onto.
+        let att = parse_projector_run_attestation(&payload).expect("parse");
+        validate_projector_run_attestation(&att).expect("validate");
+        assert_eq!(att.projector_schema_version, PROJECTOR_RUN_ATTESTATION_SCHEMA_VERSION);
+        assert_eq!(att.head_event_hash, FIXTURE_HEAD);
+        assert_eq!(att.projected_event_count, 3);
+        assert_eq!(att.projector_version, "atlas-projector/test-fixture");
+    }
+
+    #[test]
+    fn malformed_jsonl_surfaces_error() {
+        let bad = "not-valid-json-at-all";
+        let err = build_projector_attestation_payload_from_jsonl(bad, WS, FIXTURE_HEAD, None)
+            .expect_err("malformed JSONL must fail");
+        assert!(err.contains("parse events.jsonl"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn malformed_head_event_hash_rejected_at_emission_boundary() {
+        // atlas-projector's emission layer enforces 64-lowercase-hex
+        // on head_event_hash per the Welle-5 review-pass fix
+        // (defence-in-depth before signing).
+        let err = build_projector_attestation_payload_from_jsonl(
+            &fixture_jsonl_3_events(),
+            WS,
+            "too-short",
+            None,
+        )
+        .expect_err("malformed head_event_hash must be rejected pre-signing");
+        assert!(err.contains("head_event_hash"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn existing_attestation_events_filtered_out_before_projection() {
+        // If the input JSONL already contains a
+        // ProjectorRunAttestation event, the orchestration MUST
+        // filter it out (it's a claim, not a state mutation).
+        // Project count should reflect ONLY the projectable events.
+        let mut jsonl = fixture_jsonl_3_events();
+        // Append an existing attestation event (synthetic, not signed)
+        jsonl.push('\n');
+        jsonl.push_str(
+            r#"{"event_id":"01HW7ATT0","event_hash":"hatt","parent_hashes":["h3"],"payload":{"type":"projector_run_attestation","projector_version":"old","projector_schema_version":"atlas-projector-run-attestation/v1-alpha","head_event_hash":"1111111111111111111111111111111111111111111111111111111111111111","graph_state_hash":"2222222222222222222222222222222222222222222222222222222222222222","projected_event_count":3},"signature":{"alg":"EdDSA","kid":"atlas-anchor:ws-w7-test","sig":"DD"},"ts":"2026-05-13T10:03:00Z"}"#
+        );
+
+        let payload = build_projector_attestation_payload_from_jsonl(
+            &jsonl,
+            WS,
+            FIXTURE_HEAD,
+            Some("atlas-projector/test-fixture"),
+        )
+        .expect("filter-then-project must succeed");
+
+        let att = parse_projector_run_attestation(&payload).unwrap();
+        assert_eq!(
+            att.projected_event_count, 3,
+            "attestation event must not be counted as projectable"
+        );
+    }
+
+    #[test]
+    fn default_projector_version_uses_crate_version() {
+        let payload = build_projector_attestation_payload_from_jsonl(
+            &fixture_jsonl_3_events(),
+            WS,
+            FIXTURE_HEAD,
+            None, // no override → default to atlas-projector/<crate-version>
+        )
+        .expect("default version must succeed");
+
+        let att = parse_projector_run_attestation(&payload).unwrap();
+        assert!(
+            att.projector_version.starts_with("atlas-projector/"),
+            "default projector_version must use atlas-projector/ prefix; got: {}",
+            att.projector_version
+        );
+        // Version string should be non-empty after the prefix
+        let after_prefix = att.projector_version.strip_prefix("atlas-projector/").unwrap();
+        assert!(
+            !after_prefix.is_empty(),
+            "default projector_version must include a non-empty version after the prefix"
+        );
+    }
+
+    #[test]
+    fn empty_jsonl_with_count_zero_would_be_rejected_by_emission_boundary() {
+        // The orchestration helper passes projected_event_count =
+        // projectable.len() to atlas-projector's emission, which
+        // rejects count == 0 (Welle 5 reviewer-fix; Welle 4 validator
+        // requires count >= 1). Confirms the boundary fires.
+        let empty = "";
+        let err = build_projector_attestation_payload_from_jsonl(empty, WS, FIXTURE_HEAD, None)
+            .expect_err("empty JSONL → 0 projected events → emission rejects");
+        assert!(
+            err.contains("projected_event_count must be >= 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn payload_kind_matches_atlas_trust_core_constant() {
+        let payload = build_projector_attestation_payload_from_jsonl(
+            &fixture_jsonl_3_events(),
+            WS,
+            FIXTURE_HEAD,
+            Some("atlas-projector/test-fixture"),
+        )
+        .expect("happy path");
+        assert_eq!(
+            payload.get("type").and_then(serde_json::Value::as_str),
+            Some(PROJECTOR_RUN_ATTESTATION_KIND)
+        );
+    }
+
+    #[test]
+    fn default_projector_version_uses_atlas_projector_crate_version() {
+        // Welle 7 reviewer fix: projector_version default binds
+        // structurally to atlas-projector's CRATE_VERSION constant,
+        // not atlas-signer's. Test confirms the result starts with
+        // "atlas-projector/" and the suffix equals
+        // atlas_projector::CRATE_VERSION exactly.
+        let payload = build_projector_attestation_payload_from_jsonl(
+            &fixture_jsonl_3_events(),
+            WS,
+            FIXTURE_HEAD,
+            None,
+        )
+        .expect("default version must succeed");
+
+        let att = parse_projector_run_attestation(&payload).unwrap();
+        let expected = format!("atlas-projector/{}", atlas_projector::CRATE_VERSION);
+        assert_eq!(
+            att.projector_version, expected,
+            "default projector_version must be exactly atlas-projector/<atlas-projector::CRATE_VERSION>"
+        );
+    }
+
+    #[test]
+    fn output_passes_welle_6_gate_in_round_trip() {
+        // Headline V2-α Welle 7 contract: an attestation produced
+        // by atlas-signer's emit-projector-attestation, when
+        // included in a trace with its source events, MUST pass
+        // Welle 6's verify_attestations_in_trace gate with
+        // GateStatus::Match.
+        //
+        // This test exercises the consumer-side of the V2-α loop:
+        // Welle 7 producer → Welle 6 gate consumer.
+        use atlas_projector::{verify_attestations_in_trace, GateStatus};
+        use atlas_trust_core::trace_format::{AtlasEvent, AtlasTrace, EventSignature};
+
+        let jsonl = fixture_jsonl_3_events();
+        let payload = build_projector_attestation_payload_from_jsonl(
+            &jsonl,
+            WS,
+            FIXTURE_HEAD,
+            Some("atlas-projector/test-fixture"),
+        )
+        .unwrap();
+
+        // Construct a fake-signed attestation event with the
+        // produced payload. Welle 6 doesn't re-verify signatures
+        // (V1 verifier's job upstream), so a fixture signature
+        // is fine for this round-trip property test.
+        //
+        // Note on `event_hash`/`head_event_hash` referential integrity:
+        // Welle 6's gate explicitly does NOT verify that the
+        // attestation's `head_event_hash` points to an actual event
+        // in the trace (per `gate.rs` § "Out of scope for Welle 6").
+        // The test uses a synthetic `event_hash` fixture; the
+        // GateStatus::Match outcome reflects payload-canonicalisation
+        // correctness (graph_state_hash matches re-projection +
+        // projected_event_count matches), NOT head-event-hash
+        // pointer validity. Future welle may add that check; this
+        // test will then need a real event_hash chain.
+        let attestation_event = AtlasEvent {
+            event_id: "01HW7ATT-NEW".to_string(),
+            event_hash: "fixture-hash".to_string(),
+            parent_hashes: vec![],
+            payload,
+            signature: EventSignature {
+                alg: "EdDSA".to_string(),
+                kid: format!("atlas-anchor:{WS}"),
+                sig: "FAKE".to_string(),
+            },
+            ts: "2026-05-13T10:04:00Z".to_string(),
+            author_did: None,
+        };
+
+        // Assemble trace: source events + the new attestation.
+        let source_events = atlas_projector::parse_events_jsonl(&jsonl).unwrap();
+        let mut all_events = source_events;
+        all_events.push(attestation_event);
+        let trace = AtlasTrace {
+            schema_version: atlas_trust_core::SCHEMA_VERSION.to_string(),
+            generated_at: "2026-05-13T10:05:00Z".to_string(),
+            workspace_id: WS.to_string(),
+            pubkey_bundle_hash: "h".to_string(),
+            events: all_events,
+            dag_tips: vec![],
+            anchors: vec![],
+            anchor_chain: None,
+            policies: vec![],
+            filters: None,
+        };
+
+        let results = verify_attestations_in_trace(WS, &trace).unwrap();
+        assert_eq!(results.len(), 1, "exactly one attestation in trace");
+        assert_eq!(
+            results[0].status,
+            GateStatus::Match,
+            "Welle 7 producer output MUST pass Welle 6 gate"
+        );
     }
 }

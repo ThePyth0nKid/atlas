@@ -131,3 +131,12 @@ pub use upsert::{apply_event_to_state, project_events};
 /// is structurally detectable (different `v` → different bytes →
 /// different hash → byte-pin fails).
 pub const PROJECTOR_SCHEMA_VERSION: &str = "atlas-projector-v1-alpha";
+
+/// V2-α Welle 7: this crate's `CARGO_PKG_VERSION` exposed as a
+/// public constant so downstream consumers (atlas-signer, future
+/// SDKs) can embed it in `projector_version` payload fields
+/// without relying on their own CARGO_PKG_VERSION as a proxy.
+/// Resolves Welle-7-review's projector-version honesty gap: the
+/// emitted `projector_version` string now structurally reflects
+/// the actual atlas-projector logic version, not the consumer's.
+pub const CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");

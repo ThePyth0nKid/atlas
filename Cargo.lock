@@ -108,9 +108,11 @@ dependencies = [
 name = "atlas-signer"
 version = "1.0.1"
 dependencies = [
+ "atlas-projector",
  "atlas-trust-core",
  "base64",
  "blake3",
+ "chrono",
  "clap",
  "cryptoki",
  "ed25519-dalek",
@@ -124,6 +126,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "ulid",
  "wiremock",
  "zeroize",
 ]
