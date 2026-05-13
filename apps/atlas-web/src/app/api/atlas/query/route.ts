@@ -2,9 +2,9 @@
  * V2-β Welle 12 — POST /api/atlas/query
  *
  * Run a read-only Cypher query against the workspace's projected
- * graph. The Cypher AST validator is welle-local
- * (`../_lib/cypher-validator.ts`); W15 consolidates the shared
- * module after rule-of-three.
+ * graph. The Cypher AST validator is the shared `@atlas/cypher-validator`
+ * package, extracted in V2-β Welle 15 (rule-of-three consolidation
+ * from W12 + W13 inline copies).
  *
  * The actual Cypher *execution* backend is NOT in V2-β Phase 4 —
  * it lands in Phase 7 (W17 ArcadeDB driver). Until then, the route
@@ -37,7 +37,7 @@ import "@/lib/bootstrap";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { isValidWorkspaceId } from "@atlas/bridge";
-import { validateReadOnlyCypher } from "../_lib/cypher-validator";
+import { validateReadOnlyCypher } from "@atlas/cypher-validator";
 import { jsonError } from "../_lib/http";
 
 export const runtime = "nodejs";
