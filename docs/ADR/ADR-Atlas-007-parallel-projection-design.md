@@ -33,9 +33,9 @@ Atlas's three-layer trust architecture (Master Vision §5.2, Welle 3 design inva
 
 1. **Layer 1 remains authoritative:** events.jsonl is signed, Rekor-anchored, and offline-verifiable. Layer 2 (FalkorDB projection) is derivative — any silent corruption or non-determinism degrades to "cache divergence" and must be detectable.
 
-2. **CI gate enforcement:** Welle 6 (`projector-state-hash` CI pin, analog to V1's `signing_input_byte_determinism_pin`) compares `graph_state_hash(replay_from_events_jsonl())` against a pinned `.projection-integrity.json` on every commit. If projection silently drifts non-deterministically, the gate fires before the drift reaches production. **This gate depends on deterministic canonicalisation.**
+2. **CI gate enforcement:** Welle 6 provides the `verify_attestations_in_trace` library function in `atlas-projector` (gate.rs) which operators invoke against a re-projection to detect drift; an automated CI gate against a pinned `.projection-integrity.json` is a deferred V2-β welle [open question: which Welle wires this?]. The byte-determinism pin in `canonical.rs` exists today and is one of the 7 V2-α CI byte-pins — analog to V1's `signing_input_byte_determinism_pin`. If projection silently drifts non-deterministically, the byte-pin fires on canonical-form changes; the operator-invoked attestation verification fires on hash drift at replay time. **Both depend on deterministic canonicalisation.**
 
-3. **ProjectorRunAttestation event binding:** Welle 4 emits a signed `ProjectorRunAttestation` event into Layer 1 asserting `(projector_version, head_hash) → graph_state_hash`. Parallel projection MUST preserve this binding — a multi-threaded rebuild that produces a different hash than the single-threaded reference invalidates the attestation.
+3. **ProjectorRunAttestation event binding:** Welle 4/5 defines the `ProjectorRunAttestation` payload shape (`emission.rs`) and Welle 7 wires it through the `atlas-signer emit-projector-attestation` CLI; the full Layer-1 attestation chain is operational in v2.0.0-alpha.1, asserting `(projector_version, head_hash) → graph_state_hash`. Parallel projection MUST preserve this binding — a multi-threaded rebuild that produces a different hash than the single-threaded reference invalidates the attestation.
 
 **Consequence for parallel design:** Parallel projection strategies that sort *after* merge (rather than during merge) risk byte-ordering non-determinism under concurrent writes. The canonical form in Welle 3 (`canonical.rs` §) specifies RFC 8949 §4.2.1 CBOR map-key sorting (length then lex). This sort is applied *to the final merged state*, which means any worker-state merge must preserve **logical identifier ordering** (entity_uuid, edge_id) even when workers operate in parallel.
 
@@ -107,7 +107,9 @@ Output: graph_state_hash (deterministic)
 
 **Effort level:** LOW. Minimal changes to the current `project_events()` API. The projector already idempotently processes per-workspace (workspace_id is a parameter). Wrap in a thread-pool dispatcher + merge logic.
 
-**Byte-determinism risk:** NONE if implemented correctly. Each workspace is processed independently (order within workspace matters, but inter-workspace order is irrelevant for the final state). Merge is deterministic because workspaces are logically disjoint — no cross-workspace edges in V1's event model. Canonicalisation sorts by entity_uuid (BTreeMap iteration order is deterministic).
+**Byte-determinism risk:** NONE if implemented correctly. Each workspace is processed independently (order within workspace matters, but inter-workspace order is irrelevant for the final state). Merge is deterministic because workspaces are logically disjoint **in graph-topology terms** — no cross-workspace edges or shared `entity_uuid` values in V1's event model. `author_did` fields (V2-α agent-identity, `did:atlas:<blake3(ed25519_pubkey)>`, see `crates/atlas-trust-core/src/agent_did.rs`) MAY be shared across workspaces — the same agent DID can author events in multiple workspaces — but this does NOT affect merge determinism or `graph_state_hash` because `author_did` is bound into the per-event signing input (cose.rs), not into the projected graph topology. Canonicalisation sorts by entity_uuid (BTreeMap iteration order is deterministic).
+
+**Per-workspace intra-event-ordering requirement (security-critical):** Per-workspace event dispatch MUST preserve the original `events.jsonl` sequential order within each workspace. Sorting events by sequence number before dispatch to the worker is mandatory — upsert operations are idempotent but NOT commutative (a `node-update` applied before `node-create` produces a different state than the reverse). This invariant is what makes "inter-workspace order is irrelevant" safe to claim.
 
 **ArcadeDB compatibility:** MEDIUM-HIGH. In-memory projection is unaffected. When migrating to ArcadeDB (Welle 17), each worker writes to its own workspace partition (ArcadeDB supports multi-tenant isolation). Concurrent writes to disjoint partitions are supported by most databases. W17 spike must validate whether ArcadeDB's embedded-mode HTTP API handles concurrent-workspace writes without deadlock.
 
@@ -145,9 +147,9 @@ Input: events.jsonl
 
 Partition phase: for each event {
   if event.payload.type in [node_create, node_update]:
-    shard_id = (blake3(entity_uuid) >> 60) % N
+    shard_id = u64::from_be_bytes(blake3(entity_uuid)[0..8]) % N
   else if event.payload.type == edge_create:
-    shard_id = (blake3(from_entity_uuid) >> 60) % N  // or to_entity_uuid; pick consistently
+    shard_id = u64::from_be_bytes(blake3(from_entity_uuid)[0..8]) % N  // or to_entity_uuid; pick consistently
   enqueue event → shard_id
 }
 
@@ -263,15 +265,17 @@ Build final graph_state_hash
 
 **Atlas recommends Option A (workspace-parallel) as the V2-β design,** with confidence level **HIGH**.
 
+**Precondition:** This design is safe to implement only after V2-α Welle 3 (canonicalisation byte-pin) and Welles 4+5+7 (ProjectorRunAttestation end-to-end: payload shape + emission + signer CLI) are production-active — all are V2-α Welle 1–8 shipped state in v2.0.0-alpha.1. Without these, parallel projection cannot be detected as drifting.
+
 **Rationale:**
 
-1. **Byte-determinism is algebraic.** Workspaces are logically disjoint in V1's event model (no cross-workspace edges, no shared entities). Processing them in parallel and merging deterministically is straightforward. The canonical form (sorted by entity_uuid) naturally applies per-workspace, and merging at the workspace level preserves the sort order.
+1. **Byte-determinism is algebraic.** Workspaces are logically disjoint **in graph-topology terms** in V1's event model (no cross-workspace edges, no shared `entity_uuid` values). `author_did` may be shared across workspaces but is bound into the per-event signing input — not into the projected graph topology — so cross-workspace agent identity does not affect merge determinism (see §3.1 Option A). Processing workspaces in parallel and merging deterministically is straightforward, provided per-workspace intra-event order is preserved (see §3.1 ordering requirement). The canonical form (sorted by entity_uuid) naturally applies per-workspace, and merging at the workspace level preserves the sort order.
 
 2. **Operational simplicity wins the early stage.** Atlas is pre-launch V2-β; operational tuning headroom (e.g., entity-uuid-distribution balancing for option B) is a future concern. Workspace-parallel is maximally simple: "N workers, each processes a workspace". Operational teams grok this immediately.
 
 3. **Scales the right cases.** Many Atlas customers will have multi-workspace deployments (shared audit traces across multiple agents, multiple teams, multiple tenants). Option A gains parallelism on these workloads automatically. Single-workspace traces (option A's worst case) remain single-threaded, but those are development / small-customer scenarios where 8.3 hours is already acceptable (or reaccepted if parallelism buys nothing).
 
-4. **ArcadeDB compatibility is most likely.** Multi-tenant concurrent writes to partitioned sub-graphs are a standard pattern. ArcadeDB's embedded-mode will almost certainly support concurrent writes to disjoint workspaces. This is lower risk than shard-local semantics (option B) or per-batch transaction boundaries (option C).
+4. **ArcadeDB compatibility is most likely.** Multi-tenant concurrent writes to partitioned sub-graphs are a standard pattern. ArcadeDB's embedded-mode will almost certainly support concurrent writes to disjoint workspaces. This is lower risk than shard-local semantics (option B) or per-batch transaction boundaries (option C). **(W16 spike must validate; see §6 open questions, item 1 and item 3.)**
 
 5. **Failure-recovery is trivial.** Checkpointing per workspace is natural. No complex edge-deduplication or batch-boundary logic.
 
@@ -314,13 +318,15 @@ Option A assumes concurrent writes to disjoint workspaces are supported in Arcad
 
 If W16 spike finds that ArcadeDB does NOT support concurrent-workspace writes, the design remains sound (fallback to single-threaded), but RTO improvement is deferred to option B or C.
 
-### 5.4 Open questions for W17 (ArcadeDB) design
+---
+
+## 6. Open questions for W17 (ArcadeDB) design
 
 1. **Concurrent-workspace-write semantics:** Does ArcadeDB HTTP API guarantee that concurrent writes to workspace_a and workspace_b produce a deterministically-mergeable state?
 
 2. **Per-workspace graph-integrity constraints:** Does ArcadeDB enforce edge-referential-integrity at the workspace level or globally? If a workspace contains a dangling edge (vertex deleted but edge remains), does ArcadeDB's consistency model catch it?
 
-3. **Workspace isolation at query-time:** If two workspaces share the same ArcadeDB instance, can queries accidentally leak data between workspaces (e.g. a Cypher query that doesn't explicitly filter by workspace_id)? The projector must ensure workspace isolation at the projection layer, but ArcadeDB must not make this harder.
+3. **Workspace isolation at query-time (SECURITY — tenant isolation):** If two workspaces share the same ArcadeDB instance, can queries accidentally leak data between workspaces (e.g. a Cypher query that doesn't explicitly filter by workspace_id)? The projector must ensure workspace isolation at the projection layer, but ArcadeDB must not make this harder.
 
 4. **Streaming inserts vs. batch atomic writes:** Does ArcadeDB embedded-mode support per-workspace atomic transaction boundaries? Option A projects each workspace in its own transaction; if ArcadeDB doesn't expose transaction control in HTTP API, the projector must handle eventual consistency (Worker A commits, Worker B is still in-flight → merge is non-deterministic).
 
@@ -328,7 +334,7 @@ If W16 spike finds that ArcadeDB does NOT support concurrent-workspace writes, t
 
 ---
 
-## 6. Reversibility
+## 7. Reversibility
 
 **Option A is HIGH reversibility.**
 
@@ -338,22 +344,22 @@ If W16 spike finds that ArcadeDB does NOT support concurrent-workspace writes, t
 
 ---
 
-## 7. Watchlist + review cadence
+## 8. Watchlist + review cadence
 
-### 7.1 Tracking items for W17 (ArcadeDB spike)
+### 8.1 Tracking items for W17 (ArcadeDB spike)
 
 - Concurrent-workspace-write validation (baseline requirement for option A)
 - Per-workspace transaction-boundary support (baseline requirement for option A)
 - Workspace-isolation query guarantees (security requirement, separate from parallelism)
 - Shard-aware backend-trait design sketch (V2-β candidate, not blocking)
 
-### 7.2 Tracking items for V2-β customer data
+### 8.2 Tracking items for V2-β customer data
 
 - Workspace distribution in first 10 customer deployments (single-workspace vs. multi-workspace ratio)
 - Observed rebuild latency under option A (if implemented during V2-β)
 - Whether single-workspace deployments become a common case (triggers option B fallback planning)
 
-### 7.3 Review cadence
+### 8.3 Review cadence
 
 - **Pre-W17 start:** Review this ADR against W16 ArcadeDB spike findings. If findings invalidate option A, update §4 Decision and open follow-on ADR (ADR-Atlas-011, W17a) with revised recommendation.
 - **Post-V2-β launch:** Review workspace-distribution data from first 10 customers. If multi-workspace is rare, open V2-γ spike to evaluate option B ROI.
@@ -361,7 +367,7 @@ If W16 spike finds that ArcadeDB does NOT support concurrent-workspace writes, t
 
 ---
 
-## 8. Decision log
+## 9. Decision log
 
 | Date       | Event                                                  | Outcome |
 |------------|--------------------------------------------------------|---------|
