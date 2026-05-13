@@ -70,4 +70,40 @@ pub enum ProjectorError {
         /// the absent endpoint entity_uuid
         missing_endpoint: String,
     },
+
+    /// V2-α Welle 5: a line in an `events.jsonl` file did not parse
+    /// as a valid `AtlasEvent`. Surface line-number + structured
+    /// reason for operator diagnostics.
+    #[error("malformed event at line {line_number}: {reason}")]
+    ReplayMalformed {
+        /// 1-indexed line number in the events.jsonl input
+        line_number: usize,
+        /// underlying parse-error description
+        reason: String,
+    },
+
+    /// V2-α Welle 5: an event payload carried a `type` discriminator
+    /// the V2-α-MVP projector does not handle (e.g. `annotation_add`,
+    /// `policy_set`, `anchor_created`). Welle 5 narrowly supports
+    /// graph-shape events (`node_create` / `node_update` /
+    /// `edge_create`). Caller decides whether to abort or skip.
+    #[error("unsupported event kind '{kind}' on event {event_id}")]
+    UnsupportedEventKind {
+        /// the offending payload type discriminator
+        kind: String,
+        /// the event_id for diagnostics
+        event_id: String,
+    },
+
+    /// V2-α Welle 5: an event payload was missing a field required
+    /// for the dispatched upsert path (e.g. `node_create` without
+    /// a `node` object). Distinct from `ReplayMalformed` — the JSON
+    /// parsed but the payload's semantic shape is wrong.
+    #[error("event {event_id}: missing required payload field '{field}'")]
+    MissingPayloadField {
+        /// the event_id for diagnostics
+        event_id: String,
+        /// the name of the absent or wrong-type field
+        field: String,
+    },
 }
