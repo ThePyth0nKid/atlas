@@ -135,7 +135,7 @@ Sub-decisions (binding for W17a/b/c):
 4. **Database-per-workspace:** ONE ArcadeDB database per Atlas workspace. Cross-workspace data sharing is forbidden by V1 event model + enforced by isolation.
 5. **Transaction model:** per-workspace atomic transactions via ArcadeDB HTTP `/api/v1/begin/{db}` + `/api/v1/commit/{db}`. Each projection cycle = one transaction per workspace.
 6. **Byte-determinism adapter:** all queries that feed canonicalisation MUST include `ORDER BY entity_uuid ASC` (vertices) / `ORDER BY edge_id ASC` (edges). `@rid` is NOT a valid sort key for canonicalisation.
-7. **Tenant isolation:** three-layer defence — per-database isolation (ArcadeDB native) + application-layer workspace_id parameter binding + Cypher AST validator rejecting queries without workspace_id filter.
+7. **Tenant isolation:** layered defence — per-database isolation (ArcadeDB native, primary) + application-layer workspace_id parameter binding (projector + Read-API + MCP, active enforcer) + Cypher AST validator (mutation hardening; does NOT enforce workspace_id presence). Operator runbook requirement: per-database-per-workspace deployment configuration (shared-database mode forbidden).
 8. **`GraphStateBackend` trait:** sketched in spike §7 (~40 LOC); W17a writes the production trait + InMemoryBackend impl + ArcadeDbBackend stub.
 
 ---
@@ -156,7 +156,7 @@ Sub-decisions (binding for W17a/b/c):
 - **R-L-02 (FalkorDB SSPLv1 hosted-service exposure):** ELIMINATED by ArcadeDB Apache-2.0 primary.
 - **ADR-Atlas-007 §6 Q1-Q5 (parallel-projection unknowns):** RESOLVED. Option-A workspace-parallel projection is directly supported by per-database concurrent writes.
 - **Hermes-skill JVM-distribution blocker (V2-γ):** AVOIDED by server-mode (skill ships as JS-only HTTP client).
-- **Tenant-isolation risk (Q3, SECURITY):** Defence in depth (3 layers) reduces single-point-of-failure to near-zero.
+- **Tenant-isolation risk (Q3, SECURITY):** Defence in depth (Layer 1 per-database isolation primary; Layer 2 projector workspace_id binding active enforcer; Layer 3 AST validator hardens against mutation attacks) plus operator-runbook requirement (per-database-per-workspace deployment). Cross-tenant read leak prevented in correctly-configured deployments; shared-database misconfiguration breaks Layer 1 and is explicitly forbidden by runbook.
 - **Byte-determinism preservation (Q9):** Adapter contract eliminates `@rid`-ordering risk; `BTreeMap` semantics carry over from InMemory backend.
 
 ### 5.3 Dependencies on W17 (driver implementation)

@@ -25,14 +25,14 @@ W16 is a **doc-only architectural spike** that resolves the architectural unknow
 - **DECISION-DB-4 status:** CONFIRMED, not re-evaluated. ArcadeDB Apache-2.0 remains V2-α/β primary; FalkorDB SSPLv1 remains performance-validation fallback.
 - **ArcadeDB deployment mode:** SERVER mode (not embedded). Rationale: Hermes-skill distribution constraint forbids JVM in-process; server mode preserves process isolation for multi-tenant security; HTTP API parallelisation is natural from Rust without JNI.
 - **Rust HTTP client:** `reqwest` (async, tokio-aligned, ~2 MB binary cost). Rejected: `ureq` (sync, blocks async projector); hand-rolled `hyper` (no measurable benefit).
-- **Tenant isolation (Q3, SECURITY):** APPLICATION-LAYER enforcement via projector-side workspace_id parameter binding + per-database (ArcadeDB native database isolation) — defence in depth. Cypher passthrough hardened per DECISION-SEC-4 prevents accidental cross-tenant leak in user queries.
+- **Tenant isolation (Q3, SECURITY):** Layered defence — per-database isolation (Layer 1 primary) + projector workspace_id parameter binding (Layer 2 active enforcer) + Cypher AST validator (Layer 3 mutation-hardening; does NOT enforce workspace_id presence). Operator runbook MUST require per-database-per-workspace deployment.
 - **Concurrent-workspace-write (Q1):** ArcadeDB HTTP API serialises writes per-database (=per-workspace); concurrent writes to disjoint databases are independent (no inter-database lock). Atlas projector creates ONE ArcadeDB database per workspace, making Option-A parallel projection (per ADR-Atlas-007 §3.1) directly supported.
 - **Workspace integrity (Q2):** Edge-referential integrity enforced at workspace/database level by ArcadeDB schema-required mode (when both endpoints in same workspace); cross-workspace edges are forbidden by V1's event model and the projector enforces this at application layer.
 - **Streaming vs batch (Q4 corollary):** Per-workspace atomic transactions via ArcadeDB HTTP `/api/v1/begin` + `/api/v1/commit`. Each projection cycle = one transaction per workspace.
 - **Native UUID indexing performance:** ArcadeDB B-tree indexes on `entity_uuid` deliver O(log n) lookups; ~1ms typical for 10M-vertex workspaces.
 - **GraphStateBackend trait sketch (Q8):** Provided as ~40-line Rust pseudo-code in spike-doc §7. W17a fills the actual impl.
 - **Byte-determinism preservation (Q9):** Application-layer adapter required — ArcadeDB query results MUST be sorted by `entity_uuid` (logical identifier) before canonicalisation, NOT by `@rid` (insert-order).
-- **Perf ballpark (Q10):** Cold-start ~300 ms (JVM warmup); warm projection ~500 µs/event; full re-projection of 10M events ~5 minutes single-threaded, ~30 sec workspace-parallel.
+- **Perf ballpark (Q10):** Cold-start ~350 ms (JVM warmup + first HTTP roundtrip); warm projection ~300-500 µs/event; full re-projection of 10M events ~50-80 min single-threaded, ~6-10 min workspace-parallel (8 workers).
 - **CI strategy (Q7):** New `.github/workflows/atlas-arcadedb-smoke.yml` proposed for W17c with Docker-Compose. All 7 byte-determinism CI pins remain byte-identical.
 - **FalkorDB fallback trigger thresholds (Q6):** Spike-doc §9 defines 5 measurable criteria.
 

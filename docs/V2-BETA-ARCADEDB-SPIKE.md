@@ -17,14 +17,14 @@
 
 1. **Q1 Concurrent-workspace-write semantics** — ArcadeDB serialises writes per-database; Atlas's one-database-per-workspace pattern means concurrent writes to disjoint workspaces produce deterministically-mergeable state. Option A parallel-projection (ADR-Atlas-007 §3.1) is directly supported. **Confidence: MEDIUM-HIGH.**
 2. **Q2 Per-workspace graph integrity** — ArcadeDB schema-required mode enforces edge-referential integrity at the database (workspace) level. Cross-workspace edges are forbidden by V1's event model + application-layer enforcement. **Confidence: HIGH.**
-3. **Q3 Workspace isolation at query-time (SECURITY)** — Defence in depth: (a) per-workspace database isolation native to ArcadeDB; (b) projector-side workspace_id parameter binding; (c) Cypher AST-validator (DECISION-SEC-4) prevents user queries omitting workspace_id filter. **Confidence: HIGH** with application-layer enforcement.
-4. **Q4 Embedded vs server mode** — **SERVER mode wins**. Hermes-skill distribution constraint (JVM-in-`npx`-installable-skill = non-starter) + process-isolation security benefit + Rust↔JNI complexity avoidance + sidecar JVM RSS isolation. Embedded mode reconsidered only if HTTP latency exceeds 15ms p99 in W17c benchmarks. **Confidence: HIGH.**
+3. **Q3 Workspace isolation at query-time (SECURITY)** — Defence in depth: (a) per-workspace database isolation native to ArcadeDB; (b) projector-side workspace_id parameter binding; (c) Cypher AST-validator (ADR-009) enforces read-only structure (mutation prevention; does NOT enforce workspace_id presence — Layer 2 does). **Confidence: HIGH** with application-layer enforcement.
+4. **Q4 Embedded vs server mode** (W16 scope extension beyond ADR-Atlas-007 §6's 5 questions; the 5 ADR-007 Qs map to this spike's Q1+Q3+Q4-corollary+Q8+Q9 respectively) — **SERVER mode wins**. Hermes-skill distribution constraint (JVM-in-`npx`-installable-skill = non-starter) + process-isolation security benefit + Rust↔JNI complexity avoidance + sidecar JVM RSS isolation. Embedded mode reconsidered only if HTTP latency exceeds 15ms p99 in W17c benchmarks. **Confidence: HIGH.**
 5. **Q5 Rust HTTP client** — **`reqwest`**. Async, tokio-aligned, native TLS via `rustls-tls`, connection pooling, ~2 MB binary cost, de-facto Rust standard. Rejected: `ureq` (sync); hand-rolled `hyper` (no measurable benefit). **Confidence: HIGH.**
 6. **Q6 FalkorDB fallback trigger thresholds** — 5 measurable criteria documented in §9. None currently fired.
 7. **Q7 Docker-Compose CI orchestration** — Sketch in §8. New workflow `.github/workflows/atlas-arcadedb-smoke.yml` proposed for W17c.
 8. **Q8 `GraphStateBackend` trait sketch** — ~40 lines Rust pseudo-code in §7. W17a fills concrete impl.
 9. **Q9 Byte-determinism preservation** — Adapter required: query results MUST be sorted by `entity_uuid` before canonicalisation; `@rid` (insert-order) is NOT a substitute. Spec in §4.9. **Confidence: HIGH** on adapter; **MEDIUM** until W17b implementation validates.
-10. **Q10 Performance ballpark** — Cold start ~300 ms (JVM warmup); warm projection ~500 µs/event; 10M-event re-projection ~5 min single-threaded, ~30 sec workspace-parallel. Vs V2-α in-memory baseline: HTTP overhead adds ~2-5x per-event cost; acceptable at year-1 scale.
+10. **Q10 Performance ballpark** — Cold start ~350 ms (JVM warmup + first HTTP roundtrip); warm projection ~300-500 µs/event; 10M-event re-projection ~50-80 min single-threaded, ~6-10 min workspace-parallel (8 workers). Vs V2-α in-memory baseline: HTTP overhead adds ~6-10x per-event cost; acceptable at year-1 scale (matches V2-α ADR-Atlas-007 §2.3 aspiration of "10M events in <30 min on 16 cores").
 
 **Bottom line:** The architectural unknowns ADR-Atlas-007 §6 surfaced are resolved in favour of ArcadeDB server-mode deployment. W17 proceeds against this design.
 
@@ -101,13 +101,13 @@ This spike is the architectural counterpart to V2-α Welle 2's license counterpa
 **Atlas's defence in depth (locked here):**
 1. **Per-workspace database isolation (primary):** Atlas creates one ArcadeDB database per workspace. Cross-workspace queries are structurally impossible because the projector connects to a specific database. Auth credentials are per-database.
 2. **Application-layer workspace_id binding (secondary):** All projector + Read-API + MCP tool queries bind `workspace_id` as a parameterised Cypher constant.
-3. **Cypher AST-validator enforcement (tertiary):** the consolidated validator (`packages/atlas-cypher-validator/`, ADR-Atlas-009) rejects user-submitted queries that omit a `workspace_id` filter at the parse layer.
+3. **Cypher AST-validator enforcement (tertiary):** the consolidated validator (`packages/atlas-cypher-validator/`, ADR-Atlas-009) enforces read-only query structure (mutation-keyword rejection + procedure-namespace blocking + string-concat heuristic + 4096-char cap + opener allowlist). **The validator does NOT enforce workspace_id presence** — workspace_id binding is the projector's responsibility at Layer 2.
 
 **Finding:** Workspace isolation is **enforced at three layers**: database-isolation (ArcadeDB native), application-layer parameter binding (projector + Read-API + MCP), and Cypher AST validation (consolidated validator). **Atlas does NOT rely on ArcadeDB vertex-level security (which doesn't exist).**
 
 **Risk:** Operator decides to share a single ArcadeDB database across workspaces to save resources → cross-workspace leak becomes possible if AST validator is bypassed. Mitigation: operator runbook MUST forbid shared-database configuration; W17c integration tests MUST include a negative-case test (Cypher without workspace_id, expect 400 rejection).
 
-**Confidence:** **HIGH** with all three layers active.
+**Confidence:** **MEDIUM-HIGH** — Layer 1 (per-database isolation) is the bedrock guarantee; Layer 2 (application-layer projector workspace_id binding) is the active enforcer; Layer 3 (Cypher AST validator) hardens against MUTATION attacks but does NOT enforce workspace_id presence. Operator runbook MUST require per-database deployment configuration.
 
 ### 4.4 Q4 — JVM-dependency footprint + embedded vs server mode trade-offs
 
@@ -226,6 +226,8 @@ ArcadeDB query result order depends on the query. A naive `MATCH (n) RETURN n` r
 - The application-layer adapter wraps query results in a `BTreeMap<EntityUuid, Vertex>` before passing to canonical-form builder.
 - Edge queries: `ORDER BY edge_id ASC` where `edge_id = blake3(workspace_id || from_entity_uuid || to_entity_uuid || edge_label || nonce_or_event_uuid)`.
 - The adapter is part of the `GraphStateBackend::canonical_state()` method (see §7).
+
+> **Storage requirement (W17b implementation note):** `edge_id` MUST be persisted as a named property on each ArcadeDB edge record (`SET e.edge_id = $computed_edge_id` at insertion time). `ORDER BY edge_id ASC` in Cypher operates on this stored property, NOT on `@rid`. Relying on ArcadeDB's internal `@rid` for canonicalisation ordering is FORBIDDEN per Q9 adapter contract.
 
 **`@rid` caveat:** `@rid` is auto-increment within a bucket. Two projector runs producing the same *logical* state via different historical insertion orders produce different `@rid` values. The adapter MUST use logical-identifier sort, NOT `@rid` sort.
 
@@ -380,7 +382,7 @@ pub trait GraphStateBackend: Send + Sync {
 
 **NEW workflow for W17c (W16 proposes):** `.github/workflows/atlas-arcadedb-smoke.yml` (see §4.7 sketch).
 
-**Cross-check matrix (W17b acceptance):** for the same input events.jsonl, both `InMemoryBackend::canonical_state()` and `ArcadeDbBackend::canonical_state()` MUST produce byte-identical hash. This is the §4.9 adapter validation; encoded as a new test `tests/cross_backend_byte_determinism.rs` in W17c.
+**Cross-check matrix (W17b acceptance):** for the same input events.jsonl, both `InMemoryBackend::canonical_state()` and `ArcadeDbBackend::canonical_state()` MUST produce byte-identical hash. Encoded as a new test `tests/cross_backend_byte_determinism.rs` in W17b.
 
 ---
 
@@ -415,7 +417,7 @@ See §4.6 Q6 for the 5 criteria (T1-T5). Summary:
 - ADR-Atlas-011 explaining trait design choices + W17b/c roadmap
 
 **W17b/c deferred deliverables:**
-- W17b: full `ArcadeDbBackend` impl using `reqwest` + Cypher
+- W17b: full `ArcadeDbBackend` impl using `reqwest` + Cypher; new test `tests/cross_backend_byte_determinism.rs` MUST pass (both `InMemoryBackend::canonical_state()` and `ArcadeDbBackend::canonical_state()` produce byte-identical hash for the same input events.jsonl)
 - W17c: Docker-Compose CI workflow + integration tests + benchmark capture
 
 ---
