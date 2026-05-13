@@ -422,6 +422,16 @@ Reviewer checklist for surface-touching PRs:
 | `ProjectorError` new variants: `ReplayMalformed { line_number, reason }`, `UnsupportedEventKind { kind, event_id }`, `MissingPayloadField { event_id, field }` | **V2-α-Additive (SemVer-minor under `#[non_exhaustive]`)** | Structured failure paths for replay + upsert. |
 | `crates/atlas-projector/tests/projector_pipeline_integration.rs` — 6 E2E tests | **CI gate** | Full pipeline: events.jsonl → parse → project → emit → round-trip through atlas-trust-core. Includes idempotency, unsupported-event-kind, malformed-line, empty-state-with-count, checkpoint-resume tests. |
 
+### 10.7d V2-α Welle 6 — projector-state-hash CI gate (2026-05-13)
+
+| Item | Tag | Notes |
+|---|---|---|
+| NEW `pub mod gate` in atlas-projector | **V2-α-Additive** | Closes V2-α security loop. Compares attested `graph_state_hash` from `ProjectorRunAttestation` events against locally-recomputed value from fresh re-projection. |
+| `pub fn verify_attestations_in_trace(workspace_id, trace) -> ProjectorResult<Vec<GateResult>>` | **V2-α-Additive** | Top-level gate API. Returns one `GateResult` per `ProjectorRunAttestation` event in trace. Empty vec if no attestations. Re-projects via Welle 5's `project_events` + recomputes via Welle 3's `graph_state_hash` + parses attestation via Welle 4's `parse_projector_run_attestation`. |
+| `pub struct GateResult { event_id, attested_hash, recomputed_hash, attested_event_count, actual_event_count, status }` | **V2-α-Additive** | Per-attestation outcome with structured comparison fields for auditor diagnostics. |
+| `pub enum GateStatus` (`#[non_exhaustive]`) — variants: `Match`, `Mismatch`, `AttestationParseFailed` | **V2-α-Additive (SemVer-minor under `#[non_exhaustive]`)** | Outcome discriminator. Future welles may add `HeadEventHashNotFound` / `IncrementalCoverageGap` etc. additively. |
+| `crates/atlas-projector/tests/projection_gate_integration.rs` — 8 E2E tests | **CI gate** | Full V2-α security loop: events.jsonl → project → emit → gate verifies match. Plus 4 negative-path tests (hash tampered, count tampered, malformed attestation, unsupported event kind). |
+
 ### 10.7 What `v2.0.0-alpha.1` will bring (forecast, not committed)
 
 Pending the close-out of the V2-α welle bundle (Welle 1 = this surface; future Wellen = Projector + FalkorDB + ArcadeDB spike + content-hash separation if counsel-approved):

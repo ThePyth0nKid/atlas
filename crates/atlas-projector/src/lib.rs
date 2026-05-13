@@ -26,6 +26,14 @@
 //!   Together: Welle 5 delivers the full pipeline `events.jsonl →
 //!   GraphState → signed attestation payload`. Caller (atlas-signer)
 //!   wraps the payload in an `AtlasEvent` and signs.
+//! - Welle 6: projector-state-hash CI gate
+//!   (`gate::verify_attestations_in_trace`) closes the V2-α security
+//!   loop. Given an `AtlasTrace` containing `ProjectorRunAttestation`
+//!   events, the gate re-projects the trace's other events,
+//!   recomputes `graph_state_hash`, and compares against the
+//!   attested values. Returns per-attestation `GateResult` with
+//!   `Match` / `Mismatch` / `AttestationParseFailed` outcome.
+//!   Drift detected cryptographically, not just by CI convention.
 //!
 //! **Out of scope for the current welle range** (deferred to V2-α
 //! Welles 6-8 / V2-β):
@@ -34,10 +42,6 @@
 //!   in-memory `GraphState` with ArcadeDB-backed implementation;
 //!   operator-runbook for deployment; SQL deterministic-dump
 //!   adapter.
-//! - projector-state-hash CI gate enforcement (Welle 7+ candidate)
-//!   — comparing attested `graph_state_hash` from a
-//!   `ProjectorRunAttestation` event against locally-recomputed
-//!   value from fresh re-projection.
 //! - Parallel-projection design for >10M event scenarios (Welle
 //!   7+ candidate).
 //! - DB-specific dump-to-canonical adapter for the eventual
@@ -108,6 +112,7 @@
 pub mod canonical;
 pub mod emission;
 pub mod error;
+pub mod gate;
 pub mod replay;
 pub mod state;
 pub mod upsert;
@@ -115,6 +120,7 @@ pub mod upsert;
 pub use canonical::{build_canonical_bytes, graph_state_hash};
 pub use emission::build_projector_run_attestation_payload;
 pub use error::{ProjectorError, ProjectorResult};
+pub use gate::{verify_attestations_in_trace, GateResult, GateStatus};
 pub use replay::parse_events_jsonl;
 pub use state::{GraphEdge, GraphNode, GraphState};
 pub use upsert::{apply_event_to_state, project_events};
