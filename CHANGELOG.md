@@ -17,7 +17,26 @@ The v1.0 public-API surface contract is documented in
 
 ## [Unreleased]
 
-**V2-β Phase 1 batch (Welles 9 + 10 + 11) landed on master 2026-05-13 — promoting to `v2.0.0-alpha.2` in Phase 3.** Public-API contract unchanged from v2.0.0-alpha.1 per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10 (V2-α Additive surface) — Welles 9 + 10 + 11 are docs + workflow only, zero Rust/TypeScript surface change.
+_No unreleased changes since v2.0.0-alpha.2. Next release on this line will be `v2.0.0-alpha.3` or `v2.0.0-beta.1` depending on scope. Public-API contract per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10 (V2-α Additive surface)._
+
+## [2.0.0-alpha.2] — 2026-05-13
+
+**V2-α-α.2 Release Summary.** Atlas's first V2-β-promoted pre-release. Ships **three docs / workflow / design wellen** on top of v2.0.0-alpha.1: operator-facing runbook for V2-α deployment + verification (W9), parallel-projection design ADR completing the DECISION-ARCH-1 triple-hardening third leg (W10), and the `wasm-publish.yml` dual-publish race fix validated end-to-end by this very ship (W11). Public-API surface unchanged from v2.0.0-alpha.1 per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10; this is a docs + workflow release. V1 trust property (signed events + Ed25519 + COSE_Sign1 + deterministic CBOR + blake3 hash chain + Sigstore Rekor anchoring + witness cosignature + offline WASM verifier) is preserved unchanged. All 7 V2-α byte-determinism CI pins byte-identical from v2.0.0-alpha.1 baseline (Welles 9 + 10 + 11 touched zero Rust/TypeScript surface).
+
+The V2-α-α.2 release packages 3 V2-β wellen + 1 V2-β orchestration phase shipped on 2026-05-13: V2-β Phase 0 (orchestration plan + dependency graph + welle plan-doc template) → V2-β Phase 1 parallel batch (W9 operator runbook + W10 parallel-projection design ADR + W11 wasm-publish race fix + ADR-008 postmortem) → V2-β Phase 2 consolidation (CHANGELOG, master-plan §6, orchestration-plan welle-progress, handoff doc, W9 §-numbering fix-forward). Parallel-subagent-in-worktree dispatch architecture proven through 3 simultaneous wellen with zero file-overlap and a NEW cross-batch consistency-reviewer invariant (per V2-β Orchestration Plan §3.5).
+
+**Validation event:** v2.0.0-alpha.2 ship is the first signed-tag publish since the W11 wasm-publish.yml dual-publish race fix landed. The fixed workflow (single `npm publish --provenance` + `npm dist-tag add` retry-loop for replication latency) replaces the dual `npm publish --tag` pattern that failed E403 on v1.0.1 + v2.0.0-alpha.1 (per ADR-Atlas-008 postmortem). Success of this publish proves the fix end-to-end.
+
+**Wire-format compat:** identical to v2.0.0-alpha.1 — V1.0 verifiers reject events with `author_did` or `payload.type = "projector_run_attestation"` per `#[serde(deny_unknown_fields)]`; V1-shaped events remain forward-compatible. Full details in [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10 + [`docs/V2-ALPHA-2-RELEASE-NOTES.md`](docs/V2-ALPHA-2-RELEASE-NOTES.md).
+
+**Pre-counsel-review disclaimer:** unchanged from v2.0.0-alpha.1. Public marketing claims about V2-α / V2-β's EU AI Act / GDPR posture are pre-counsel-review (per Master Plan §5 + `DECISION-COUNSEL-1`). This release is suitable for engineering / auditor / operator evaluation; external-public-materials require counsel-validated language refinement before publication.
+
+### Added — V2-β Phase 3 (v2.0.0-alpha.2 Ship, 2026-05-13)
+
+- **Cargo workspace version bump 2.0.0-alpha.1 → 2.0.0-alpha.2.** Single source of truth via `workspace.package.version`; all 6 workspace crates inherit through `version.workspace = true`.
+- **npm version bumps** for `atlas-web`, `atlas-mcp-server`, `@atlas/bridge`, root monorepo manifest, and MCP SDK introspection string in `apps/atlas-mcp-server/src/index.ts`.
+- **NEW `docs/V2-ALPHA-2-RELEASE-NOTES.md`** — engineering-perspective release notes for v2.0.0-alpha.2. V2-β Phase 0-1-2 narrative, validation-event framing for the W11 wasm-publish fix, surface-stability assurance.
+- **CHANGELOG.md `[Unreleased]` promoted to `[2.0.0-alpha.2]`** with this release-summary header.
 
 ### Added — V2-β Welle 9 (Operator Runbook for v2.0.0-alpha.1, 2026-05-13)
 
