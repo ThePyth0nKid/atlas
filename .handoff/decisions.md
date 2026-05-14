@@ -297,4 +297,29 @@
 
 ---
 
-**End of decisions.md.** 23 decisions documented. All Phase-2 CRITICAL findings addressed (accepted/modified/deferred/rejected with rationale). V2-α Welle 1 + Welle 2 strategic decisions added 2026-05-12.
+---
+
+## 2026-05-14: Welle 17b ArcadeDB Driver Implementation [DECISION-ARCH-W17b]
+- **Source:** V2-β Welle 17b (PR #90, master commit `d216844`). Parallel `code-reviewer` + `security-reviewer` dispatch per Atlas Standing Protocol Lesson #8.
+- **Master Plan affected:** §6 Welle Decomposition (Phase 10 SHIPPED), `V2-BETA-ORCHESTRATION-PLAN.md`, `V2-BETA-DEPENDENCY-GRAPH.md`.
+- **Decision:** **ACCEPT.** `ArcadeDbBackend` shipped as production driver against ArcadeDB Server-mode HTTP API per ADR-Atlas-010 §4 sub-decisions 1-8. Sub-module split `crates/atlas-projector/src/backend/arcadedb/{mod.rs, client.rs, cypher.rs}` (~1860 LOC). `reqwest 0.12` + `rustls-tls` + `blocking` features added; matches `atlas-signer` TLS posture (uniform `rustls` across workspace, no `openssl-sys`).
+- **W17a carry-over MEDIUM final disposition:**
+  - **#2 serde_json depth+size cap:** CLOSED. `check_value_depth_and_size` called at every HTTP-response → `Vertex`/`Edge` boundary in `cypher.rs::parse_vertex_row` and `parse_edge_row`. Defaults `max_depth=32`, `max_bytes=64*1024`.
+  - **#3 WorkspaceId validation guard:** CLOSED. `check_workspace_id` called as FIRST line of `ArcadeDbBackend::begin()` + `vertices_sorted` + `edges_sorted`. W17b reviewer-fix added a second validation layer in `db_name_for_workspace` that rejects characters incompatible with ArcadeDB db-name rules (`[a-zA-Z0-9_]` allowlist post-hyphen-replacement). Closes the `format!("create database {db_name}")` admin-command injection surface that `check_workspace_id` alone did not cover.
+  - **#4 begin() lifetime evaluation:** CLOSED. ALREADY RESOLVED by W17a-cleanup (`'static`); W17b's `ArcadeDbTxn` honours via owned fields end-to-end (cloned `reqwest::Client`, owned `db_name`/`session_id`/`workspace_id`/`BasicAuth`). `assert_static::<ArcadeDbTxn>` compile-time check pins it.
+  - **#5 MalformedEntityUuid umbrella variant for edges:** V2-γ-DEFERRED (unchanged from W17a + W17a-cleanup decision). Broader error-enum refactor is out of W17b scope and not blocking W18 Mem0g.
+- **W17b reviewer-fix in-commit findings:**
+  - **HIGH-1 (`run_command` Value-return latent bypass):** CLOSED. Return type narrowed to `ProjectorResult<()>`. All current callers discarded the value; removing the return surface prevents future callers from accidentally bypassing the ADR-011 §4.3 #12 depth/size cap.
+  - **HIGH-2 (admin-command injection):** CLOSED. See #3 above.
+  - **MEDIUM-1 (SecretString visibility):** CLOSED. `SecretString` + `BasicAuth.{username,password}` tightened to `pub(crate)`.
+  - **MEDIUM-2/3 (Debug userinfo leak + HTTPS posture):** CLOSED. `ArcadeDbBackend::new` rejects URLs carrying userinfo and rejects schemes other than http/https. Plaintext HTTP retained for local-dev docker-compose §4.7 with documented runbook-requires-HTTPS note.
+  - **LOW-1 (unbounded body read):** CLOSED. `ensure_database_exists` bounded to 512 bytes.
+  - **15 clippy doc_lazy_continuation lints:** CLOSED.
+- **Confidence:** HIGH. byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduces through the trait surface; clippy `-D warnings` clean; 153 tests green; trait public-API unchanged (only one doc-comment paragraph in `backend/mod.rs` touched for clippy fix).
+- **Reversibility:** MEDIUM-HIGH. The driver lives entirely behind `GraphStateBackend`; reverting to in-memory-only would be one trait-impl deletion + dep removal. ArcadeDB schema is lazy-created per workspace; no data-migration concern at this stage.
+- **Open question (OQ for W17c):** cross-backend byte-determinism test (`tests/cross_backend_byte_determinism.rs`) EXISTS, compiles, and is `#[ignore]`-gated behind `ATLAS_ARCADEDB_URL`. The live byte-pin reproduction through the ArcadeDB path is the W17c CI gate (Docker-Compose sidecar). If W17c surfaces a byte-equivalence gap, the ADR-010 §4.9 adapter contract or ADR-011 §4 trait default needs adjustment.
+- **Review-after:** W17c integration test workflow + benchmark capture replaces ADR-010 §4.10 estimates with measured numbers (embedded-mode reconsideration trigger at p99 > 15 ms).
+
+---
+
+**End of decisions.md.** 24 decisions documented. All Phase-2 CRITICAL findings addressed (accepted/modified/deferred/rejected with rationale). V2-α Welle 1 + Welle 2 strategic decisions added 2026-05-12. V2-β Welle 17b shipped + W17a carry-over MEDIUMs closed 2026-05-14.
