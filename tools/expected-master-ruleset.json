@@ -42,6 +42,9 @@
         "required_status_checks": [
           {
             "context": "Verify trust-root-modifying commits"
+          },
+          {
+            "context": "atlas-web-playwright"
           }
         ],
         "strict_required_status_checks_policy": true

@@ -1,5 +1,7 @@
 # Atlas — Regulatory Compliance Mapping (V1.7)
 
+> **Status (2026-05-14):** V1.7 internal reference document. Full counsel review pending per `.handoff/v2-counsel-engagement-scope.md` SOW-5 (Verbatim Art. 12 + Annex IV §1(g) + §2(g) marketing-copy review). Until counsel sign-off, the verbatim regulation text in this file is authoritative for marketing claims (per `.handoff/v2-master-vision-v1.md` §4.1 + DECISION-COMPLIANCE-2); paraphrases or interpretations herein are atlas-team-internal-only.
+
 Atlas does not market compliance; it ships structural evidence. This
 document maps each obligation we claim to address to (a) the verbatim
 clause, (b) the Atlas mechanism that delivers the evidence, and (c) the

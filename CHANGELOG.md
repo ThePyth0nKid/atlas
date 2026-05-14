@@ -19,6 +19,16 @@ The v1.0 public-API surface contract is documented in
 
 **V2-β Phase 4 + 5 + 6 + 7 + 8 + 9 all landed on master 2026-05-13 — `v2.0.0-alpha.3` candidate.** V2-α public-API contract per [`docs/SEMVER-AUDIT-V1.0.md`](docs/SEMVER-AUDIT-V1.0.md) §10 unchanged on the Rust verifier side; this stretch adds V2-β Read-side public surfaces (atlas-web Read-API + atlas-mcp-server MCP V2 tools), extends `atlas-projector` event-kind dispatch with 3 new additive kinds, consolidates Cypher AST validation into a shared `@atlas/cypher-validator` monorepo package, locks Layer-2 architectural decisions for the upcoming ArcadeDB driver integration (W16 + ADR-Atlas-010), and lands the production `GraphStateBackend` trait + `InMemoryBackend` + `ArcadeDbBackend` stub (W17a + ADR-Atlas-011) — the abstraction boundary that lets V2-β-Phase-10 (W17b) wire ArcadeDB's HTTP driver behind a one-trait-impl swap. All 7 V2-α byte-determinism CI pins byte-identical from v2.0.0-alpha.2 baseline.
 
+### Added — V2-β counsel-engagement enablement (2026-05-14)
+
+- **NEW `.handoff/v2-counsel-engagement-scope.md`** — RFP-ready 7-SOW counsel engagement scope + 7-firm comparison matrix + DE+EN outreach templates + engagement-letter checklist. Operational unblock for `DECISION-COUNSEL-1` (GDPR Art. 4(1) hash-as-PII Path-B opinion) pre-V2-β-public-materials blocking gate. 6-week counsel-engagement clock starts at firm-signature.
+
+### Changed — V2-β counsel-engagement enablement (2026-05-14)
+
+- **`README.md`** Art. 12 paraphrase replaced with verbatim regulation text per `DECISION-COMPLIANCE-2` (Regulation (EU) 2024/1689 Art. 12 §1 + §2 excerpt + Annex IV §1(g)/§2(g) cross-reference + Art. 113(b) in-force date).
+- **`docs/COMPLIANCE-MAPPING.md`** carries a counsel-pending disclaimer header pointing at SOW-5 of the new counsel-scope doc.
+- **`tools/expected-master-ruleset.json`** synced to live Ruleset state (`atlas-web-playwright` added as 2nd required status check). No security-drift — live Ruleset 15986324 was already stricter than the pinned file; this is doc-sync only. The check became required during the V2-β Phase-2-4 atlas-web work batch (W12 Read-API + W13 MCP V2) and the pin file simply was not updated at the time.
+
 ### Added — V2-β Welle 17a (`GraphStateBackend` trait + InMemoryBackend + ArcadeDbBackend stub + ADR-Atlas-011, 2026-05-13)
 
 - **NEW `crates/atlas-projector/src/backend/mod.rs`** (~555 LOC) — production `GraphStateBackend` trait (Send + Sync, object-safe via `Box<dyn>`). Defines `Vertex` / `Edge` / `UpsertResult` (all `#[non_exhaustive]` with explicit `new()` constructors) carrying V2-α Welle 1 stamping fields (`event_uuid`, `rekor_log_index: Option<u64>`, `author_did: Option<String>`). `WorkspaceTxn` trait for per-task transactions (`upsert_vertex` / `upsert_edge` / `batch_upsert` with vertices-before-edges ordering / `commit` / `rollback`). Default `canonical_state()` trait impl delegates to V2-α `canonical::graph_state_hash` so every backend gets byte-determinism for free. Helpers `vertex_from_graph_node` / `edge_from_graph_edge` for V2-α-state ↔ trait-surface conversion.
