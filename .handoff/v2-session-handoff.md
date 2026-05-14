@@ -1,8 +1,91 @@
-# Atlas V2 — Session Handoff (V2-α SHIPPED + V2-β Phase 0–9.5 SHIPPED, v2.0.0-alpha.2 LIVE)
+# Atlas V2 — Session Handoff (V2-α SHIPPED + V2-β Phase 0–10-cleanup SHIPPED, v2.0.0-alpha.2 LIVE; W17b WIP at breakpoint)
 
-> **🎯 FRESH-AGENT BOOTSTRAP DOC.** Wenn du diese Datei zum ersten Mal liest mit leerem Kontext: lies §0 "Fresh-Context Onboarding" zuerst (current state), dann §0a–§0d (Phase 1–4 of strategic-iteration SHIPPED narratives, historical), dann **`docs/V2-MASTER-PLAN.md`** für den master-resident strategischen Plan, dann **`docs/V2-BETA-ORCHESTRATION-PLAN.md`** + **`docs/V2-BETA-DEPENDENCY-GRAPH.md`** für V2-β welle orchestration + dispatch architecture. Dann optional **`.handoff/v2-master-vision-v1.md`** für die volle V2-Vision-Begründung und **`.handoff/decisions.md`** für die 23 expliciten Entscheidungen. Damit bist du bereit für V2-β-Phase-10 (W17b ArcadeDB driver implementation) ohne strategischen Kontext nochmal abzufragen.
+> **🎯 FRESH-AGENT BOOTSTRAP DOC.** **READ §0-NOW FIRST** (2026-05-14 Docker-restart breakpoint resume guide — exact next-session entry steps). Then §0 "Fresh-Context Onboarding" for general context, then §0z (V2-β Phase 0–9.5 SHIPPED narrative, 2026-05-13), §0a–§0d (Phase 1–4 strategic-iteration SHIPPED narratives, historical), then **`docs/V2-MASTER-PLAN.md`** for the master-resident strategic plan, then **`docs/V2-BETA-ORCHESTRATION-PLAN.md`** + **`docs/V2-BETA-DEPENDENCY-GRAPH.md`** for V2-β welle orchestration + dispatch architecture. Optional: **`.handoff/v2-master-vision-v1.md`** for the full V2-Vision-rationale and **`.handoff/decisions.md`** for the 23 explicit decisions.
 
-**Erstellt:** 2026-05-12. **V2-α-α.1 SHIPPED:** 2026-05-13 (8 Welles). **V2-β Phase 0–9.5 SHIPPED:** 2026-05-13 (one extraordinary work-day, 18 PRs merged: #67-#85, plus the Phase-9.5 consolidation PR that merges this commit). **Status:** v2.0.0-alpha.2 LIVE on master + GitHub + npm `@atlas-trust/verify-wasm@2.0.0-alpha.2` with Sigstore Build L3 provenance. Master HEAD post-Phase-9 includes the production `GraphStateBackend` trait + `InMemoryBackend` + `ArcadeDbBackend` stub from PR #85; the existing `graph_state_hash` byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` is reproduced through the new trait surface (no drift). **Was als nächstes:** V2-β Phase 10 = W17b ArcadeDB driver implementation. SERIAL `general-purpose` subagent fills the `ArcadeDbBackend` stub with `reqwest`-based HTTP calls to ArcadeDB's `/api/v1/begin/{db}` + Cypher endpoints per ADR-Atlas-010 §4 sub-decisions. Must pass cross-backend byte-determinism test (`InMemoryBackend::canonical_state()` byte-identical to `ArcadeDbBackend::canonical_state()` for same input `events.jsonl`) before merge. Pre-flight reading mandatory: (1) `docs/ADR/ADR-Atlas-010-...md` §4 sub-decisions 1-8 (binding for W17b); (2) `docs/ADR/ADR-Atlas-011-arcadedb-driver-scaffold.md` (W17a's trait shape + OQ-1/OQ-2 resolutions); (3) `.handoff/v2-beta-welle-17a-plan.md` "Post-merge: reviewer findings deferred to W17b" section (4 carry-over MEDIUMs MUST be addressed); (4) `crates/atlas-projector/src/backend/{mod.rs,in_memory.rs,arcadedb.rs}` (trait surface + stub to fill). Then W17c (Docker-Compose CI + integration tests + benchmark capture) → W18 Mem0g cache → W19 v2.0.0-beta.1 ship. Counsel-Engagement-Kickoff parallel-track ongoing (Nelson-led).
+**Erstellt:** 2026-05-12. **V2-α-α.1 SHIPPED:** 2026-05-13 (8 Welles). **V2-β Phase 0–9.5 SHIPPED:** 2026-05-13 (18 PRs merged: #67-#86). **V2-β Phase 10-cleanup + counsel-enablement SHIPPED:** 2026-05-14 (PR #87 docs/v2-beta/counsel-enablement at `36975af`, PR #88 feat/v2-beta/welle-17a-cleanup at `44c5102`). **W17b WIP at breakpoint:** 2026-05-14 — branch `feat/v2-beta/welle-17b-arcadedb-impl` pushed at commit `5382d3c` (subagent stopped clippy-clean, ~2035 LOC across 3 sub-module files + cross-backend test; PR NOT yet opened — see §0-NOW). **Status:** v2.0.0-alpha.2 LIVE on master + GitHub + npm. Master HEAD `44c5102` after the W17a-cleanup (begin() lifetime `'static` + `check_workspace_id` + `check_value_depth_and_size` boundary helpers + `ProjectorError::InvalidWorkspaceId` variant + ADR-Atlas-011 §4.3 amendment). The `graph_state_hash` byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduced through trait surface unchanged. Counsel-engagement scope-doc landed (`.handoff/v2-counsel-engagement-scope.md`, 269 lines, RFP-ready for Nelson to send). **Was als nächstes:** review the W17b WIP branch + parent-led parallel reviewer dispatch + admin-merge → Phase 10.5 consolidation PR → W17c (Docker-Compose CI + integration tests + benchmark capture) → W18 Mem0g cache → W19 v2.0.0-beta.1 ship. Counsel-Engagement-Kickoff parallel-track started (Nelson reviews scope-doc + selects lead firm + sends outreach — engagement-letter signature starts 6-8-week clock for the GDPR Art. 4(1) hash-as-PII opinion that is now non-reversible-without-migration-pain).
+
+---
+
+## 0-NOW. 2026-05-14 Docker-Restart Breakpoint — Resume Guide
+
+> **Read this section first when resuming after Nelson's computer restart on 2026-05-14.** Brings you from cold context to actionable next step in <5 min.
+
+### Where Atlas is right now
+
+**Master HEAD: `44c5102`** (W17a-cleanup PR #88 merge commit). Master is clean, all CI required-checks green.
+
+**Today's merges (2026-05-14, both squash-merged via `gh pr merge --admin --squash --delete-branch`):**
+- **PR #87** (`36975af`) — `docs(v2-beta/counsel-enablement): RFP-ready counsel scope + README Art. 12 verbatim fix + pin-file sync`. Ships `.handoff/v2-counsel-engagement-scope.md` (269 lines, RFP-ready, 7 SOWs + 7-firm matrix + DE+EN outreach templates + engagement-letter checklist + verbatim Q-3-1..Q-3-4 from `v2-master-vision-v1.md` §12.1 + parallel-supervisor-engagement note). README.md:28 verbatim Art. 12 fix per DECISION-COMPLIANCE-2. `docs/COMPLIANCE-MAPPING.md` counsel-pending disclaimer header. `tools/expected-master-ruleset.json` synced to live Ruleset state (atlas-web-playwright added as 2nd required-check; no security drift — live was already stricter than pinned).
+- **PR #88** (`44c5102`) — `feat(v2-beta/welle-17a-cleanup): trait-surface hardening + boundary helpers ahead of W17b`. Resolves 3 of 4 W17a carry-over MEDIUMs at the trait surface (ADR-Atlas-011 §4.3 sub-decisions #10/#11/#12): `begin()` lifetime `'_` → `'static` (SemVer-additive widening at 18 existing call sites — code-reviewer-corrected count); `pub fn check_workspace_id(s)` boundary helper (rules: non-empty + len≤128 + ASCII + no `/`,`\`,NUL,`\r`,`\n` — CRLF deny added in-commit per parallel security-reviewer MED to close log-injection surface); `pub fn check_value_depth_and_size(v, max_depth, max_bytes)` boundary helper. NEW `ProjectorError::InvalidWorkspaceId { reason: String }` variant (`#[non_exhaustive]` enum addition — SemVer-additive). ADR-Atlas-011 amended with §4.3 + public-API-surface delta + new §9 decision-log row. 19 trait-conformance tests green (8 original + 9 new + 1 CRLF + 1 byte-pin); byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduced unchanged. W17a plan-doc §"Status update (2026-05-14)" block confirms #2/#3/#4 RESOLVED at trait surface (W17b consumes helpers at call-sites; #5 V2-γ-deferred).
+
+**W17b WIP at breakpoint (2026-05-14 ~11:16):** branch `feat/v2-beta/welle-17b-arcadedb-impl` exists on origin at SSH-signed commit `5382d3c2ff297e87af00425a6dd3ff14ea1e0494`. NO PR opened yet. Subagent stopped voluntarily at clippy-clean state (zero warnings, 18/18 trait-conformance green) BEFORE plan-doc finalisation and BEFORE parent-led reviewer dispatch — to give Nelson a clean Docker-restart breakpoint.
+
+**What W17b WIP contains:**
+- `crates/atlas-projector/src/backend/arcadedb/{mod.rs, client.rs, cypher.rs}` (NEW sub-module split — replaces W17a stub `arcadedb.rs` single file). 2035 LOC total: `mod.rs` (686) = backend + txn impl + error mapping; `client.rs` (418) = reqwest wrapper + Basic auth + timeouts + JSON parse helpers (calls `check_value_depth_and_size`); `cypher.rs` (674) = parameterised query builders (vertex/edge upsert MERGE templates; sorted-read MATCH templates per §4.9 adapter).
+- `crates/atlas-projector/Cargo.toml` (+27 LOC) — adds `reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }`.
+- `crates/atlas-projector/tests/cross_backend_byte_determinism.rs` (NEW, 257 LOC) — `#[ignore]`-gated test (runs only with `ATLAS_ARCADEDB_URL` env var set; W17c wires Docker-Compose CI). Same 3-node + 2-edge fixture as `byte_pin_through_in_memory_backend`; asserts byte-identical canonical-state hex through both backends.
+- `crates/atlas-projector/tests/backend_trait_conformance.rs` — DROPS the `should_panic` stub tests (no longer applicable).
+- `crates/atlas-projector/src/lib.rs` — re-export path update for sub-module.
+- `Cargo.lock` (+3 LOC) — reqwest transitive deps auto-resolved.
+- `.handoff/v2-beta-welle-17b-plan.md` (114 lines) — full plan-doc with "What was DONE / What is NOT YET DONE / Resume-from-breakpoint guide" sections.
+
+**W17b WIP verification state (verified on parent worktree post-stop, before push):**
+- `cargo check -p atlas-projector` → clean
+- `cargo test -p atlas-projector --test backend_trait_conformance` → 18/18 green (post-WIP, after dropping stub-panic tests + adding cross-backend test)
+- Subagent self-reported zero clippy warnings on the new arcadedb code
+
+### What to do NEXT session (entry-point)
+
+```bash
+cd /c/Users/nelso/Desktop/atlas
+git fetch origin                              # see breakpoint branch
+git status                                    # should be clean on master
+git log --oneline -3                          # expect:
+#   <Phase 10 breakpoint handoff PR merge sha>
+#   44c5102 feat(v2-beta/welle-17a-cleanup): ...  (PR #88)
+#   36975af docs(v2-beta/counsel-enablement): ... (PR #87)
+
+# Verify W17b WIP branch is on origin
+git ls-remote origin feat/v2-beta/welle-17b-arcadedb-impl
+# expect: 5382d3c2ff297e87af00425a6dd3ff14ea1e0494
+
+# Check out the W17b WIP for review
+git checkout feat/v2-beta/welle-17b-arcadedb-impl
+
+# Verify clippy-clean still holds
+/c/Users/nelso/.cargo/bin/cargo.exe check -p atlas-projector
+/c/Users/nelso/.cargo/bin/cargo.exe test -p atlas-projector --test backend_trait_conformance --quiet
+# expect: 18/18 green; no warnings
+```
+
+**Then execute Phase 2 of the [now-completed] sprightly-yawning-pelican plan:**
+
+1. **Open draft PR #89** (if not already opened) for W17b WIP — base=master, head=`feat/v2-beta/welle-17b-arcadedb-impl`. PR body should reference `.handoff/v2-beta-welle-17b-plan.md` "Resume-from-breakpoint guide" + acceptance criteria + the carry-over MEDIUM resolution status.
+
+2. **Parent-led parallel reviewer dispatch** per Atlas Standing Protocol lesson #8 (single message, 2 Agent calls):
+   - `code-reviewer` agent: focus areas in `.handoff/v2-beta-welle-17b-plan.md` §"Reviewer focus suggestions" (lifetime correctness, Cypher template parameterisation, error-path mapping, `check_workspace_id` placement first-in-`begin()`, `check_value_depth_and_size` at every HTTP-response → BTreeMap boundary).
+   - `security-reviewer` agent: credential redaction (grep for `password`/`token`/`auth` echo in error strings), tenant isolation, Cypher-injection paths (parameter binding correctness), panic-path audit, Basic-auth credentials never logged.
+
+3. **Fix CRITICAL/HIGH/applicable-MEDIUMs in-commit** per reviewer dispatch outcome. Atlas Standing Protocol: parallel review → fix in-commit → single SSH-signed commit (or commit-series squashed cleanly).
+
+4. **Admin-merge PR #89** via `gh pr merge --squash --admin --delete-branch`. CI gates: `verify-trust-root-modifying-commits` + `atlas-web-playwright` (the latter requires `.handoff/**` change in the PR to trigger via path filter — the plan-doc covers that).
+
+5. **Phase 10.5 consolidation PR (parent-led, separate)** post-W17b-merge: updates `.handoff/v2-session-handoff.md` (refresh §0-NOW → §0z2 V2-β-Phase-10-SHIPPED narrative; mark 4 of 4 W17a carry-over MEDIUMs handled), `CHANGELOG.md` `[Unreleased]`, `docs/V2-MASTER-PLAN.md` §6 Welle-17 status row, `.handoff/decisions.md` Welle-17 closure rows, `docs/V2-BETA-ORCHESTRATION-PLAN.md` Welle-17 status flip.
+
+### Important context for the resume
+
+**Today's worktree-isolation incidents (Atlas handoff lesson #1 recurring):**
+- The Phase 1c subagent (counsel-enablement docs) violated worktree-isolation: instead of writing in its agent-worktree, it checked-out `docs/v2-beta/counsel-enablement` in the PARENT worktree AND ran `git checkout -- crates/` against the parent worktree's in-progress Phase-1b engineering edits ("treated as unrelated parallel-agent modifications"). Parent had to redo all Phase-1b edits.
+- Mitigation for W17b dispatch: the dispatch prompt for the W17b subagent included extra-stringent pre-flight enforcement (3 mandatory git commands as first 3 actions; verify origin/master HEAD `44c5102` matches; explicit prohibition of `git checkout -- crates/` or `git reset --hard` on parent-worktree-files). The W17b subagent honoured isolation correctly this time (its commits stayed on its agent-worktree branch).
+
+**Today's merge-gate experience:**
+- Atlas Ruleset 15986324 has `strict_required_status_checks_policy: true` + 2 required checks: `Verify trust-root-modifying commits` (always triggers on PRs) + `atlas-web-playwright` (path-filter excludes pure `crates/atlas-projector/` PRs).
+- Workaround for crates-only PRs: add a `.handoff/**` file touch (e.g. updating the W17a plan-doc with a status note) — that path is in the workflow's path-filter (per V1.19 Welle 12 fix, allowing doc-only PRs to satisfy the required check).
+- `gh pr update-branch` produces a github-bot-signed merge commit that fails `verify-trust-root-modifying-commits` (the bot key is not in `.github/allowed_signers`). Fix per Atlas handoff §0z lesson #7: rebase locally onto fresh master (preserves SSH-signed commits), `git push --force-with-lease`.
+
+**Outstanding Nelson-actions (not agent-dispatchable):**
+1. **`RULESET_VERIFY_TOKEN` PAT configuration** per `docs/OPERATOR-RUNBOOK.md` §16 — fine-grained PAT with "Repository administration: read" scope, set as repo secret. Without it, `verify-branch-protection.yml` keeps firing red (exit 2: "PAT scope insufficient — live Ruleset response missing 'bypass_actors' field"). Does NOT block merges; just means the meta-verifier-of-ruleset-state can't see the `bypass_actors` field to confirm `[]`.
+2. **Counsel-engagement outreach kickoff** with `.handoff/v2-counsel-engagement-scope.md` as RFP basis. Select lead firm from 7-firm matrix (Hogan Lovells Frankfurt / Bird & Bird Munich / Hengeler Mueller / Matheson / William Fry / Cleary Gottlieb Paris / Taylor Wessing) — or several in parallel for comparative quotes. DE template for German firms, EN template for IE/FR/UK. Engagement-letter signature starts 6-8-week clock for GDPR Art. 4(1) hash-as-PII Path-B opinion (now non-reversible-without-migration-pain since V2-α schema is committed).
 
 ---
 
