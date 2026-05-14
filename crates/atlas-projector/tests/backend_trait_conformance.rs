@@ -20,8 +20,8 @@
 use std::collections::BTreeMap;
 
 use atlas_projector::{
-    ArcadeDbBackend, BackendEdge, BackendVertex, GraphStateBackend, InMemoryBackend, UpsertResult,
-    WorkspaceId,
+    check_value_depth_and_size, check_workspace_id, ArcadeDbBackend, BackendEdge, BackendVertex,
+    GraphStateBackend, InMemoryBackend, ProjectorError, UpsertResult, WorkspaceId, WorkspaceTxn,
 };
 
 fn ws() -> WorkspaceId {
@@ -312,4 +312,164 @@ fn rollback_does_not_pollute_canonical_state() {
 
     let h2 = b.canonical_state(&ws()).unwrap();
     assert_eq!(h1, h2, "rollback must leave workspace state unchanged");
+}
+
+// ---------------------------------------------------------------------
+// W17a-cleanup tests: boundary-validation helpers + 'static lifetime
+// (ADR-Atlas-011 §4 sub-decisions #10 + #11).
+// ---------------------------------------------------------------------
+
+#[test]
+fn check_workspace_id_accepts_typical_shapes() {
+    // ULID-shape, UUID-shape, opaque slug — all OK.
+    assert!(check_workspace_id("01J5M9V8K9X7T2QH4Z6A1P3R5W").is_ok());
+    assert!(check_workspace_id("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    assert!(check_workspace_id("acme-corp-prod-eu-west-1").is_ok());
+    // 128-char boundary (length == 128 is allowed)
+    let max = "a".repeat(128);
+    assert!(check_workspace_id(&max).is_ok());
+}
+
+#[test]
+fn check_workspace_id_rejects_empty() {
+    match check_workspace_id("") {
+        Err(ProjectorError::InvalidWorkspaceId { reason }) => {
+            assert!(reason.contains("empty"), "reason was {reason:?}");
+        }
+        other => panic!("expected InvalidWorkspaceId(empty); got {other:?}"),
+    }
+}
+
+#[test]
+fn check_workspace_id_rejects_too_long() {
+    let too_long = "x".repeat(129);
+    match check_workspace_id(&too_long) {
+        Err(ProjectorError::InvalidWorkspaceId { reason }) => {
+            assert!(
+                reason.contains("129") && reason.contains("128"),
+                "reason was {reason:?}"
+            );
+        }
+        other => panic!("expected InvalidWorkspaceId(length); got {other:?}"),
+    }
+}
+
+#[test]
+fn check_workspace_id_rejects_path_traversal_chars() {
+    for forbidden in ["../etc/passwd", "ws/sub", "ws\\sub", "ws\0null"] {
+        match check_workspace_id(forbidden) {
+            Err(ProjectorError::InvalidWorkspaceId { reason }) => {
+                assert!(
+                    reason.contains("forbidden character"),
+                    "input {forbidden:?}, reason was {reason:?}"
+                );
+            }
+            other => panic!(
+                "expected InvalidWorkspaceId(forbidden char) for {forbidden:?}; got {other:?}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn check_workspace_id_rejects_crlf_log_injection() {
+    // Security-reviewer MED on this PR (2026-05-14): `\r` and `\n` are
+    // ASCII bytes < 128 long and would have passed the earlier rule
+    // set, letting `legit\nFAKE_LOG_LINE` forge a log line when the
+    // workspace_id is echoed by tracing/slog. In-commit fix added
+    // both bytes to the deny-list. This test pins the fix.
+    for forbidden in ["legit\nFAKE_LOG_LINE", "ws\rrid", "wks\r\n"] {
+        match check_workspace_id(forbidden) {
+            Err(ProjectorError::InvalidWorkspaceId { reason }) => {
+                assert!(
+                    reason.contains("forbidden character"),
+                    "input {forbidden:?}, reason was {reason:?}"
+                );
+            }
+            other => panic!(
+                "expected InvalidWorkspaceId(forbidden char) for {forbidden:?}; got {other:?}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn check_workspace_id_rejects_non_ascii() {
+    match check_workspace_id("workspace-überprüfung") {
+        Err(ProjectorError::InvalidWorkspaceId { reason }) => {
+            assert!(reason.contains("ASCII"), "reason was {reason:?}");
+        }
+        other => panic!("expected InvalidWorkspaceId(ASCII); got {other:?}"),
+    }
+}
+
+#[test]
+fn check_value_depth_and_size_accepts_typical_payload() {
+    // Mimics a realistic property payload — 2 levels of nesting, ~100 bytes.
+    let v = serde_json::json!({
+        "name": "alice",
+        "tags": ["sensitive", "audit"],
+        "meta": { "source": "ingest", "rev": 3 }
+    });
+    assert!(check_value_depth_and_size(&v, 32, 64 * 1024).is_ok());
+}
+
+#[test]
+fn check_value_depth_and_size_rejects_deep_nesting() {
+    // Build a deeply-nested array: [[[...]]] 50 levels deep.
+    let mut v = serde_json::Value::Null;
+    for _ in 0..50 {
+        v = serde_json::Value::Array(vec![v]);
+    }
+    match check_value_depth_and_size(&v, 32, 64 * 1024) {
+        Err(ProjectorError::CanonicalisationFailed(msg)) => {
+            assert!(msg.contains("depth"), "msg was {msg:?}");
+        }
+        other => panic!("expected CanonicalisationFailed(depth); got {other:?}"),
+    }
+}
+
+#[test]
+fn check_value_depth_and_size_rejects_oversized() {
+    // Build a long string property — easily exceeds 1 KiB max_bytes.
+    let big = "x".repeat(4096);
+    let v = serde_json::json!({ "blob": big });
+    match check_value_depth_and_size(&v, 32, 1024) {
+        Err(ProjectorError::CanonicalisationFailed(msg)) => {
+            assert!(
+                msg.contains("size") && msg.contains("exceeds"),
+                "msg was {msg:?}"
+            );
+        }
+        other => panic!("expected CanonicalisationFailed(size); got {other:?}"),
+    }
+}
+
+#[test]
+fn begin_returns_static_txn_handle() {
+    // W17a-cleanup sub-decision #10: the trait's `begin()` returns
+    // `Box<dyn WorkspaceTxn + 'static>`. We verify both at the type
+    // level (the explicit `let _: Box<...>` binding below would fail
+    // to compile if the lifetime regressed) and at runtime (the txn
+    // is usable, commitable, and outlives the natural-lifetime scope
+    // it was created in).
+    let b = InMemoryBackend::new();
+    let mut txn: Box<dyn WorkspaceTxn + 'static> = b.begin(&ws()).unwrap();
+    let r = txn
+        .upsert_vertex(&make_vertex(
+            "node-static",
+            &["L"],
+            "ev1",
+            Some(7),
+            None,
+            BTreeMap::new(),
+        ))
+        .unwrap();
+    assert!(r.created);
+    txn.commit().unwrap();
+
+    // Re-open + read back — confirms the commit took.
+    let vs = b.vertices_sorted(&ws()).unwrap();
+    assert_eq!(vs.len(), 1);
+    assert_eq!(vs[0].entity_uuid, "node-static");
 }

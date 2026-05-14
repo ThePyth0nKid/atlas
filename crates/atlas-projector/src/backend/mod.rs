@@ -93,10 +93,51 @@
 //! Backends MAY override `canonical_state()` for performance but MUST
 //! produce byte-identical output. W17b cross-backend test
 //! (`tests/cross_backend_byte_determinism.rs`, deferred) will pin this.
+//!
+//! ## W17a-cleanup decisions (sub-decisions #10 + #11 in ADR-Atlas-011)
+//!
+//! The W17a plan-doc flagged four reviewer carry-over MEDIUMs for
+//! resolution before W17b's first method body lands. Three of them
+//! touch the trait surface and are resolved structurally here so
+//! W17b's subagent is a pure fill-in-the-blanks job:
+//!
+//! 1. **`begin()` lifetime `'static`** (ADR-011 §4 sub-decision #10).
+//!    The original signature `Box<dyn WorkspaceTxn + '_>` tied
+//!    transaction lifetime to `&self`. Neither the in-memory impl
+//!    (txn holds `Arc::clone(&self.workspaces)`) nor the planned
+//!    ArcadeDb impl (txn will hold an owned `reqwest::Client` + an
+//!    owned `arcadedb-session-id` String) actually borrows from
+//!    `&self`. The artificially-conservative `'_` is replaced with
+//!    `'static` before any W17b body lands so the trait does NOT
+//!    SemVer-break mid-W17b. The lifetime-widening is
+//!    SemVer-additive at every existing call site — the type
+//!    checker accepts `'_` → `'static` automatically.
+//!
+//! 2. **`check_workspace_id` boundary helper** (ADR-011 §4
+//!    sub-decision #11). W17a plan-doc MEDIUM #3 noted that
+//!    `WorkspaceId = String` reaches ArcadeDb's HTTP `/api/v1/begin/{db}`
+//!    URL path segment + Cypher-parameter binding unfiltered. W17a
+//!    keeps the `WorkspaceId = String` alias (full NewType migration
+//!    deferred — every existing call-site cast is touched, and the
+//!    refactor blast-radius is V2-γ scope) but adds a validation
+//!    helper. W17b's `ArcadeDbBackend::begin()` MUST call it before
+//!    constructing the HTTP request.
+//!
+//! 3. **`check_value_depth_and_size` helper** for backend-boundary
+//!    `serde_json::Value` defence (companion to sub-decision #11).
+//!    W17a plan-doc MEDIUM #2 noted that ArcadeDb HTTP responses
+//!    deserialised into `Vertex::properties` / `Edge::properties`
+//!    bypass V2-α's `canonical.rs` size + depth caps. Helper is
+//!    defined here so W17b's HTTP-response parser calls it after
+//!    `serde_json::from_slice` and before `Vertex::new` / `Edge::new`.
+//!
+//! W17a plan-doc MEDIUM #5 (`MalformedEntityUuid` umbrella variant
+//! for edges) is V2-γ-deferred as documented in the plan-doc; broader
+//! error-enum refactor is out of W17a-cleanup scope.
 
 use std::collections::BTreeMap;
 
-use crate::error::ProjectorResult;
+use crate::error::{ProjectorError, ProjectorResult};
 use crate::state::{GraphEdge, GraphNode, GraphState};
 
 pub mod arcadedb;
@@ -117,7 +158,152 @@ pub type EdgeId = String;
 
 /// Workspace identifier — opaque caller-domain string (ULID, UUID,
 /// per-tenant slug; format not constrained by this layer).
+///
+/// W17a-cleanup note: kept as a `String` alias rather than promoted
+/// to a `NewType` to avoid touching every existing call-site at the
+/// W17a/W17b boundary (full NewType refactor is V2-γ scope per the
+/// W17a plan-doc deferral). Validation for backend-boundary safety
+/// (W17b's ArcadeDb HTTP path-segment + Cypher-parameter binding)
+/// lives in [`check_workspace_id`] and is OPTIONAL for callers that
+/// already trust their input (e.g. `InMemoryBackend` does not call
+/// it; W17b's `ArcadeDbBackend::begin()` MUST).
 pub type WorkspaceId = String;
+
+/// Validate a [`WorkspaceId`] for safe propagation to backend
+/// boundaries — ArcadeDB HTTP API URL path + Cypher parameter
+/// binding + log redaction.
+///
+/// W17a-cleanup helper (ADR-Atlas-011 §4 sub-decision #11). W17b's
+/// `ArcadeDbBackend::begin()` MUST call this before constructing the
+/// HTTP `/api/v1/begin/{db}` request — empty, path-traversal-like,
+/// non-ASCII, or adversarially-long inputs would otherwise reach the
+/// URL path segment unfiltered.
+///
+/// [`in_memory::InMemoryBackend`] does NOT call this at runtime
+/// (HashMap key safety + no external-facing surface); the helper is
+/// available for optional defensive use by any backend impl. The
+/// rule set is intentionally permissive of any caller-domain
+/// identifier shape (ULID, UUID, opaque per-tenant slug) — only
+/// structurally-dangerous characters are rejected.
+///
+/// # Rules
+///
+/// - non-empty
+/// - length ≤ 128 bytes (ArcadeDB database-name practical limit;
+///   well below any HTTP URL-segment cap)
+/// - ASCII-only (Cypher parameter + URL path encoding predictability)
+/// - no `/`, `\`, NUL, `\r`, or `\n` byte (Path/URL/header safety +
+///   log-injection defence — CRLF in a workspace_id reaching
+///   `tracing` / `slog` output would let an attacker forge log
+///   lines; security-reviewer MED on this PR, fix applied in-commit)
+///
+/// # Errors
+///
+/// Returns [`ProjectorError::InvalidWorkspaceId`] with a human-
+/// readable `reason` on the first rule violation; callers should
+/// treat it as a 4xx-equivalent input error, not a 5xx.
+pub fn check_workspace_id(s: &str) -> ProjectorResult<()> {
+    if s.is_empty() {
+        return Err(ProjectorError::InvalidWorkspaceId {
+            reason: "empty".to_string(),
+        });
+    }
+    if s.len() > 128 {
+        return Err(ProjectorError::InvalidWorkspaceId {
+            reason: format!("length {} exceeds 128", s.len()),
+        });
+    }
+    if !s.is_ascii() {
+        return Err(ProjectorError::InvalidWorkspaceId {
+            reason: "must be ASCII".to_string(),
+        });
+    }
+    for ch in s.chars() {
+        // `\r` + `\n` closes the log-injection surface
+        // (security-reviewer MED, 2026-05-14): a workspace_id like
+        // `legit\nFAKE_LOG_LINE` would otherwise pass validation and
+        // forge log lines when echoed by tracing/slog. `reqwest`'s
+        // header-value validation rejects `\r` + `\n` independently
+        // for the HTTP-header path; this check ALSO closes the
+        // log-output path.
+        if ch == '/' || ch == '\\' || ch == '\0' || ch == '\r' || ch == '\n' {
+            return Err(ProjectorError::InvalidWorkspaceId {
+                reason: format!("contains forbidden character {ch:?}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validate a [`serde_json::Value`] depth + serialised-size for safe
+/// propagation through [`Vertex::properties`] / [`Edge::properties`].
+///
+/// W17a-cleanup helper. W17b's HTTP-response parser MUST call this
+/// after `serde_json::from_slice` on ArcadeDB Cypher results, BEFORE
+/// passing the parsed Value into [`Vertex::new`] / [`Edge::new`].
+/// Defends against deeply-nested or pathologically large server
+/// responses being accepted into the trait surface unchecked.
+///
+/// [`in_memory::InMemoryBackend`] does NOT need this — V2-α
+/// event-ingestion already bounds property shape at the
+/// `canonical.rs` boundary. The helper exists for backend-boundary
+/// defence at points further from canonicalisation (HTTP, FFI).
+///
+/// Caller picks `max_depth` + `max_bytes`; recommended defaults for
+/// W17b: `max_depth = 32`, `max_bytes = 64 * 1024`. Defaults are
+/// caller-policy because different backends sit at different
+/// trust-distances from the canonicaliser.
+///
+/// # Errors
+///
+/// Returns [`ProjectorError::CanonicalisationFailed`] when either
+/// limit is exceeded. The serialised-size check uses
+/// `serde_json::to_vec` (O(n) over the already-parsed Value, bounded
+/// by `max_bytes` — the caller has already paid the
+/// `serde_json::from_slice` cost at the HTTP boundary). The depth
+/// check uses an iterative walk (Vec-based stack, not Rust call
+/// stack) for defence-in-depth even though `serde_json`'s parser
+/// already caps recursion at 128.
+pub fn check_value_depth_and_size(
+    v: &serde_json::Value,
+    max_depth: usize,
+    max_bytes: usize,
+) -> ProjectorResult<()> {
+    let serialised = serde_json::to_vec(v).map_err(|e| {
+        ProjectorError::CanonicalisationFailed(format!(
+            "serde_json::Value size check failed during validation: {e}"
+        ))
+    })?;
+    if serialised.len() > max_bytes {
+        return Err(ProjectorError::CanonicalisationFailed(format!(
+            "serde_json::Value serialised size {} exceeds max {}",
+            serialised.len(),
+            max_bytes
+        )));
+    }
+    let mut stack: Vec<(&serde_json::Value, usize)> = vec![(v, 1)];
+    while let Some((node, depth)) = stack.pop() {
+        if depth > max_depth {
+            return Err(ProjectorError::CanonicalisationFailed(format!(
+                "serde_json::Value depth {depth} exceeds max {max_depth}"
+            )));
+        }
+        match node {
+            serde_json::Value::Object(map) => {
+                for child in map.values() {
+                    stack.push((child, depth + 1));
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for child in arr {
+                    stack.push((child, depth + 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
 
 /// A graph vertex as seen by a backend.
 ///
@@ -351,7 +537,25 @@ pub trait GraphStateBackend: Send + Sync {
     /// Implementations MAY lazily create the underlying workspace
     /// container (e.g. ArcadeDb creates a database on first
     /// transaction for an unseen workspace).
-    fn begin(&self, workspace_id: &WorkspaceId) -> ProjectorResult<Box<dyn WorkspaceTxn + '_>>;
+    ///
+    /// **Lifetime (W17a-cleanup):** the returned `Box<dyn WorkspaceTxn>`
+    /// is `'static`. Implementations MUST produce a transaction
+    /// handle that does NOT borrow from `&self` — the in-memory
+    /// impl carries an `Arc::clone` of the backend's shared storage;
+    /// the ArcadeDb impl (W17b) will carry an owned `reqwest::Client`
+    /// + an owned `arcadedb-session-id` String. The `'static` bound
+    /// is structurally honoured by both. Resolution of W17a plan-doc
+    /// MEDIUM #4 + ADR-Atlas-011 §4 sub-decision #10.
+    ///
+    /// **`WorkspaceId` validation:** [`check_workspace_id`] is
+    /// available for impls that need defensive validation at the
+    /// `&self.begin(...)` boundary (W17b's `ArcadeDbBackend::begin()`
+    /// MUST call it before constructing the HTTP request). The
+    /// in-memory impl does not call it (HashMap-key safety).
+    fn begin(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> ProjectorResult<Box<dyn WorkspaceTxn + 'static>>;
 
     /// Read all vertices for a workspace, sorted by `entity_uuid`
     /// (logical identifier). MUST be sorted for byte-determinism

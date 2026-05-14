@@ -40,6 +40,23 @@ pub enum ProjectorError {
     #[error("malformed entity_uuid: {0}")]
     MalformedEntityUuid(String),
 
+    /// W17a-cleanup (sub-decision #11 in ADR-Atlas-011): a
+    /// `WorkspaceId` failed boundary validation via
+    /// [`crate::backend::check_workspace_id`]. W17b's
+    /// `ArcadeDbBackend::begin()` MUST call the helper before
+    /// constructing the HTTP `/api/v1/begin/{db}` request — empty,
+    /// path-traversal-like, non-ASCII, or adversarially-long
+    /// `workspace_id` values would otherwise reach the URL path
+    /// segment or Cypher-parameter binding unfiltered.
+    ///
+    /// Rules: non-empty, ASCII-only, length ≤ 128, no `/`, `\`, NUL.
+    #[error("invalid workspace_id: {reason}")]
+    InvalidWorkspaceId {
+        /// human-readable reason (e.g. "empty", "length 200 exceeds 128",
+        /// "contains forbidden character '/'")
+        reason: String,
+    },
+
     /// Two graph nodes shared the same `entity_uuid`. Either an
     /// honest issuer bug (multiple events claiming the same logical
     /// entity identity) or a projection-replay corruption signal.
