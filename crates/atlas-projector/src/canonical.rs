@@ -73,7 +73,10 @@ use ciborium::Value;
 use std::collections::BTreeMap;
 
 use crate::error::{ProjectorError, ProjectorResult};
-use crate::state::{AnchorEntry, AnnotationEntry, GraphEdge, GraphNode, GraphState, PolicyEntry};
+use crate::state::{
+    AnchorEntry, AnnotationEntry, EmbeddingErasureEntry, GraphEdge, GraphNode, GraphState,
+    PolicyEntry,
+};
 use crate::PROJECTOR_SCHEMA_VERSION;
 
 /// Hard cap on items per array/map level. Bounds allocation under
@@ -125,6 +128,14 @@ pub fn build_canonical_bytes(state: &GraphState) -> ProjectorResult<Vec<u8>> {
         )));
     }
 
+    if state.embedding_erasures.len() > MAX_ITEMS_PER_LEVEL {
+        return Err(ProjectorError::CanonicalisationFailed(format!(
+            "embedding_erasures count exceeds max ({} > {})",
+            state.embedding_erasures.len(),
+            MAX_ITEMS_PER_LEVEL
+        )));
+    }
+
     let nodes_cbor: Vec<Value> = state
         .nodes
         .values()
@@ -163,6 +174,29 @@ pub fn build_canonical_bytes(state: &GraphState) -> ProjectorResult<Vec<u8>> {
         entries.push((
             Value::Text("rekor_anchors".into()),
             Value::Map(sorted_anchors),
+        ));
+    }
+
+    // V2-β Welle 18b schema-additive: `embedding_erasures` is omitted
+    // from canonical bytes when empty, mirroring the V1 backward-compat
+    // pattern used for `author_did = None` AND the W14 `rekor_anchors`
+    // pattern. This preserves byte-determinism for V1 / V2-α / V2-β-
+    // pre-W18b shape traces — `graph_state_hash` for a state with no
+    // erasures is byte-identical to pre-W18b output. Locks in the
+    // byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4`.
+    if !state.embedding_erasures.is_empty() {
+        let mut erasure_entries: Vec<(Value, Value)> =
+            Vec::with_capacity(state.embedding_erasures.len());
+        for (event_id, erasure) in &state.embedding_erasures {
+            erasure_entries.push((
+                Value::Text(event_id.clone()),
+                canonical_embedding_erasure_entry(erasure)?,
+            ));
+        }
+        let sorted_erasures = sort_cbor_map_entries(erasure_entries)?;
+        entries.push((
+            Value::Text("embedding_erasures".into()),
+            Value::Map(sorted_erasures),
         ));
     }
 
@@ -378,6 +412,50 @@ fn canonical_anchor_entry(entry: &AnchorEntry) -> ProjectorResult<Value> {
     if let Some(did) = &entry.author_did {
         atlas_trust_core::agent_did::validate_agent_did(did)
             .map_err(|e| ProjectorError::MalformedAuthorDid(format!("rekor anchor: {e}")))?;
+        entries.push((Value::Text("author_did".into()), Value::Text(did.clone())));
+    }
+    let sorted = sort_cbor_map_entries(entries)?;
+    Ok(Value::Map(sorted))
+}
+
+/// V2-β Welle 18b: canonical encoder for an `EmbeddingErasureEntry`.
+/// Map fields: `workspace_id`, `erased_at`, `reason_code`, plus
+/// optional `requestor_did` (omitted when `None`) and optional
+/// `author_did` (omitted when `None`; format-validated when `Some`).
+/// Entries sorted per RFC 8949 §4.2.1.
+///
+/// Note: this canonicalisation INCLUDES strings + timestamps only.
+/// Embedding floats live OUTSIDE the canonical pipeline (V2-α invariant
+/// #3 — no floats in canonical bytes); they live in LanceDB Arrow
+/// fragments addressed by `event_uuid`.
+fn canonical_embedding_erasure_entry(entry: &EmbeddingErasureEntry) -> ProjectorResult<Value> {
+    let mut entries: Vec<(Value, Value)> = vec![
+        (
+            Value::Text("workspace_id".into()),
+            Value::Text(entry.workspace_id.clone()),
+        ),
+        (
+            Value::Text("erased_at".into()),
+            Value::Text(entry.erased_at.clone()),
+        ),
+        (
+            Value::Text("reason_code".into()),
+            Value::Text(entry.reason_code.clone()),
+        ),
+    ];
+    if let Some(did) = &entry.requestor_did {
+        atlas_trust_core::agent_did::validate_agent_did(did).map_err(|e| {
+            ProjectorError::MalformedAuthorDid(format!("embedding erasure requestor_did: {e}"))
+        })?;
+        entries.push((
+            Value::Text("requestor_did".into()),
+            Value::Text(did.clone()),
+        ));
+    }
+    if let Some(did) = &entry.author_did {
+        atlas_trust_core::agent_did::validate_agent_did(did).map_err(|e| {
+            ProjectorError::MalformedAuthorDid(format!("embedding erasure author_did: {e}"))
+        })?;
         entries.push((Value::Text("author_did".into()), Value::Text(did.clone())));
     }
     let sorted = sort_cbor_map_entries(entries)?;
@@ -909,5 +987,78 @@ mod tests {
         // A length change without a hash change would indicate a hash-collision
         // (vanishingly improbable) or a bug in the test.
         assert_eq!(bytes.len(), 754, "canonical bytes length drift");
+    }
+
+    /// V2-β Welle 18b: empty `embedding_erasures` field MUST be omitted
+    /// from canonical bytes (preserves byte-pin for V1 / V2-α / V2-β-
+    /// pre-W18b shape traces). This guards the W18b schema-additive
+    /// promise that pre-W18b traces hash byte-identically to pre-W18b
+    /// output.
+    #[test]
+    fn embedding_erasures_omitted_when_empty() {
+        let mut state = GraphState::new();
+        state.upsert_node(GraphNode {
+            entity_uuid: "a".to_string(),
+            labels: vec!["L".to_string()],
+            properties: BTreeMap::new(),
+            event_uuid: "01HEV".to_string(),
+            rekor_log_index: 1,
+            author_did: None,
+            annotations: BTreeMap::new(),
+            policies: BTreeMap::new(),
+        });
+        let bytes_no_erasure = build_canonical_bytes(&state).unwrap();
+
+        // Mutating the empty embedding_erasures field MUST be a no-op
+        // on canonical bytes (assertion is structurally trivial — the
+        // field starts empty — but documents the contract).
+        let _empty: BTreeMap<String, EmbeddingErasureEntry> = state.embedding_erasures.clone();
+        assert!(state.embedding_erasures.is_empty());
+
+        // Bytes do NOT mention "embedding_erasures" when the map is empty.
+        let needle = "embedding_erasures".as_bytes();
+        assert!(
+            !bytes_no_erasure.windows(needle.len()).any(|w| w == needle),
+            "empty embedding_erasures map must NOT appear in canonical bytes"
+        );
+    }
+
+    /// V2-β Welle 18b: non-empty `embedding_erasures` enters canonical
+    /// bytes with sorted entries. Shape lock for the W18b GDPR audit
+    /// trail.
+    #[test]
+    fn embedding_erasures_canonicalises_when_present() {
+        let mut state = GraphState::new();
+        state.upsert_node(GraphNode {
+            entity_uuid: "a".to_string(),
+            labels: vec!["L".to_string()],
+            properties: BTreeMap::new(),
+            event_uuid: "01HEV".to_string(),
+            rekor_log_index: 1,
+            author_did: None,
+            annotations: BTreeMap::new(),
+            policies: BTreeMap::new(),
+        });
+        state.upsert_embedding_erasure(
+            "01HLAYER1EVENT".to_string(),
+            EmbeddingErasureEntry {
+                workspace_id: "ws-eu-tenant-a".to_string(),
+                erased_at: "2026-05-15T12:00:00Z".to_string(),
+                requestor_did: None,
+                reason_code: "gdpr_art_17".to_string(),
+                author_did: None,
+            },
+        );
+        let bytes = build_canonical_bytes(&state).unwrap();
+        let needle = "embedding_erasures".as_bytes();
+        assert!(
+            bytes.windows(needle.len()).any(|w| w == needle),
+            "non-empty embedding_erasures must appear in canonical bytes"
+        );
+        let evid_needle = "01HLAYER1EVENT".as_bytes();
+        assert!(
+            bytes.windows(evid_needle.len()).any(|w| w == evid_needle),
+            "erased event_id must appear in canonical bytes"
+        );
     }
 }

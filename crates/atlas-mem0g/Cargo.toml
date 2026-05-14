@@ -1,0 +1,83 @@
+[package]
+name = "atlas-mem0g"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "V2-β Layer-3 semantic cache for Atlas (Mem0g concept). LanceDB + fastembed-rs embedded vector cache with Atlas-controlled secure-delete wrapper. Apache-2.0."
+
+[lib]
+crate-type = ["rlib"]
+
+# ---------------------------------------------------------------------------
+# Feature flags (per ADR-Atlas-012 §4 sub-decision #7 — crate-boundary
+# isolation):
+#
+#   * `lancedb-backend` — production LanceDB + fastembed-rs implementation.
+#     Default-OFF in this Cargo.toml to keep workspace `cargo check`
+#     fast for contributors who are not touching Layer-3 (LanceDB +
+#     Arrow + DataFusion is a ~200-crate transitive dep tree).
+#     `.github/workflows/atlas-mem0g-smoke.yml` enables this feature
+#     for the always-on tests + B4/B5/B6 bench.
+#
+#   * `default` — empty; the trait surface + secure-delete primitive +
+#     `InvalidationPolicy` types compile without LanceDB. Trait
+#     consumers (atlas-projector dispatch arm; the W12 Read-API
+#     route) depend only on the type surface, NOT on a backend impl.
+#
+# This split was a W18b implementation deviation from the spike's
+# implicit "deps default-on" expectation. Rationale documented in
+# `.handoff/v2-beta-welle-18b-plan.md` Implementation Notes. Reversible
+# in a single Cargo.toml edit if the upstream dep tree proves stable
+# enough for default-on.
+# ---------------------------------------------------------------------------
+[features]
+default = []
+lancedb-backend = ["dep:lancedb", "dep:fastembed", "dep:arrow-array", "dep:arrow-schema", "dep:tokio", "dep:futures", "dep:reqwest"]
+
+[dependencies]
+# Always-on deps: trait surface + secure-delete primitive + types.
+# These are pulled in unconditionally so consumers (atlas-projector
+# dispatch + Read-API) can depend on atlas-mem0g without paying the
+# LanceDB compile cost.
+atlas-trust-core = { path = "../atlas-trust-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+anyhow = "1.0"
+
+# Optional deps (gated behind `lancedb-backend` feature). Pinned per
+# ADR-Atlas-012 §4 sub-decision #2 (exact-version pin for fastembed
+# pending W18b cross-platform determinism verification test).
+#
+#   * lancedb 0.29 — Apache-2.0 vector store. Pinned to 0.29 minor; W18b
+#     verifies _deletion_files semantics before any 0.30+ bump (V3 in
+#     spike §12).
+#   * fastembed =5.13.4 — EXACT-VERSION pin per ADR §4 sub-decision #2.
+#     Lifted only after cross-platform determinism verification test
+#     confirms minor-version stability of the deterministic path
+#     (ORT-version determinism is load-bearing under cache-key strategy).
+#   * arrow-array / arrow-schema — LanceDB columnar API surface; pinned
+#     to LanceDB's transitive Arrow version (58).
+#   * tokio / futures — LanceDB's API is async-first; sync trait methods
+#     wrap async LanceDB calls via `tokio::task::spawn_blocking`
+#     (spike §7 explicitly notes `Handle::current().block_on()`
+#     deadlocks under single-threaded scheduler).
+#   * reqwest — Atlas-controlled HTTP client for download-with-SHA-verification
+#     (sub-decision #2 supply-chain controls: Atlas wraps the model
+#     download in `download_model_with_verification()` to fail closed
+#     on SHA256 mismatch BEFORE handing the path to fastembed-rs).
+lancedb = { version = "0.29", optional = true }
+fastembed = { version = "=5.13.4", optional = true }
+arrow-array = { version = "58", optional = true }
+arrow-schema = { version = "58", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "macros"], optional = true }
+futures = { version = "0.3", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"], optional = true }
+
+[dev-dependencies]
+tempfile = "3"

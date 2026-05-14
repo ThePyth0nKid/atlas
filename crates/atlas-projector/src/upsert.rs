@@ -60,7 +60,10 @@ use atlas_trust_core::trace_format::AtlasEvent;
 use serde_json::Value;
 
 use crate::error::{ProjectorError, ProjectorResult};
-use crate::state::{AnchorEntry, AnnotationEntry, GraphEdge, GraphNode, GraphState, PolicyEntry};
+use crate::state::{
+    AnchorEntry, AnnotationEntry, EmbeddingErasureEntry, GraphEdge, GraphNode, GraphState,
+    PolicyEntry,
+};
 
 /// Apply a single Atlas event to the projection state.
 ///
@@ -105,6 +108,8 @@ pub fn apply_event_to_state(
         "annotation_add" => apply_annotation_add(event, state),
         "policy_set" => apply_policy_set(event, state),
         "anchor_created" => apply_anchor_created(event, state),
+        // V2-β Welle 18b: GDPR Art. 17 erasure parallel-audit-event.
+        "embedding_erased" => apply_embedding_erased(event, state),
         other => Err(ProjectorError::UnsupportedEventKind {
             kind: other.to_string(),
             event_id: event.event_id.clone(),
@@ -607,6 +612,151 @@ fn apply_anchor_created(event: &AtlasEvent, state: &mut GraphState) -> Projector
         author_did: event.author_did.clone(),
     };
     state.upsert_anchor(anchored_event_id, anchor);
+    Ok(())
+}
+
+/// V2-β Welle 18b: `embedding_erased` dispatch arm (per ADR-Atlas-012
+/// §4 sub-decision #5). GDPR Art. 17 parallel-audit-event for a
+/// Layer-3 cache erasure.
+///
+/// Payload shape:
+/// ```json
+/// {
+///   "type": "embedding_erased",
+///   "event_id": "<the Layer-1 event_uuid being erased>",
+///   "workspace_id": "<the workspace_id whose data was erased>",
+///   "erased_at": "<ISO-8601 timestamp>",
+///   "requestor_did": "<DID of the operator or data-subject — optional>",
+///   "reason_code": "gdpr_art_17"
+/// }
+/// ```
+///
+/// Required fields: `event_id`, `workspace_id`, `erased_at`.
+/// Optional: `requestor_did` (defaults to operator DID in
+/// `author_did` if omitted), `reason_code` (defaults to
+/// `"operator_purge"` if omitted).
+///
+/// **Security-conservative duplicate-refused policy:** erasing the
+/// same `event_id` twice surfaces
+/// [`ProjectorError::MissingPayloadField`] with a `field` value
+/// documenting the duplicate. The erasure record itself is
+/// append-only regulator evidence (per ADR §4 sub-decision #5) — a
+/// second `embedding_erased` for the same event would obscure the
+/// regulator-evidentiary trail. Erroring forces operator inspection
+/// rather than silently last-write-wins.
+///
+/// **Variant-naming semantic-mismatch note (security-reviewer
+/// MEDIUM-3, ADR §4 sub-decision #5):** the `MissingPayloadField`
+/// variant reuse here is an **idempotency-guard**, NOT a
+/// parse-failure. The error variant's literal name suggests the
+/// payload lacked a required field, but the actual semantic is
+/// "duplicate erasure refused for security". Future readers may
+/// misdiagnose the error type without this doc-comment. A dedicated
+/// `ProjectorError::DuplicateErasureRefused` variant is V2-γ-deferred
+/// (broader error-enum cleanup is W17b carry-over #5; W18b inherits
+/// the same V2-γ-deferred posture rather than introduce a one-off
+/// variant that destabilises `#[non_exhaustive]` enum discipline).
+/// See ADR-Atlas-012 §4 sub-decision #5 for the locked design
+/// rationale.
+///
+/// **Audit-event itself NEVER subject to secure-delete:** Layer-1
+/// records of erasure MUST persist for regulator traceability.
+/// Sub-decision #4's secure-delete operates on Layer-3 derived data
+/// only (LanceDB Arrow fragments + HNSW indices), not on the
+/// `embedding_erased` audit-event in `events.jsonl`.
+///
+/// **No floats in canonical bytes (V2-α invariant #3):** the
+/// embedding floats live OUTSIDE this canonicalisation pipeline —
+/// they live in LanceDB Arrow fragments addressed by `event_uuid`.
+/// This audit-event payload carries strings + timestamps only.
+fn apply_embedding_erased(event: &AtlasEvent, state: &mut GraphState) -> ProjectorResult<()> {
+    let payload_obj =
+        event
+            .payload
+            .as_object()
+            .ok_or_else(|| ProjectorError::MissingPayloadField {
+                event_id: event.event_id.clone(),
+                field: "payload (expected JSON object)".to_string(),
+            })?;
+
+    let erased_event_id = payload_obj
+        .get("event_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProjectorError::MissingPayloadField {
+            event_id: event.event_id.clone(),
+            field: "event_id".to_string(),
+        })?
+        .to_string();
+
+    if erased_event_id.is_empty() {
+        return Err(ProjectorError::MissingPayloadField {
+            event_id: event.event_id.clone(),
+            field: "event_id (empty string)".to_string(),
+        });
+    }
+
+    let workspace_id = payload_obj
+        .get("workspace_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProjectorError::MissingPayloadField {
+            event_id: event.event_id.clone(),
+            field: "workspace_id".to_string(),
+        })?
+        .to_string();
+
+    if workspace_id.is_empty() {
+        return Err(ProjectorError::MissingPayloadField {
+            event_id: event.event_id.clone(),
+            field: "workspace_id (empty string)".to_string(),
+        });
+    }
+
+    let erased_at = payload_obj
+        .get("erased_at")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ProjectorError::MissingPayloadField {
+            event_id: event.event_id.clone(),
+            field: "erased_at".to_string(),
+        })?
+        .to_string();
+
+    // Optional: requestor_did. Defaults to event.author_did at
+    // projection time per ADR §4 sub-decision #5 ("defaults to the
+    // operator DID at runtime — captured in the AtlasEvent's standard
+    // `author_did` if omitted from payload").
+    let requestor_did = payload_obj
+        .get("requestor_did")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| event.author_did.clone());
+
+    // Optional: reason_code. Defaults to `"operator_purge"` per ADR.
+    let reason_code = payload_obj
+        .get("reason_code")
+        .and_then(Value::as_str)
+        .unwrap_or("operator_purge")
+        .to_string();
+
+    // Security-conservative: refuse to re-erase.
+    // (Idempotency-guard via MissingPayloadField — see fn-level
+    // doc-comment "Variant-naming semantic-mismatch note".)
+    if state.embedding_erasures.contains_key(&erased_event_id) {
+        return Err(ProjectorError::MissingPayloadField {
+            event_id: event.event_id.clone(),
+            field: format!(
+                "event_id '{erased_event_id}' already has an erasure record (duplicate refused for security)"
+            ),
+        });
+    }
+
+    let erasure = EmbeddingErasureEntry {
+        workspace_id,
+        erased_at,
+        requestor_did,
+        reason_code,
+        author_did: event.author_did.clone(),
+    };
+    state.upsert_embedding_erasure(erased_event_id, erasure);
     Ok(())
 }
 
@@ -1486,5 +1636,225 @@ mod tests {
             crate::canonical::MAX_ITEMS_PER_LEVEL,
             "upsert-time cap must refuse the write, leaving Vec at exactly the cap"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // V2-β Welle 18b: embedding_erased dispatch arm tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn embedding_erased_records_erasure() {
+        let mut state = GraphState::new();
+        let event = make_event(
+            "01HERASE1",
+            json!({
+                "type": "embedding_erased",
+                "event_id": "01HLAYER1EVENT",
+                "workspace_id": "ws-eu-tenant-a",
+                "erased_at": "2026-05-15T12:00:00Z",
+                "reason_code": "gdpr_art_17"
+            }),
+            None,
+        );
+        apply_event_to_state(WS, &event, &mut state).unwrap();
+        assert!(state.embedding_erasures.contains_key("01HLAYER1EVENT"));
+        let entry = &state.embedding_erasures["01HLAYER1EVENT"];
+        assert_eq!(entry.workspace_id, "ws-eu-tenant-a");
+        assert_eq!(entry.erased_at, "2026-05-15T12:00:00Z");
+        assert_eq!(entry.reason_code, "gdpr_art_17");
+        assert!(entry.requestor_did.is_none());
+    }
+
+    #[test]
+    fn embedding_erased_for_same_event_twice_errors() {
+        // Append-only audit-event semantics: duplicate refused.
+        let mut state = GraphState::new();
+        let event1 = make_event(
+            "01HERASE1",
+            json!({
+                "type": "embedding_erased",
+                "event_id": "01HLAYER1EVENT",
+                "workspace_id": "ws-eu-tenant-a",
+                "erased_at": "2026-05-15T12:00:00Z",
+                "reason_code": "gdpr_art_17"
+            }),
+            None,
+        );
+        apply_event_to_state(WS, &event1, &mut state).unwrap();
+
+        let event2 = make_event(
+            "01HERASE2",
+            json!({
+                "type": "embedding_erased",
+                "event_id": "01HLAYER1EVENT", // same event!
+                "workspace_id": "ws-eu-tenant-a",
+                "erased_at": "2026-05-15T13:00:00Z",
+                "reason_code": "operator_purge"
+            }),
+            None,
+        );
+        match apply_event_to_state(WS, &event2, &mut state) {
+            Err(ProjectorError::MissingPayloadField { field, .. }) => {
+                assert!(
+                    field.contains("01HLAYER1EVENT") && field.contains("duplicate"),
+                    "field must surface duplicate-refused semantic; got {field}"
+                );
+            }
+            other => panic!("expected MissingPayloadField duplicate-refused; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_erased_missing_event_id_errors() {
+        let mut state = GraphState::new();
+        let event = make_event(
+            "01HERASE1",
+            json!({
+                "type": "embedding_erased",
+                "workspace_id": "ws-eu-tenant-a",
+                "erased_at": "2026-05-15T12:00:00Z"
+                // event_id missing
+            }),
+            None,
+        );
+        match apply_event_to_state(WS, &event, &mut state) {
+            Err(ProjectorError::MissingPayloadField { field, .. }) => {
+                assert_eq!(field, "event_id");
+            }
+            other => panic!("expected MissingPayloadField; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_erased_missing_workspace_id_errors() {
+        let mut state = GraphState::new();
+        let event = make_event(
+            "01HERASE1",
+            json!({
+                "type": "embedding_erased",
+                "event_id": "01HLAYER1EVENT",
+                "erased_at": "2026-05-15T12:00:00Z"
+                // workspace_id missing — EU-DPA-evidentiary completeness gap
+            }),
+            None,
+        );
+        match apply_event_to_state(WS, &event, &mut state) {
+            Err(ProjectorError::MissingPayloadField { field, .. }) => {
+                assert_eq!(field, "workspace_id");
+            }
+            other => panic!("expected MissingPayloadField; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_erased_missing_erased_at_errors() {
+        let mut state = GraphState::new();
+        let event = make_event(
+            "01HERASE1",
+            json!({
+                "type": "embedding_erased",
+                "event_id": "01HLAYER1EVENT",
+                "workspace_id": "ws-eu-tenant-a"
+                // erased_at missing
+            }),
+            None,
+        );
+        match apply_event_to_state(WS, &event, &mut state) {
+            Err(ProjectorError::MissingPayloadField { field, .. }) => {
+                assert_eq!(field, "erased_at");
+            }
+            other => panic!("expected MissingPayloadField; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_erased_empty_event_id_errors() {
+        let mut state = GraphState::new();
+        let event = make_event(
+            "01HERASE1",
+            json!({
+                "type": "embedding_erased",
+                "event_id": "",
+                "workspace_id": "ws-eu-tenant-a",
+                "erased_at": "2026-05-15T12:00:00Z"
+            }),
+            None,
+        );
+        match apply_event_to_state(WS, &event, &mut state) {
+            Err(ProjectorError::MissingPayloadField { field, .. }) => {
+                assert!(
+                    field.contains("event_id") && field.contains("empty"),
+                    "field must surface empty-string disambiguation; got {field}"
+                );
+            }
+            other => panic!("expected MissingPayloadField for empty event_id; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_erased_reason_code_defaults_to_operator_purge() {
+        let mut state = GraphState::new();
+        let event = make_event(
+            "01HERASE1",
+            json!({
+                "type": "embedding_erased",
+                "event_id": "01HLAYER1EVENT",
+                "workspace_id": "ws-eu-tenant-a",
+                "erased_at": "2026-05-15T12:00:00Z"
+                // reason_code omitted → defaults to "operator_purge"
+            }),
+            None,
+        );
+        apply_event_to_state(WS, &event, &mut state).unwrap();
+        assert_eq!(
+            state.embedding_erasures["01HLAYER1EVENT"].reason_code,
+            "operator_purge"
+        );
+    }
+
+    #[test]
+    fn embedding_erased_requestor_did_defaults_to_author_did() {
+        let did = "did:atlas:1111111111111111111111111111111111111111111111111111111111111111";
+        let mut state = GraphState::new();
+        let event = make_event(
+            "01HERASE1",
+            json!({
+                "type": "embedding_erased",
+                "event_id": "01HLAYER1EVENT",
+                "workspace_id": "ws-eu-tenant-a",
+                "erased_at": "2026-05-15T12:00:00Z"
+                // requestor_did omitted → defaults to event.author_did
+            }),
+            Some(did),
+        );
+        apply_event_to_state(WS, &event, &mut state).unwrap();
+        assert_eq!(
+            state.embedding_erasures["01HLAYER1EVENT"].requestor_did.as_deref(),
+            Some(did)
+        );
+    }
+
+    #[test]
+    fn embedding_erased_explicit_requestor_did_overrides_author() {
+        let author = "did:atlas:1111111111111111111111111111111111111111111111111111111111111111";
+        let requestor = "did:atlas:2222222222222222222222222222222222222222222222222222222222222222";
+        let mut state = GraphState::new();
+        let event = make_event(
+            "01HERASE1",
+            json!({
+                "type": "embedding_erased",
+                "event_id": "01HLAYER1EVENT",
+                "workspace_id": "ws-eu-tenant-a",
+                "erased_at": "2026-05-15T12:00:00Z",
+                "requestor_did": requestor,
+                "reason_code": "gdpr_art_17"
+            }),
+            Some(author),
+        );
+        apply_event_to_state(WS, &event, &mut state).unwrap();
+        let entry = &state.embedding_erasures["01HLAYER1EVENT"];
+        assert_eq!(entry.requestor_did.as_deref(), Some(requestor));
+        // author_did stays as-is on the entry too.
+        assert_eq!(entry.author_did.as_deref(), Some(author));
     }
 }
