@@ -372,6 +372,28 @@ fn check_workspace_id_rejects_path_traversal_chars() {
 }
 
 #[test]
+fn check_workspace_id_rejects_crlf_log_injection() {
+    // Security-reviewer MED on this PR (2026-05-14): `\r` and `\n` are
+    // ASCII bytes < 128 long and would have passed the earlier rule
+    // set, letting `legit\nFAKE_LOG_LINE` forge a log line when the
+    // workspace_id is echoed by tracing/slog. In-commit fix added
+    // both bytes to the deny-list. This test pins the fix.
+    for forbidden in ["legit\nFAKE_LOG_LINE", "ws\rrid", "wks\r\n"] {
+        match check_workspace_id(forbidden) {
+            Err(ProjectorError::InvalidWorkspaceId { reason }) => {
+                assert!(
+                    reason.contains("forbidden character"),
+                    "input {forbidden:?}, reason was {reason:?}"
+                );
+            }
+            other => panic!(
+                "expected InvalidWorkspaceId(forbidden char) for {forbidden:?}; got {other:?}"
+            ),
+        }
+    }
+}
+
+#[test]
 fn check_workspace_id_rejects_non_ascii() {
     match check_workspace_id("workspace-überprüfung") {
         Err(ProjectorError::InvalidWorkspaceId { reason }) => {

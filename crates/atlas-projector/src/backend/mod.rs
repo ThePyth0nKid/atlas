@@ -192,7 +192,10 @@ pub type WorkspaceId = String;
 /// - length ≤ 128 bytes (ArcadeDB database-name practical limit;
 ///   well below any HTTP URL-segment cap)
 /// - ASCII-only (Cypher parameter + URL path encoding predictability)
-/// - no `/`, `\`, or NUL byte (Path/URL/header safety)
+/// - no `/`, `\`, NUL, `\r`, or `\n` byte (Path/URL/header safety +
+///   log-injection defence — CRLF in a workspace_id reaching
+///   `tracing` / `slog` output would let an attacker forge log
+///   lines; security-reviewer MED on this PR, fix applied in-commit)
 ///
 /// # Errors
 ///
@@ -216,7 +219,14 @@ pub fn check_workspace_id(s: &str) -> ProjectorResult<()> {
         });
     }
     for ch in s.chars() {
-        if ch == '/' || ch == '\\' || ch == '\0' {
+        // `\r` + `\n` closes the log-injection surface
+        // (security-reviewer MED, 2026-05-14): a workspace_id like
+        // `legit\nFAKE_LOG_LINE` would otherwise pass validation and
+        // forge log lines when echoed by tracing/slog. `reqwest`'s
+        // header-value validation rejects `\r` + `\n` independently
+        // for the HTTP-header path; this check ALSO closes the
+        // log-output path.
+        if ch == '/' || ch == '\\' || ch == '\0' || ch == '\r' || ch == '\n' {
             return Err(ProjectorError::InvalidWorkspaceId {
                 reason: format!("contains forbidden character {ch:?}"),
             });

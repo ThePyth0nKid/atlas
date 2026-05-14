@@ -175,7 +175,7 @@ W17a plan-doc MEDIUM #5 (`MalformedEntityUuid` umbrella variant for edges) remai
 - `pub fn atlas_projector::check_workspace_id(s: &str) -> ProjectorResult<()>` (NEW)
 - `pub fn atlas_projector::check_value_depth_and_size(v: &Value, max_depth: usize, max_bytes: usize) -> ProjectorResult<()>` (NEW)
 - `pub enum atlas_projector::ProjectorError { InvalidWorkspaceId { reason: String }, .. }` (NEW variant, `#[non_exhaustive]` enum — additive)
-- `fn GraphStateBackend::begin(...) -> ProjectorResult<Box<dyn WorkspaceTxn + 'static>>` (lifetime change `'_` → `'static`; SemVer-additive — type checker widens automatically at all 16 existing call sites)
+- `fn GraphStateBackend::begin(...) -> ProjectorResult<Box<dyn WorkspaceTxn + 'static>>` (lifetime change `'_` → `'static`; SemVer-additive — type checker widens automatically at all 18 existing call sites: 1 in `backend/arcadedb.rs`, 9 in `backend/in_memory.rs`, 8 in `tests/backend_trait_conformance.rs`. Code-reviewer corrected this from the W17a-cleanup PR's earlier claim of "16" — count was off by 2 in prose; semantic claim that all sites compile unchanged is correct.)
 
 ---
 
