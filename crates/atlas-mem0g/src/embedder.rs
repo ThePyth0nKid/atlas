@@ -100,23 +100,32 @@ pub const _STRUCTURAL_PIN_CHECK: () = {
 /// time, not at per-call time).
 ///
 /// This is a process-wide setting; tests that exercise the embedder
-/// MUST call this in their setup. Idempotent — calling multiple
-/// times is a no-op.
+/// MUST call this in their setup. Idempotent — wrapped in `Once`,
+/// the `set_var` is performed exactly once across the lifetime of
+/// the process even if many threads call this concurrently.
 ///
 /// Safety: `std::env::set_var` is unsafe-on-Rust-2024 because of
-/// multi-threaded race risks. We deliberately call this BEFORE any
-/// other thread is spawned in embedder init paths; documented as a
-/// caller contract.
+/// multi-threaded race risks on the global `environ`. The `Once`
+/// wrapper (MEDIUM-5 fix) eliminates the multi-threaded race: only
+/// ONE thread performs the actual `set_var` call (the very first
+/// caller, while all other callers block in `Once::call_once`).
+/// After the first call returns, the env var is set and subsequent
+/// calls are non-mutating no-ops.
 pub fn pin_omp_threads_single() {
-    // SAFETY: called pre-init, single-threaded context. Process-global
-    // OMP config must be set before ORT session create.
-    #[allow(unsafe_code)]
-    // SAFETY: This is the documented contract; callers ensure no
-    // other thread is racing this set. Required for deterministic
-    // ORT embedding (ADR §4 sub-decision #2).
-    unsafe {
-        std::env::set_var("OMP_NUM_THREADS", "1");
-    }
+    // MEDIUM-5 fix: serialise the unsafe set_var via Once so concurrent
+    // test threads do NOT race on the global `environ` block.
+    static OMP_PIN_ONCE: std::sync::Once = std::sync::Once::new();
+    OMP_PIN_ONCE.call_once(|| {
+        // SAFETY: The Once::call_once guarantees this closure runs
+        // exactly once across all threads. While it runs, no other
+        // thread can be executing pin_omp_threads_single via this
+        // path. Required for deterministic ORT embedding
+        // (ADR §4 sub-decision #2).
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("OMP_NUM_THREADS", "1");
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +178,7 @@ pub fn download_model_with_verification(dest: &std::path::Path) -> Mem0gResult<s
 
     // Verify SHA256 BEFORE writing to disk so a corrupted download
     // never lands a poisoned file under the cache path.
-    let hash = blake3_sha256_compat(&bytes);
+    let hash = sha256_hex(&bytes);
     if hash != ONNX_SHA256 {
         return Err(Mem0gError::SupplyChainMismatch {
             expected: ONNX_SHA256.to_string(),
@@ -196,11 +205,11 @@ pub fn download_model_with_verification(dest: &std::path::Path) -> Mem0gResult<s
 /// Verify the cached model file's SHA256 against the compiled-in pin.
 ///
 /// Called at every cold start before fastembed-rs init. Fails closed
-/// (refuses to embed) on mismatch.
+/// (refuses to embed) on mismatch. Streams the file in 64 KiB chunks
+/// to avoid a full-file allocation for large ONNX bodies (the
+/// `bge-small-en-v1.5` FP32 ONNX is ~130 MB).
 pub fn verify_cached_model_sha(model_path: &std::path::Path) -> Mem0gResult<()> {
-    let bytes = std::fs::read(model_path)
-        .map_err(|e| Mem0gError::Io(format!("read {}: {e}", model_path.display())))?;
-    let hash = blake3_sha256_compat(&bytes);
+    let hash = sha256_file(model_path)?;
     if hash != ONNX_SHA256 {
         return Err(Mem0gError::SupplyChainMismatch {
             expected: ONNX_SHA256.to_string(),
@@ -210,72 +219,54 @@ pub fn verify_cached_model_sha(model_path: &std::path::Path) -> Mem0gResult<()> 
     Ok(())
 }
 
-/// Compute SHA256 of a byte slice and return lowercase hex.
+/// Compute SHA-256 of a byte slice and return lowercase hex.
 ///
-/// Uses `blake3::Hasher` with the SHA-256 mode is NOT a thing —
-/// blake3 is its own hash function. We need real SHA256 for
-/// HuggingFace-compatibility. Atlas already vends `sha2` via the
-/// p256 dep chain; this helper uses `sha2::Sha256` when the feature
-/// is on. For non-feature builds, the helper still exists but is
-/// only called from the feature-gated download path; on a cold path
-/// outside the feature we still want a stable function signature
-/// here for cross-platform testability.
-fn blake3_sha256_compat(bytes: &[u8]) -> String {
-    // We use atlas_trust_core's transitively-available sha2 if present;
-    // otherwise we fall back to a minimal SHA256 implementation. For
-    // simplicity in the W18b first-shipped impl we use the `sha2` crate
-    // via the optional `reqwest` chain (rustls-tls -> ring -> sha2).
-    //
-    // To avoid a brittle indirect-dependency assumption, we use the
-    // `blake3` crate's hash of the bytes here as a STAND-IN under the
-    // non-feature path, and document that the feature-gated download
-    // path uses real SHA256 via the deps brought in by reqwest's
-    // tls-stack. This keeps the always-on test surface compile-clean
-    // without pulling sha2 into the always-on dep set.
-    //
-    // For the real download-with-verification path
-    // (`lancedb-backend` feature), the SHA256 computation MUST use
-    // a real SHA256 implementation — see the feature-gated helper
-    // below.
-
-    #[cfg(feature = "lancedb-backend")]
-    {
-        // When the feature is on, reqwest pulls in rustls + ring +
-        // sha2 transitively. We use `blake3` here only because adding
-        // sha2 as a direct atlas-mem0g dep would force every workspace
-        // contributor to pay the build cost. The download path uses
-        // `sha256_via_reqwest_stack()` below for the real check.
-        sha256_via_reqwest_stack(bytes)
-    }
-
-    #[cfg(not(feature = "lancedb-backend"))]
-    {
-        // Outside the feature, this function is exercised only by
-        // unit tests that compare hashes for equality, NOT for real
-        // supply-chain verification. We use blake3 here as a stand-in
-        // (hex-encoded) so the test surface remains compile-clean.
-        // No real download path exists without the feature.
-        let h = blake3::hash(bytes);
-        hex::encode(h.as_bytes())
-    }
+/// HIGH-1 fix: this previously delegated to a `blake3-placeholder-...`
+/// string (NOT SHA-256), which silently broke supply-chain verification
+/// regardless of `ONNX_SHA256`'s value. Now uses `sha2::Sha256` for
+/// real RFC-6234 SHA-256 — the same algorithm HuggingFace and the
+/// `sha256sum` operator-runbook tool produce.
+///
+/// Empty-input contract: SHA-256 of the empty byte slice is the
+/// canonical
+/// `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+/// Unit-tested below.
+///
+/// `#[allow(dead_code)]` because the always-on dep set sees this
+/// function only via the unit tests; the `lancedb-backend` feature
+/// gates the production call-site in `download_model_with_verification`.
+#[allow(dead_code)]
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    hex::encode(digest)
 }
 
-#[cfg(feature = "lancedb-backend")]
-fn sha256_via_reqwest_stack(bytes: &[u8]) -> String {
-    // `reqwest`'s rustls-tls feature transitively pulls `sha2`.
-    // We could go via `ring::digest` but ring's API surface is wider
-    // than needed. For W18b's first-shipped impl we use a small
-    // SHA256 via the `sha2` crate which we explicitly enable below.
-    //
-    // NOTE: this currently uses a non-real placeholder. The W18b
-    // first-shipped impl flags this in the plan-doc as
-    // "Implementation TODO — real SHA256 via sha2 crate".
-    // For the moment the feature-gated build will fail closed when
-    // ONNX_SHA256 is still the placeholder, so the placeholder pin
-    // and the placeholder hash both surface SupplyChainMismatch
-    // which fails closed — preserving the security property.
-    let h = blake3::hash(bytes);
-    format!("blake3-placeholder-{}", hex::encode(h.as_bytes()))
+/// Compute SHA-256 of a file by streaming in 64 KiB chunks.
+///
+/// HIGH-1 fix companion: stream-friendly variant for large ONNX
+/// model files. Returns lowercase hex.
+fn sha256_file(path: &std::path::Path) -> Mem0gResult<String> {
+    use sha2::Digest;
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| Mem0gError::Io(format!("open {}: {e}", path.display())))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| Mem0gError::Io(format!("read {}: {e}", path.display())))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let digest = hasher.finalize();
+    Ok(hex::encode(digest))
 }
 
 // ---------------------------------------------------------------------------
@@ -302,13 +293,72 @@ impl AtlasEmbedder {
     /// 2. Verify cached model SHA matches [`ONNX_SHA256`]
     ///    (calls [`download_model_with_verification`] if file missing)
     /// 3. fastembed-rs `TextEmbedding::try_new_from_user_defined`
-    ///    with the verified local path
+    ///    with the verified local path (NOT `try_new(Default)` —
+    ///    that path triggers fastembed-rs's own model fetch which
+    ///    bypasses Atlas's SHA-verified gate).
     ///
     /// # Errors
     ///
     /// - [`Mem0gError::SupplyChainMismatch`] if SHA256 mismatch
     ///   (fail-closed; refuses to embed).
-    /// - [`Mem0gError::Embedder`] on fastembed-rs init failure.
+    /// - [`Mem0gError::Embedder`] on fastembed-rs init failure OR
+    ///   if the supply-chain pins are still W18b placeholders
+    ///   (fail-closed; refuses to embed UNTIL the constants are
+    ///   lifted AND the `try_new_from_user_defined` wiring is
+    ///   completed by Nelson pre-merge per HIGH-2 reviewer note).
+    ///
+    /// HIGH-2 fix (reviewer-driven):
+    ///
+    /// The previous body called `fastembed::TextEmbedding::try_new(Default::default())`
+    /// which causes fastembed-rs to download `bge-small-en-v1.5` from
+    /// HuggingFace via its OWN HTTP client, completely bypassing
+    /// Atlas's [`download_model_with_verification`] SHA-256 gate. That
+    /// is a supply-chain bypass: the SHA-verified file on disk would
+    /// be ignored, and an attacker controlling the network path to
+    /// HuggingFace at runtime could substitute a poisoned model
+    /// without tripping Atlas's verification.
+    ///
+    /// The correct production wiring is
+    /// `fastembed::TextEmbedding::try_new_from_user_defined(...)` with
+    /// the SHA-verified local ONNX bytes + tokenizer config +
+    /// pooling config. That API requires three additional files
+    /// from the HuggingFace repo (`tokenizer.json`, `config.json`,
+    /// `special_tokens_map.json` per fastembed-rs 5.13.4) each of
+    /// which ALSO needs a compiled-in SHA-256 pin and a download
+    /// helper. Wiring that in-commit without upstream API access in
+    /// the subagent context risks landing a broken init path.
+    ///
+    /// **In-commit fix posture:** the embedder fails closed (returns
+    /// `Mem0gError::Embedder`) while the supply-chain pins are still
+    /// `TODO_W18B_NELSON_VERIFY_*` placeholders OR while the
+    /// `try_new_from_user_defined` wiring is incomplete. This
+    /// guarantees the bypass code path can NEVER execute in
+    /// production: if anyone enables the `lancedb-backend` feature
+    /// and tries to instantiate the embedder, they get a clear
+    /// error pointing at the pre-merge work.
+    ///
+    /// **Pre-merge resume guide** (Nelson, mirrors plan-doc):
+    ///
+    /// 1. Lift `ONNX_SHA256` / `HF_REVISION_SHA` / `MODEL_URL`
+    ///    placeholders (verifies the existing gatekeeper test).
+    /// 2. Add `TOKENIZER_JSON_SHA256` / `CONFIG_JSON_SHA256` /
+    ///    `SPECIAL_TOKENS_MAP_JSON_SHA256` constants + the matching
+    ///    URL constants.
+    /// 3. Extend [`download_model_with_verification`] to fetch all
+    ///    four files (or factor a `download_file_with_sha`
+    ///    primitive) into the cache directory.
+    /// 4. Replace the `Mem0gError::Embedder("supply-chain gate")`
+    ///    return below with a real
+    ///    `fastembed::TextEmbedding::try_new_from_user_defined(
+    ///         UserDefinedEmbeddingModel::new(model_bytes,
+    ///             tokenizer_files),
+    ///         InitOptionsUserDefined::default(),
+    ///    )?` call. (Exact 5.13.4 API surface to be confirmed
+    ///    against `cargo doc -p fastembed --features lancedb-backend`
+    ///    once `lancedb-backend` builds locally.)
+    ///
+    /// Documented in `.handoff/v2-beta-welle-18b-plan.md` Implementation
+    /// Notes §"HIGH-2 fastembed bypass — pre-merge resume".
     pub fn new(model_cache_dir: &std::path::Path) -> Mem0gResult<Self> {
         pin_omp_threads_single();
 
@@ -319,15 +369,31 @@ impl AtlasEmbedder {
             verify_cached_model_sha(&model_path)?;
         }
 
-        // fastembed-rs init via the model defaults. We rely on the
-        // SHA-verified local file. The exact API surface of
-        // fastembed-rs 5.13.4 is `TextEmbedding::try_new` with a
-        // `InitOptions`-style config; W18b uses the simplest path
-        // that compiles against the pinned version.
-        let inner = fastembed::TextEmbedding::try_new(Default::default())
-            .map_err(|e| Mem0gError::Embedder(format!("fastembed init: {e}")))?;
+        // HIGH-2 fail-closed gate (reviewer-driven): refuse to call
+        // `fastembed::TextEmbedding::try_new(Default::default())` —
+        // that path bypasses Atlas's SHA-256 supply-chain verification
+        // by triggering fastembed-rs's own HuggingFace fetch. Until
+        // the `try_new_from_user_defined` wiring is completed by
+        // Nelson pre-merge (see fn-level doc-comment "Pre-merge
+        // resume guide"), refuse to construct the embedder. This
+        // matches the placeholder-constant posture: the production
+        // path is structurally unreachable until ALL pre-merge gates
+        // are cleared.
+        Err(Mem0gError::Embedder(
+            "supply-chain gate: AtlasEmbedder::new refuses to construct \
+             until fastembed::TextEmbedding::try_new_from_user_defined \
+             wiring lands (HIGH-2 fix; see fn-level doc-comment + \
+             .handoff/v2-beta-welle-18b-plan.md §HIGH-2)"
+                .to_string(),
+        ))
+    }
 
-        Ok(Self { inner })
+    /// Internal: kept for the `inner` field's future use once the
+    /// HIGH-2 gate is lifted. Suppresses dead-code warning during
+    /// the gated-fail-closed period.
+    #[allow(dead_code)]
+    fn _inner_field_anchor(&self) -> &fastembed::TextEmbedding {
+        &self.inner
     }
 
     /// Embed a single text into an f32 vector.
@@ -360,20 +426,127 @@ mod tests {
 
     #[test]
     fn pins_are_placeholder_until_nelson_verifies() {
-        // Sentinel test: the W18b first-shipped impl carries
-        // placeholder constants flagged with TODO(W18b-NELSON-VERIFY).
-        // Real values are confirmed pre-merge. This test exists to
-        // surface a future commit that lifts the placeholders so
-        // the test is updated alongside.
-        //
-        // When real values land:
-        //   - Replace the placeholder check below with a length check
-        //     (real SHA256 hex is 64 chars; real revision SHA is 40
-        //     chars; real URL starts with "https://huggingface.co").
-        //   - Or delete the assertion entirely.
+        // HIGH-3 fix (reviewer-driven): the previous test asserted
+        // ONLY `ONNX_SHA256.starts_with("TODO_W18B")`. A partial
+        // constant lift (e.g. Nelson updates only `ONNX_SHA256` and
+        // forgets `HF_REVISION_SHA` or `MODEL_URL`) would pass the
+        // gatekeeper while leaving repo-integrity unchecked. All
+        // three pins move atomically; the gatekeeper asserts all
+        // three at once.
         assert!(
             ONNX_SHA256.starts_with("TODO_W18B"),
-            "Placeholder constants lifted — update this test"
+            "ONNX_SHA256 lifted without updating gatekeeper — \
+             update HIGH-3 gatekeeper alongside (all three constants \
+             must move atomically)"
+        );
+        assert!(
+            HF_REVISION_SHA.starts_with("TODO_W18B"),
+            "HF_REVISION_SHA lifted without updating gatekeeper — \
+             update HIGH-3 gatekeeper alongside (all three constants \
+             must move atomically)"
+        );
+        assert!(
+            MODEL_URL.starts_with("TODO_W18B"),
+            "MODEL_URL lifted without updating gatekeeper — \
+             update HIGH-3 gatekeeper alongside (all three constants \
+             must move atomically)"
+        );
+    }
+
+    #[test]
+    fn pins_well_formed_after_lift() {
+        // HIGH-3 companion: post-lift format validation. When the
+        // `pins_are_placeholder_until_nelson_verifies` gatekeeper
+        // is deleted (or its assertion inverted), this test surfaces
+        // any structural-format slip that would otherwise pass code
+        // review:
+        //
+        // - real `ONNX_SHA256` is exactly 64 lowercase hex chars
+        //   (RFC-6234 SHA-256 hex digest);
+        // - real `HF_REVISION_SHA` is exactly 40 lowercase hex chars
+        //   (Git revision SHA-1);
+        // - real `MODEL_URL` begins with `https://huggingface.co/`.
+        //
+        // Both constants AND well-formedness are atomic gates. This
+        // test is a NO-OP while the placeholders are in place
+        // (asserts the placeholder posture); it becomes a real
+        // structural check once the constants are lifted (asserts
+        // the post-lift posture). Keep the test forever so the
+        // structural invariants stay enforced.
+        let is_placeholder = ONNX_SHA256.starts_with("TODO_W18B")
+            && HF_REVISION_SHA.starts_with("TODO_W18B")
+            && MODEL_URL.starts_with("TODO_W18B");
+
+        if is_placeholder {
+            // Pre-lift posture — well-formedness is unchecked because
+            // the placeholder strings deliberately do NOT match real
+            // formats. Defer to `pins_are_placeholder_until_nelson_verifies`.
+            return;
+        }
+
+        // Post-lift posture — enforce real structural formats.
+        assert_eq!(
+            ONNX_SHA256.len(),
+            64,
+            "ONNX_SHA256 must be 64-char SHA-256 hex digest"
+        );
+        assert!(
+            ONNX_SHA256.chars().all(|c| c.is_ascii_hexdigit()),
+            "ONNX_SHA256 must contain only ASCII hex digits"
+        );
+        assert!(
+            ONNX_SHA256.chars().all(|c| !c.is_ascii_uppercase()),
+            "ONNX_SHA256 must be lowercase hex (HuggingFace + sha256sum convention)"
+        );
+        assert_eq!(
+            HF_REVISION_SHA.len(),
+            40,
+            "HF_REVISION_SHA must be 40-char Git SHA-1 hex digest"
+        );
+        assert!(
+            HF_REVISION_SHA.chars().all(|c| c.is_ascii_hexdigit()),
+            "HF_REVISION_SHA must contain only ASCII hex digits"
+        );
+        assert!(
+            MODEL_URL.starts_with("https://huggingface.co"),
+            "MODEL_URL must point at huggingface.co (TLS-pinned origin)"
+        );
+    }
+
+    #[test]
+    fn sha256_hex_empty_input_known_vector() {
+        // HIGH-1 fix verification: the SHA-256 of the empty byte
+        // slice is the canonical RFC-6234 test vector. If this
+        // assertion fails, sha256_hex has regressed and supply-chain
+        // verification is silently broken.
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn sha256_hex_known_short_input() {
+        // HIGH-1 fix verification: SHA-256("abc") = the canonical
+        // RFC-6234 §B.1 test vector.
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn sha256_file_streams_file_correctly() {
+        // HIGH-1 fix verification: the streaming `sha256_file`
+        // helper agrees with `sha256_hex` for a small fixture
+        // written to a temp file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.bin");
+        std::fs::write(&path, b"abc").unwrap();
+        let got = sha256_file(&path).unwrap();
+        assert_eq!(
+            got,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 

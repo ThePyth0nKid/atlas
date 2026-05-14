@@ -162,7 +162,13 @@ export async function POST(req: Request): Promise<NextResponse> {
     await normaliseResponseTime(startMs, minLatencyMs);
     return jsonError(400, `failed to read request body: ${(e as Error).message}`);
   }
-  if (rawText.length > REQUEST_BODY_MAX_BYTES) {
+  // MEDIUM-4 fix (reviewer-driven): `rawText.length` counts JS
+  // UTF-16 code units, NOT UTF-8 bytes. A query in multi-byte UTF-8
+  // (Chinese / Arabic / emoji) can exceed 32 KB bytes while reporting
+  // <32 KB chars, slipping past the cap. We measure the actual UTF-8
+  // byte length the wire saw (Node.js `Buffer.byteLength` is the
+  // canonical primitive on the `runtime = "nodejs"` path).
+  if (Buffer.byteLength(rawText, "utf8") > REQUEST_BODY_MAX_BYTES) {
     await normaliseResponseTime(startMs, minLatencyMs);
     return jsonError(
       413,

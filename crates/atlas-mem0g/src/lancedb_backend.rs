@@ -17,11 +17,24 @@
 //!
 //! The [`crate::SemanticCacheBackend`] trait surface is **sync**
 //! (mirrors Layer-2 `GraphStateBackend` convention). LanceDB's
-//! Rust API is async-first, so all LanceDB calls are wrapped via
-//! `tokio::task::spawn_blocking` — **NOT**
-//! `tokio::runtime::Handle::current().block_on()` (the latter
+//! Rust API is async-first.
+//!
+//! **MEDIUM-6 clarification (reviewer-driven):** the W18b first-shipped
+//! impl ships STUB BODIES with NO LanceDB calls — the `spawn_blocking`
+//! guidance below applies to the resume-engineer who fills the bodies,
+//! not the current code. The current bodies are pure-Rust filesystem
+//! placeholders so the trait surface is reachable without LanceDB.
+//!
+//! When the LanceDB async bodies land (resume guide in
+//! `.handoff/v2-beta-welle-18b-plan.md` §"LanceDB body stubs"), all
+//! LanceDB calls MUST be wrapped via `tokio::task::spawn_blocking` —
+//! **NOT** `tokio::runtime::Handle::current().block_on()` (the latter
 //! deadlocks under the single-threaded tokio scheduler when called
-//! from inside an async context).
+//! from inside an async context per spike §7).
+//!
+//! Look for `// RESUME(spawn_blocking):` markers in this file's body
+//! sites to find the exact call-locations where the resume engineer
+//! drops the async-await pattern.
 //!
 //! ## W18b first-shipped impl scope
 //!
@@ -119,25 +132,26 @@ impl LanceDbCacheBackend {
     /// (`lancedb::Table::list_fragments`) is integrated post the
     /// V1-V4 determinism verification phase. See plan-doc
     /// "LanceDB body stubs" for the resume guide.
+    ///
+    /// **MEDIUM-3 fix (reviewer-driven):** walks the workspace table
+    /// directory RECURSIVELY (was single-level). LanceDB 0.29 stores
+    /// versioned fragments under sub-directories such as
+    /// `_versions/<N>/data-*.lance`; a single-level `read_dir` would
+    /// miss those and the secure-delete pass would leave bytes
+    /// on-disk. Filters on `.lance` extension at any depth.
     fn precapture_fragments(&self, workspace_id: &WorkspaceId) -> Mem0gResult<Vec<PathBuf>> {
         let dir = self.table_dir_for(workspace_id);
         if !dir.exists() {
             return Ok(vec![]);
         }
         let mut out = Vec::new();
-        for entry in std::fs::read_dir(&dir)
-            .map_err(|e| Mem0gError::Io(format!("read_dir {}: {e}", dir.display())))?
-        {
-            let entry = entry.map_err(|e| Mem0gError::Io(format!("read_dir entry: {e}")))?;
-            let path = entry.path();
+        Self::walk_collect_filtered(&dir, &mut out, &|p| {
             // Fragment files: *.lance per LanceDB columnar layout.
             // Snippet column lives in the same fragment as the
             // embedding (per ADR §4 sub-decision #4 step 6 —
             // overwriting the fragment covers both).
-            if path.extension().and_then(|s| s.to_str()) == Some("lance") {
-                out.push(path);
-            }
-        }
+            p.extension().and_then(|s| s.to_str()) == Some("lance")
+        })?;
         Ok(out)
     }
 
@@ -149,19 +163,31 @@ impl LanceDbCacheBackend {
             return Ok(vec![]);
         }
         let mut out = Vec::new();
-        Self::walk_collect(&indices_dir, &mut out)?;
+        // `_indices/` files: take everything (no extension filter).
+        Self::walk_collect_filtered(&indices_dir, &mut out, &|_p| true)?;
         Ok(out)
     }
 
-    fn walk_collect(dir: &std::path::Path, out: &mut Vec<PathBuf>) -> Mem0gResult<()> {
+    /// Recursive filesystem walk with a predicate. Used by both
+    /// `precapture_fragments` (filters on `.lance`) and
+    /// `precapture_indices` (takes everything).
+    ///
+    /// MEDIUM-3 fix: factored from the previous `walk_collect` so
+    /// fragment pre-capture also recurses through nested LanceDB
+    /// versioned-fragment directories (`_versions/<N>/...`).
+    fn walk_collect_filtered(
+        dir: &std::path::Path,
+        out: &mut Vec<PathBuf>,
+        predicate: &dyn Fn(&std::path::Path) -> bool,
+    ) -> Mem0gResult<()> {
         for entry in std::fs::read_dir(dir)
             .map_err(|e| Mem0gError::Io(format!("read_dir {}: {e}", dir.display())))?
         {
             let entry = entry.map_err(|e| Mem0gError::Io(format!("read_dir entry: {e}")))?;
             let path = entry.path();
             if path.is_dir() {
-                Self::walk_collect(&path, out)?;
-            } else {
+                Self::walk_collect_filtered(&path, out, predicate)?;
+            } else if predicate(&path) {
                 out.push(path);
             }
         }
@@ -194,9 +220,16 @@ impl SemanticCacheBackend for LanceDbCacheBackend {
         std::fs::create_dir_all(&table_dir)
             .map_err(|e| Mem0gError::Io(format!("create_dir_all table_dir: {e}")))?;
 
+        // RESUME(spawn_blocking): the real LanceDB Arrow append goes
+        // here per `.handoff/v2-beta-welle-18b-plan.md` §"LanceDB body
+        // stubs". Pattern: `tokio::task::spawn_blocking(move || {
+        // tokio_runtime.block_on(async { Table::add(batch).await }) })
+        // .await??` — NEVER `Handle::current().block_on()` (deadlocks
+        // under single-threaded scheduler per spike §7).
+        //
         // W18b first-shipped: write a placeholder row file so the
         // pre-capture path enumeration in `erase` has something to
-        // observe. Real LanceDB Arrow append goes here.
+        // observe.
         let placeholder = table_dir.join(format!("{event_uuid}.lance"));
         std::fs::write(&placeholder, text.as_bytes()).map_err(|e| {
             Mem0gError::Io(format!("placeholder write {}: {e}", placeholder.display()))
@@ -213,8 +246,15 @@ impl SemanticCacheBackend for LanceDbCacheBackend {
     ) -> Mem0gResult<Vec<SemanticHit>> {
         check_workspace_id(workspace_id)?;
 
-        // W18b first-shipped: returns empty results. Real LanceDB
-        // ANN search via `Table::search` goes here post V1-V4.
+        // RESUME(spawn_blocking): the real LanceDB ANN search goes
+        // here per `.handoff/v2-beta-welle-18b-plan.md` §"LanceDB body
+        // stubs". Pattern: `tokio::task::spawn_blocking(move || {
+        // tokio_runtime.block_on(async { Table::query().nearest_to(
+        // query_embedding).limit(k).execute().await }) }).await??` —
+        // NEVER `Handle::current().block_on()` (deadlocks under
+        // single-threaded scheduler per spike §7).
+        //
+        // W18b first-shipped: returns empty results.
         //
         // Trust contract reminder: when real search lands, every
         // returned hit MUST carry `event_uuid` (cite-back). The
@@ -250,14 +290,28 @@ impl SemanticCacheBackend for LanceDbCacheBackend {
 
         // STEP 3: DELETE (tombstone). For the placeholder layout the
         // delete is path-based; real LanceDB call goes here.
+        //
+        // RESUME(spawn_blocking): the real `Table::delete(filter)`
+        // call goes here per `.handoff/v2-beta-welle-18b-plan.md`
+        // §"LanceDB body stubs". Pattern: `tokio::task::spawn_blocking(
+        // move || tokio_runtime.block_on(async {
+        // Table::delete(format!("event_uuid = '{event_uuid}'")).await
+        // })).await??` — NEVER `Handle::current().block_on()`.
         let placeholder_path = self
             .table_dir_for(workspace_id)
             .join(format!("{event_uuid}.lance"));
         // Tombstone is implicit for placeholder layout (the file
-        // exists or doesn't). Real impl: `Table::delete(filter)`.
+        // exists or doesn't).
 
         // STEP 4: CLEANUP. Real impl:
         // `Table::cleanup_old_versions(Duration::ZERO).await?`
+        //
+        // RESUME(spawn_blocking): the cleanup call goes here per
+        // `.handoff/v2-beta-welle-18b-plan.md` §"LanceDB body stubs".
+        // Pattern: `tokio::task::spawn_blocking(move || {
+        // tokio_runtime.block_on(async { Table::cleanup_old_versions(
+        // Duration::ZERO).await }) }).await??` — NEVER
+        // `Handle::current().block_on()`.
         // Placeholder: no-op (the file is the canonical storage).
 
         // STEP 5: PRE-CAPTURE HNSW index paths.
@@ -337,5 +391,78 @@ mod tests {
         // We assert the constant value directly; the real backend
         // instance would need a model download to construct.
         assert_eq!(expected, "lancedb-fastembed");
+    }
+
+    #[test]
+    fn walk_collect_filtered_recurses_through_subdirs() {
+        // MEDIUM-3 fix verification: pre-capture walk MUST recurse
+        // through LanceDB-style versioned-fragment sub-directories
+        // (`_versions/<N>/data-*.lance`). A single-level read_dir
+        // would miss these and leak bytes after secure-delete.
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Depth-0 fragment.
+        let f0 = root.join("data-0.lance");
+        // Depth-1 fragment (e.g. _versions/2/data-1.lance).
+        let d1 = root.join("_versions").join("2");
+        std::fs::create_dir_all(&d1).unwrap();
+        let f1 = d1.join("data-1.lance");
+        // Depth-2 fragment.
+        let d2 = root.join("_versions").join("2").join("nested");
+        std::fs::create_dir_all(&d2).unwrap();
+        let f2 = d2.join("data-2.lance");
+        // Non-matching file (should NOT be collected by .lance filter).
+        let f_other = root.join("README.txt");
+
+        for p in &[&f0, &f1, &f2, &f_other] {
+            let mut h = std::fs::File::create(p).unwrap();
+            h.write_all(b"x").unwrap();
+        }
+
+        // Walk with .lance filter (mirrors precapture_fragments).
+        let mut out = Vec::new();
+        LanceDbCacheBackend::walk_collect_filtered(root, &mut out, &|p| {
+            p.extension().and_then(|s| s.to_str()) == Some("lance")
+        })
+        .unwrap();
+
+        assert_eq!(
+            out.len(),
+            3,
+            "expected 3 .lance files at depths 0/1/2; got {out:?}"
+        );
+        assert!(out.iter().any(|p| p == &f0), "depth-0 fragment missed");
+        assert!(out.iter().any(|p| p == &f1), "depth-1 fragment missed");
+        assert!(out.iter().any(|p| p == &f2), "depth-2 fragment missed");
+        assert!(
+            !out.iter().any(|p| p == &f_other),
+            "non-matching README.txt should NOT be collected"
+        );
+    }
+
+    #[test]
+    fn walk_collect_filtered_unfiltered_takes_everything() {
+        // Companion test: when predicate returns true for all
+        // entries (mirrors precapture_indices), every file in the
+        // directory tree is returned regardless of extension.
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let a = root.join("a.bin");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let b = sub.join("b.bin");
+
+        for p in &[&a, &b] {
+            std::fs::File::create(p).unwrap().write_all(b"x").unwrap();
+        }
+
+        let mut out = Vec::new();
+        LanceDbCacheBackend::walk_collect_filtered(root, &mut out, &|_| true).unwrap();
+        assert_eq!(out.len(), 2);
     }
 }

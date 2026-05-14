@@ -187,6 +187,42 @@ When upstream Lance 0.30+ ships and V1-V4 verification phase completes (spike §
 
 Steps 1 + 2 + 5 + 6 + 7 already production-correct because they walk the filesystem layout LanceDB writes.
 
+### Reviewer-driven fix-commit (HIGH + MEDIUM resolution)
+
+Parallel `code-reviewer` + `security-reviewer` reached APPROVE-with-fixes on PR #97 SHA `80f6957`. Per Atlas Standing Protocol Lesson #3 (HIGH + security/correctness MEDIUMs are non-optional for in-commit resolution), a single fix-commit landed on top of `80f6957`. Status of the 4 HIGH + 6 MEDIUM:
+
+| # | Reviewer finding | File | Resolution |
+|---|---|---|---|
+| HIGH-1 | `blake3-placeholder-...` returned instead of SHA-256 | `embedder.rs` | FIXED — `sha2::Sha256` + new `sha256_hex` + streaming `sha256_file`; `sha2` added as always-on workspace dep; unit-tested against RFC-6234 vectors (empty string + "abc"). |
+| HIGH-2 | `try_new(Default::default())` triggers fastembed's own HF fetch, bypassing Atlas's SHA gate | `embedder.rs` | DEFERRED-WITH-GATE — full `try_new_from_user_defined` wiring requires tokenizer.json / config.json / special_tokens_map.json + their SHA-256 pins + per-file download helper, which is too thorny to land safely in the subagent context without verifying the exact fastembed 5.13.4 `UserDefinedEmbeddingModel` API surface against the registry. **Mitigation in-commit:** `AtlasEmbedder::new` now returns `Mem0gError::Embedder("supply-chain gate: ...")` UNCONDITIONALLY — the production path is structurally unreachable until Nelson lifts BOTH the supply-chain constants AND the `try_new_from_user_defined` wiring pre-merge. The bypass code path can no longer execute. Pre-merge resume guide is embedded in the `AtlasEmbedder::new` doc-comment. |
+| HIGH-3 | gatekeeper test asserted only `ONNX_SHA256` placeholder, not all three | `embedder.rs` | FIXED — `pins_are_placeholder_until_nelson_verifies` now asserts all three (`ONNX_SHA256` / `HF_REVISION_SHA` / `MODEL_URL`); new companion test `pins_well_formed_after_lift` enforces post-lift formats (64-char hex SHA-256; 40-char hex Git SHA-1; `https://huggingface.co` URL prefix) the moment the placeholders are lifted. |
+| HIGH-4 | `fill_random_bytes` was deterministic blake3-seeded with attacker-knowable seed (path + offset) | `secure_delete.rs` | FIXED — replaced with `getrandom::getrandom` (OS CSPRNG); `getrandom = "0.2"` added as always-on dep; new unit test `fill_random_bytes_actually_random` asserts two successive fills produce different bytes. |
+| MEDIUM-1 | empty-string guards for `workspace_id` AND `erased_at` in `apply_embedding_erased` | `upsert.rs` | FIXED — `workspace_id` guard was already present (predates fix-commit), `erased_at` guard added; two new tests: `embedding_erased_with_empty_workspace_id_errors` + `embedding_erased_with_empty_erased_at_errors`. |
+| MEDIUM-2 | `apply_overwrite_set` silently skipped missing pre-captured paths → risked false "erasure confirmed" attestation | `secure_delete.rs` | FIXED — silent `continue` replaced with `return Err(Mem0gError::SecureDelete { step: "OVERWRITE", reason: "pre-captured path disappeared under lock: ..." })`; integration test `secure_delete_correctness::secure_delete_errors_on_missing_pre_captured_paths` + unit test both updated to assert the hard-error behaviour. |
+| MEDIUM-3 | `precapture_fragments` was single-level — would miss `_versions/N/data-*.lance` | `lancedb_backend.rs` | FIXED — `walk_collect` refactored to `walk_collect_filtered` with predicate; `precapture_fragments` now recursively walks the workspace table directory filtering on `.lance` extension; `precapture_indices` continues to recursively walk `_indices/`; new unit tests `walk_collect_filtered_recurses_through_subdirs` + `walk_collect_filtered_unfiltered_takes_everything`. |
+| MEDIUM-4 | `rawText.length` counts JS UTF-16 code units, not UTF-8 bytes | `apps/atlas-web/.../semantic-search/route.ts` | FIXED — replaced with `Buffer.byteLength(rawText, "utf8")` (Node.js runtime is already set on this route). |
+| MEDIUM-5 | `pin_omp_threads_single` used `std::env::set_var` directly — Rust 2024 UB under parallel test scheduler | `embedder.rs` | FIXED — wrapped in `std::sync::Once::call_once`. The `unsafe { set_var }` now runs exactly once across the lifetime of the process regardless of how many test threads race the function. |
+| MEDIUM-6 | module doc-comment claimed `spawn_blocking` was used but stub bodies had no LanceDB calls at all | `lancedb_backend.rs` | FIXED — doc-comment now explicit that `spawn_blocking` is the resume-engineer's guidance, NOT a current invariant; three `RESUME(spawn_blocking):` markers added at `upsert` / `search` / `erase` body sites pointing to the exact API call locations. |
+
+### HIGH-2 fastembed bypass — pre-merge resume
+
+The HIGH-2 deferred-with-gate posture above means `AtlasEmbedder::new` will UNCONDITIONALLY return `Mem0gError::Embedder("supply-chain gate: ...")` until Nelson's pre-merge work lands. The pre-merge resume protocol:
+
+1. Lift the three supply-chain constants per the existing "Placeholder constants" §.
+2. Add `TOKENIZER_JSON_SHA256` / `CONFIG_JSON_SHA256` / `SPECIAL_TOKENS_MAP_JSON_SHA256` constants pinned at the SAME `HF_REVISION_SHA` revision. Add matching `_URL` constants.
+3. Extend `download_model_with_verification` (or factor a `download_file_with_sha` primitive) to fetch all four files into `model_cache_dir`.
+4. Replace the `Err(Mem0gError::Embedder("supply-chain gate: ..."))` return in `AtlasEmbedder::new` with a real `fastembed::TextEmbedding::try_new_from_user_defined(UserDefinedEmbeddingModel::new(model_bytes, tokenizer_files), InitOptionsUserDefined::default())?` call. Exact 5.13.4 API surface to be confirmed against `cargo doc -p fastembed --features lancedb-backend` once `lancedb-backend` builds locally.
+5. Remove the `_inner_field_anchor` dead-code anchor.
+
+### Deferred (NOT in this commit) — documented as follow-on
+
+Per reviewer guidance + Atlas Standing Protocol Lesson #3 boundaries:
+
+- LOW: double `#[ignore]`/`#[cfg]` CI gap on determinism test → W18c follow-on (the determinism test is `#[ignore]` because it needs the `lancedb-backend` feature ON and the real fastembed init, both of which require Nelson's pre-merge work; this is structural-correct for the current placeholder posture).
+- LOW: `MissingPayloadField` observability for duplicate-erasure → V2-γ-deferred (already documented in `apply_embedding_erased` doc-comment).
+- LOW: timing-test Barrier vs sleep → defer (best-effort timing is acceptable per ADR §4 sub-decision #8 footnote).
+- LOW: `anyhow` dep cleanup → cosmetic; follow-on.
+
 ---
 
-**End of W18b plan-doc.** Implementation lands the trait surface + 7-step secure-delete protocol + dispatch arm + bench/CI/Read-API; pre-merge gate is Nelson's supply-chain constant lift.
+**End of W18b plan-doc.** Implementation lands the trait surface + 7-step secure-delete protocol + dispatch arm + bench/CI/Read-API + reviewer-driven HIGH+MEDIUM fix-commit; pre-merge gate is Nelson's supply-chain constant lift + `try_new_from_user_defined` wiring (HIGH-2 deferred-with-gate).

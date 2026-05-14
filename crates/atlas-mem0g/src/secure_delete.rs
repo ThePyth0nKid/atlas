@@ -228,21 +228,15 @@ pub fn overwrite_file(path: &Path) -> Mem0gResult<()> {
             reason: format!("open {}: {e}", path.display()),
         })?;
 
-    // Write random bytes equal to file size. Chunked to avoid holding
-    // a single allocation for very large fragments. 64 KB chunks
-    // mirror LanceDB's default row-group size for cache efficiency.
+    // Write cryptographically-random bytes equal to file size.
+    // Chunked to avoid holding a single allocation for very large
+    // fragments. 64 KB chunks mirror LanceDB's default row-group
+    // size for cache efficiency.
     let mut remaining = file_size;
     let mut buf = [0u8; 64 * 1024];
     while remaining > 0 {
-        // Fill chunk with random bytes via blake3 keyed-hash output
-        // (deterministic per call but uncorrelated across files;
-        // attacker cannot recover original bytes from the output).
-        // For real cryptographic randomness in production, an
-        // operator may swap this to `getrandom::getrandom`. blake3
-        // is sufficient for the security property: "the on-disk
-        // bytes are no longer the original bytes after overwrite".
         let chunk_len = std::cmp::min(remaining as usize, buf.len());
-        fill_random_bytes(&mut buf[..chunk_len], path, remaining);
+        fill_random_bytes(&mut buf[..chunk_len])?;
         f.write_all(&buf[..chunk_len])
             .map_err(|e| Mem0gError::SecureDelete {
                 step: Step::Overwrite.as_str(),
@@ -276,33 +270,71 @@ pub fn overwrite_file(path: &Path) -> Mem0gResult<()> {
 /// Layer-3 cache is in a partially-overwritten state — operator
 /// re-runs `erase` (idempotent on `event_uuid`) OR triggers a full
 /// rebuild from Layer 1.
+///
+/// MEDIUM-2 fix (reviewer-driven): a pre-captured path that no
+/// longer exists at step 6 is treated as a HARD ERROR, not a silent
+/// skip. The pre-capture phase (step 2 + step 5) ran inside the
+/// write-lock held since step 1, and the lock contract states that
+/// no concurrent compactor / writer can disappear a fragment between
+/// pre-capture and overwrite. If we observe a vanished path, the
+/// invariant is violated and emitting an `embedding_erased`
+/// audit-event would be a FALSE attestation to the regulator
+/// ("erasure confirmed" when in fact the path's storage state is
+/// unknown). Fail closed and force operator inspection.
 pub fn apply_overwrite_set(paths: &PreCapturedPaths) -> Mem0gResult<()> {
     for path in paths.iter() {
-        // Skip paths that no longer exist (a concurrent compactor
-        // ran between step 2 and step 6 despite the lock — should
-        // be impossible under the contract, but defence-in-depth).
         if !path.exists() {
-            continue;
+            // MEDIUM-2 fix: do NOT silently skip. The pre-capture
+            // protocol guarantees this path WAS present inside the
+            // write-lock held since step 1. A missing path means the
+            // lock contract failed (concurrent compactor leaked
+            // through) — emitting "erasure confirmed" without
+            // actually overwriting the bytes would be a false
+            // regulator attestation. Fail closed.
+            return Err(Mem0gError::SecureDelete {
+                step: Step::Overwrite.as_str(),
+                reason: format!(
+                    "pre-captured path disappeared under lock: {} — \
+                     lock contract violated (step 1 write-lock should \
+                     have prevented this); refusing to emit false \
+                     'erasure confirmed' attestation. Operator: re-run \
+                     erase or rebuild from Layer 1.",
+                    path.display()
+                ),
+            });
         }
         overwrite_file(path)?;
     }
     Ok(())
 }
 
-/// Fill a buffer with random-looking bytes derived from blake3 over
-/// `(path, remaining)`. Used inside [`overwrite_file`] step 6.
+/// Fill a buffer with cryptographically-random bytes from the OS
+/// CSPRNG. Used inside [`overwrite_file`] step 6.
 ///
-/// This is NOT cryptographic randomness — it's a deterministic
-/// stream that ensures the on-disk bytes are no longer the original
-/// bytes after overwrite. Cryptographic randomness via
-/// `getrandom::getrandom` is operator-runbook upgrade path for
-/// deployments with explicit cryptographic-shred requirements.
-fn fill_random_bytes(buf: &mut [u8], path: &Path, remaining: u64) {
-    let mut h = blake3::Hasher::new();
-    h.update(path.to_string_lossy().as_bytes());
-    h.update(&remaining.to_le_bytes());
-    let mut reader = h.finalize_xof();
-    reader.fill(buf);
+/// HIGH-4 fix (reviewer-driven): the previous implementation seeded
+/// `blake3::Hasher` with `(path, remaining)` and used the resulting
+/// XOF as the "random" overwrite bytes. That made the overwrite
+/// pattern FULLY DETERMINISTIC for any attacker who knows the
+/// workspace's storage layout (the path is
+/// `<root>/<workspace_id>/<event_uuid>.lance` per
+/// `lancedb_backend.rs::table_dir_for`, both components of which
+/// are workspace-knowable). GDPR Art. 17 byte-overwrite is supposed
+/// to be irrecoverable random noise; a deterministic stream with
+/// an attacker-known seed reduces the guarantee from
+/// "cryptographically irrecoverable" to "pseudorandom with
+/// attacker-knowable structure", which is far weaker than the
+/// regulator expects.
+///
+/// The new implementation pulls bytes directly from the OS CSPRNG
+/// via `getrandom::getrandom` — kernel-level cryptographic
+/// randomness (`/dev/urandom` / `getrandom(2)` on Linux,
+/// `BCryptGenRandom` on Windows, `getentropy` on macOS). No
+/// attacker-derivable seed.
+fn fill_random_bytes(buf: &mut [u8]) -> Mem0gResult<()> {
+    getrandom::getrandom(buf).map_err(|e| Mem0gError::SecureDelete {
+        step: Step::Overwrite.as_str(),
+        reason: format!("getrandom CSPRNG failed: {e}"),
+    })
 }
 
 #[cfg(test)]
@@ -393,14 +425,51 @@ mod tests {
     }
 
     #[test]
-    fn apply_overwrite_set_skips_missing_paths_defence_in_depth() {
-        // A concurrent compactor between step 2 + step 6 SHOULD be
-        // impossible under the lock contract, but if a path is
-        // already gone we skip rather than fail.
+    fn apply_overwrite_set_errors_on_missing_path_lock_contract() {
+        // MEDIUM-2 fix (reviewer-driven): the previous behaviour was
+        // a silent skip on missing pre-captured paths. That risked a
+        // false "erasure confirmed" attestation to the regulator
+        // when the lock contract was violated by a concurrent
+        // compactor. The corrected behaviour errors out, forcing
+        // operator inspection.
         let paths = PreCapturedPaths::new(
             vec![PathBuf::from("/this/does/not/exist/frag_x")],
             vec![],
         );
-        apply_overwrite_set(&paths).unwrap();
+        let err = apply_overwrite_set(&paths).expect_err(
+            "expected SecureDelete error on missing pre-captured path",
+        );
+        match err {
+            Mem0gError::SecureDelete { step, reason } => {
+                assert_eq!(step, "OVERWRITE");
+                assert!(
+                    reason.contains("disappeared under lock"),
+                    "reason must surface lock-contract violation; got: {reason}"
+                );
+            }
+            other => panic!(
+                "expected Mem0gError::SecureDelete; got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn fill_random_bytes_actually_random() {
+        // HIGH-4 fix verification: two successive fills produce
+        // DIFFERENT byte sequences (with extremely high probability).
+        // The previous deterministic blake3-seeded impl would have
+        // produced the same bytes for the same seed; the new
+        // getrandom-backed impl pulls fresh entropy each call.
+        let mut a = [0u8; 64];
+        let mut b = [0u8; 64];
+        fill_random_bytes(&mut a).unwrap();
+        fill_random_bytes(&mut b).unwrap();
+        assert_ne!(
+            a, b,
+            "two getrandom fills produced identical bytes — \
+             CSPRNG regression or entropy starvation"
+        );
+        // Sanity: result is NOT all zeros.
+        assert!(a.iter().any(|&x| x != 0), "fill produced all-zeros");
     }
 }

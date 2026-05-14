@@ -157,15 +157,31 @@ fn secure_delete_concurrent_reader_lock_contract() {
     reader.join().unwrap();
 }
 
-/// Defence-in-depth: pre-captured paths missing at step 6 time MUST
-/// be tolerated (not crash). Documents the contract for the "lock
-/// SHOULD prevent this but if it doesn't, we still don't blow up"
-/// case.
+/// MEDIUM-2 fix (reviewer-driven): pre-captured paths missing at
+/// step 6 time MUST surface a hard `SecureDelete` error. The previous
+/// behaviour (silent skip) risked a false "erasure confirmed"
+/// attestation to the regulator when the step-1 write-lock contract
+/// was violated by a concurrent compactor. The corrected behaviour
+/// fails closed so the caller does NOT emit a false
+/// `embedding_erased` audit-event.
 #[test]
-fn secure_delete_tolerates_missing_paths_defence_in_depth() {
+fn secure_delete_errors_on_missing_pre_captured_paths() {
+    use atlas_mem0g::Mem0gError;
     let paths = PreCapturedPaths::new(
         vec![PathBuf::from("/this/does/not/exist/frag_x")],
         vec![PathBuf::from("/this/does/not/exist/idx_y")],
     );
-    apply_overwrite_set(&paths).unwrap();
+    let err = apply_overwrite_set(&paths).expect_err(
+        "expected SecureDelete error on missing pre-captured path",
+    );
+    match err {
+        Mem0gError::SecureDelete { step, reason } => {
+            assert_eq!(step, "OVERWRITE");
+            assert!(
+                reason.contains("disappeared under lock"),
+                "reason must surface lock-contract violation; got: {reason}"
+            );
+        }
+        other => panic!("expected Mem0gError::SecureDelete; got {other:?}"),
+    }
 }

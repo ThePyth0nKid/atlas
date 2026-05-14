@@ -720,6 +720,19 @@ fn apply_embedding_erased(event: &AtlasEvent, state: &mut GraphState) -> Project
         })?
         .to_string();
 
+    // MEDIUM-1 fix (reviewer-driven): empty-string guard symmetric
+    // with the `event_id` + `workspace_id` guards above. An
+    // `embedding_erased` audit-event with `erased_at: ""` is
+    // regulator-evidentiary-incomplete — the timestamp is the
+    // GDPR-Art-17 attestation moment. Reject at projection time
+    // rather than persist an unusable erasure record.
+    if erased_at.is_empty() {
+        return Err(ProjectorError::MissingPayloadField {
+            event_id: event.event_id.clone(),
+            field: "erased_at (empty string)".to_string(),
+        });
+    }
+
     // Optional: requestor_did. Defaults to event.author_did at
     // projection time per ADR §4 sub-decision #5 ("defaults to the
     // operator DID at runtime — captured in the AtlasEvent's standard
@@ -1788,6 +1801,66 @@ mod tests {
                 );
             }
             other => panic!("expected MissingPayloadField for empty event_id; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn embedding_erased_with_empty_workspace_id_errors() {
+        // MEDIUM-1 fix (reviewer-driven): symmetric empty-string
+        // guard with event_id. workspace_id is regulator-evidentiary
+        // — an erasure record without a workspace anchor is
+        // incomplete attestation.
+        let mut state = GraphState::new();
+        let event = make_event(
+            "01HERASE1",
+            json!({
+                "type": "embedding_erased",
+                "event_id": "01HLAYER1EVENT",
+                "workspace_id": "",
+                "erased_at": "2026-05-15T12:00:00Z"
+            }),
+            None,
+        );
+        match apply_event_to_state(WS, &event, &mut state) {
+            Err(ProjectorError::MissingPayloadField { field, .. }) => {
+                assert!(
+                    field.contains("workspace_id") && field.contains("empty"),
+                    "field must surface empty-string disambiguation; got {field}"
+                );
+            }
+            other => panic!(
+                "expected MissingPayloadField for empty workspace_id; got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn embedding_erased_with_empty_erased_at_errors() {
+        // MEDIUM-1 fix (reviewer-driven): symmetric empty-string
+        // guard with event_id. erased_at is the GDPR-Art-17
+        // attestation timestamp — an empty value is regulator-
+        // evidentiary-incomplete.
+        let mut state = GraphState::new();
+        let event = make_event(
+            "01HERASE1",
+            json!({
+                "type": "embedding_erased",
+                "event_id": "01HLAYER1EVENT",
+                "workspace_id": "ws-eu-tenant-a",
+                "erased_at": ""
+            }),
+            None,
+        );
+        match apply_event_to_state(WS, &event, &mut state) {
+            Err(ProjectorError::MissingPayloadField { field, .. }) => {
+                assert!(
+                    field.contains("erased_at") && field.contains("empty"),
+                    "field must surface empty-string disambiguation; got {field}"
+                );
+            }
+            other => panic!(
+                "expected MissingPayloadField for empty erased_at; got {other:?}"
+            ),
         }
     }
 

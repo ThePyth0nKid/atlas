@@ -48,6 +48,18 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 blake3 = { workspace = true }
 hex = { workspace = true }
+# HIGH-1 fix: real SHA-256 for supply-chain verification.
+# `blake3` is its own hash function (NOT SHA-256-compatible); the
+# `ONNX_SHA256` constant is contractually a SHA-256 hex digest of the
+# ONNX file bytes per ADR §4 sub-decision #2. Pulling sha2 always-on
+# is cheap (~3 crates, sub-second compile).
+sha2 = { workspace = true }
+# HIGH-4 fix: cryptographic randomness for GDPR Art. 17 byte-overwrite.
+# Replaces the previous blake3-seeded deterministic PRG (the attacker
+# could recompute the overwrite pattern knowing path + offset). OS
+# CSPRNG via `getrandom::getrandom`. Workspace already transitively
+# depends on getrandom (via rand_core).
+getrandom = "0.2"
 anyhow = "1.0"
 
 # Optional deps (gated behind `lancedb-backend` feature). Pinned per
