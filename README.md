@@ -25,7 +25,7 @@ Atlas is a knowledge-graph backend where every fact is signed (Ed25519 + COSE_Si
 
 ## Why Atlas exists
 
-**EU AI Act Article 12** (in force 2026-08-02) requires high-risk AI systems to maintain automatic event records that are *independently verifiable* by regulators.
+**EU AI Act Article 12** (Regulation (EU) 2024/1689, in force 2026-08-02 for high-risk systems per Art. 113(b)) requires that *"high-risk AI systems shall technically allow for the automatic recording of events ('logs') over the lifetime of the system"* (Art. 12 §1) at a level of traceability *"appropriate to the intended purpose of the system"* (Art. 12 §2 excerpt) — cross-referenced by Annex IV §1(g) and §2(g) on validation/testing procedures and outputs (see `docs/COMPLIANCE-MAPPING.md` for verbatim-text mapping; full counsel review per `.handoff/v2-counsel-engagement-scope.md` SOW-5 pending).
 
 Most "AI logging" today is a dashboard. Atlas makes the verifiability **structural** — the auditor doesn't trust our server, our company, or our roadmap. They run the verifier themselves and check the signatures, anchors, and witness cosignatures against pinned trust roots.
 
