@@ -101,10 +101,14 @@ impl GraphStateBackend for InMemoryBackend {
     fn begin(
         &self,
         workspace_id: &WorkspaceId,
-    ) -> ProjectorResult<Box<dyn WorkspaceTxn + '_>> {
+    ) -> ProjectorResult<Box<dyn WorkspaceTxn + 'static>> {
         // Snapshot the current committed state into the txn's scratch
         // buffer. The txn holds a clone of the `Arc<Mutex<...>>` so
-        // commit can re-acquire and swap.
+        // commit can re-acquire and swap. The returned `Box<dyn
+        // WorkspaceTxn>` is `'static` because `InMemoryTxn`'s fields
+        // are all owned (workspace_id: String, workspaces: Arc<...>,
+        // scratch: GraphState, finalised: Option<&'static str>) —
+        // no borrow from `&self` (W17a-cleanup sub-decision #10).
         let scratch = {
             let guard = self.lock_map();
             guard.get(workspace_id).cloned().unwrap_or_default()

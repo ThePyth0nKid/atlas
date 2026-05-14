@@ -88,7 +88,17 @@ impl ArcadeDbBackend {
 }
 
 impl GraphStateBackend for ArcadeDbBackend {
-    fn begin(&self, _workspace_id: &WorkspaceId) -> ProjectorResult<Box<dyn WorkspaceTxn + '_>> {
+    fn begin(
+        &self,
+        _workspace_id: &WorkspaceId,
+    ) -> ProjectorResult<Box<dyn WorkspaceTxn + 'static>> {
+        // W17a-cleanup: trait returns `Box<dyn WorkspaceTxn + 'static>`.
+        // W17b must (a) call `super::check_workspace_id(_workspace_id)`
+        // first thing here to validate per ADR-011 §4 sub-decision #11,
+        // then (b) construct an owned `ArcadeDbTxn` containing the
+        // `reqwest::Client` + `arcadedb-session-id` String — both
+        // owned, no borrow from `&self`, so the `'static` bound is
+        // structurally honoured.
         unimplemented!(
             "W17b: ArcadeDbBackend::begin — POST /api/v1/begin/{{db}}, session id in arcadedb-session-id header"
         )

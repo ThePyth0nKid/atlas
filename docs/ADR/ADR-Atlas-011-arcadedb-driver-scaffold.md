@@ -159,6 +159,24 @@ pub trait WorkspaceTxn: Send {
 8. **`ArcadeDbBackend` stub:** every trait method is `unimplemented!("W17b: ...")` with a per-method placeholder string documenting the HTTP endpoint + Cypher query W17b will write. The struct compiles + constructs without panic; only trait method invocations panic. No `reqwest` dep added in W17a (W17b adds it alongside the first method body that uses it).
 9. **`backend_id` return values:** `"in-memory"` for `InMemoryBackend`, `"arcadedb-server"` for `ArcadeDbBackend` (stable across crate versions; ProjectorRunAttestation consumers downstream depend on the exact strings).
 
+### 4.3 W17a-cleanup amendment (2026-05-14)
+
+Three additional sub-decisions land in a follow-up PR before W17b dispatch, to eliminate one SemVer-breaking-mid-W17b risk + two boundary-defence helpers W17b consumes on day one.
+
+10. **`begin()` lifetime `'static`** (resolves W17a plan-doc MEDIUM #4). Trait signature changes from `Box<dyn WorkspaceTxn + '_>` → `Box<dyn WorkspaceTxn + 'static>`. The `'_` was artificially conservative: neither the in-memory impl (txn holds `Arc::clone(&self.workspaces)`) nor the ArcadeDb impl (txn will hold an owned `reqwest::Client` + an owned `arcadedb-session-id` String) actually borrows from `&self`. The lifetime-widening is SemVer-additive at every existing call site — the type checker accepts `'_` → `'static` automatically. Resolution lands BEFORE the first W17b method body so the trait does NOT SemVer-break mid-W17b. All 8 pre-existing trait-conformance tests stay green; one new `begin_returns_static_txn_handle` test pins the `'static` bound via an explicit `Box<dyn WorkspaceTxn + 'static>` type annotation that would fail to compile if the lifetime regressed.
+
+11. **`WorkspaceId` boundary-validation helper** (resolves W17a plan-doc MEDIUM #3 at trait surface). `WorkspaceId` stays a `String` alias (full NewType migration deferred to V2-γ — every existing call-site cast is touched, and the refactor blast-radius is V2-γ scope per the W17a plan-doc deferral). NEW helper `pub fn check_workspace_id(s: &str) -> ProjectorResult<()>` in `backend/mod.rs` enforces: non-empty, length ≤ 128, ASCII-only, no `/` `\` NUL. NEW `ProjectorError::InvalidWorkspaceId { reason: String }` variant (`#[non_exhaustive]` enum addition — SemVer-additive). `InMemoryBackend` does NOT call the helper at runtime (HashMap-key safety + no external-facing surface); W17b's `ArcadeDbBackend::begin()` MUST call it before constructing the HTTP `/api/v1/begin/{db}` request (this is enforced via reviewer-gate at W17b PR time + via the `arcadedb.rs` stub doc-comment that names the call as W17b's first action).
+
+12. **`serde_json::Value` depth + size helper** (resolves W17a plan-doc MEDIUM #2 at trait surface; companion to sub-decision #11). NEW helper `pub fn check_value_depth_and_size(v: &serde_json::Value, max_depth: usize, max_bytes: usize) -> ProjectorResult<()>` in `backend/mod.rs`. Uses `serde_json::to_vec` for size (O(n) over already-parsed Value, bounded by `max_bytes`) + iterative `Vec`-stack walk for depth (no Rust call-stack recursion). Caller picks limits; recommended W17b defaults `max_depth=32`, `max_bytes=64*1024`. W17b's HTTP-response parser MUST call this AFTER `serde_json::from_slice` on ArcadeDb Cypher results, BEFORE passing the parsed Value into `Vertex::new` / `Edge::new`. `InMemoryBackend` does NOT need this (V2-α canonicalisation already bounds property shape at `canonical.rs` boundary).
+
+W17a plan-doc MEDIUM #5 (`MalformedEntityUuid` umbrella variant for edges) remains V2-γ-deferred per the original plan-doc; broader error-enum refactor is out of W17a-cleanup scope and not blocking W17b.
+
+**Public-API surface delta (this amendment):**
+- `pub fn atlas_projector::check_workspace_id(s: &str) -> ProjectorResult<()>` (NEW)
+- `pub fn atlas_projector::check_value_depth_and_size(v: &Value, max_depth: usize, max_bytes: usize) -> ProjectorResult<()>` (NEW)
+- `pub enum atlas_projector::ProjectorError { InvalidWorkspaceId { reason: String }, .. }` (NEW variant, `#[non_exhaustive]` enum — additive)
+- `fn GraphStateBackend::begin(...) -> ProjectorResult<Box<dyn WorkspaceTxn + 'static>>` (lifetime change `'_` → `'static`; SemVer-additive — type checker widens automatically at all 16 existing call sites)
+
 ---
 
 ## 5. Consequences
@@ -249,6 +267,7 @@ Any change to the trait surface that requires a `#[non_exhaustive]` exception, o
 | 2026-05-13 | ADR-Atlas-010 ships; W17a scope locked (driver scaffold + trait + ADR).                                                              | W17a unblocked.                                                                      |
 | 2026-05-13 | ADR-Atlas-011 opens. Trait surface designed; OQ-1 + OQ-2 resolved.                                                                    | W17b unblocked. Trait + InMemoryBackend + ArcadeDbBackend stub merged in single commit. |
 | 2026-05-13 | `backend_trait_conformance::byte_pin_through_in_memory_backend` passes — pinned hex `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduced via the trait surface. | Byte-determinism preserved across the abstraction.                                  |
+| 2026-05-14 | W17a-cleanup PR: sub-decisions #10/#11/#12 land (`begin()` lifetime `'static`, `check_workspace_id`, `check_value_depth_and_size`) ahead of W17b dispatch.                       | Trait surface SemVer-stable for W17b; boundary helpers in place for first W17b body. |
 | TBD        | W17b: full `ArcadeDbBackend` impl using `reqwest` + Cypher. Cross-backend byte-determinism test passes.                              | Adapter contract validated; W17c unblocked.                                          |
 | TBD        | W17c: Docker-Compose CI workflow + integration tests + benchmark capture.                                                            | Performance estimates validated or embedded-mode threshold triggered.                |
 

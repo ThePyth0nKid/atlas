@@ -121,8 +121,8 @@ pub mod upsert;
 pub use backend::arcadedb::ArcadeDbBackend;
 pub use backend::in_memory::InMemoryBackend;
 pub use backend::{
-    Edge as BackendEdge, EdgeId, EntityUuid, GraphStateBackend, UpsertResult,
-    Vertex as BackendVertex, WorkspaceId, WorkspaceTxn,
+    check_value_depth_and_size, check_workspace_id, Edge as BackendEdge, EdgeId, EntityUuid,
+    GraphStateBackend, UpsertResult, Vertex as BackendVertex, WorkspaceId, WorkspaceTxn,
 };
 pub use canonical::{build_canonical_bytes, graph_state_hash};
 pub use emission::{
