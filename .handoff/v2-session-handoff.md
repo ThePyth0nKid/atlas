@@ -1,12 +1,66 @@
-# Atlas V2 — Session Handoff (V2-α SHIPPED + V2-β Phase 0–10-cleanup SHIPPED, v2.0.0-alpha.2 LIVE; W17b WIP at breakpoint)
+# Atlas V2 — Session Handoff (V2-α SHIPPED + V2-β Phase 0–10.5 SHIPPED, v2.0.0-alpha.2 LIVE)
 
-> **🎯 FRESH-AGENT BOOTSTRAP DOC.** **READ §0-NOW FIRST** (2026-05-14 Docker-restart breakpoint resume guide — exact next-session entry steps). Then §0 "Fresh-Context Onboarding" for general context, then §0z (V2-β Phase 0–9.5 SHIPPED narrative, 2026-05-13), §0a–§0d (Phase 1–4 strategic-iteration SHIPPED narratives, historical), then **`docs/V2-MASTER-PLAN.md`** for the master-resident strategic plan, then **`docs/V2-BETA-ORCHESTRATION-PLAN.md`** + **`docs/V2-BETA-DEPENDENCY-GRAPH.md`** for V2-β welle orchestration + dispatch architecture. Optional: **`.handoff/v2-master-vision-v1.md`** for the full V2-Vision-rationale and **`.handoff/decisions.md`** for the 23 explicit decisions.
+> **🎯 FRESH-AGENT BOOTSTRAP DOC.** **READ §0z2 FIRST** (2026-05-14 V2-β Phase 10 SHIPPED narrative — W17b ArcadeDB driver live on master; next step is W17c Docker-Compose CI). Then §0 "Fresh-Context Onboarding" for general context, then §0z (V2-β Phase 0–9.5 SHIPPED, 2026-05-13), §0-NOW (HISTORICAL: 2026-05-14 Docker-restart breakpoint resume — W17b is now SHIPPED), §0a–§0d (Phase 1–4 strategic-iteration SHIPPED, historical), then **`docs/V2-MASTER-PLAN.md`** for the master-resident strategic plan, then **`docs/V2-BETA-ORCHESTRATION-PLAN.md`** + **`docs/V2-BETA-DEPENDENCY-GRAPH.md`** for V2-β welle orchestration + dispatch architecture. Optional: **`.handoff/v2-master-vision-v1.md`** + **`.handoff/decisions.md`** (24 explicit decisions).
 
-**Erstellt:** 2026-05-12. **V2-α-α.1 SHIPPED:** 2026-05-13 (8 Welles). **V2-β Phase 0–9.5 SHIPPED:** 2026-05-13 (18 PRs merged: #67-#86). **V2-β Phase 10-cleanup + counsel-enablement SHIPPED:** 2026-05-14 (PR #87 docs/v2-beta/counsel-enablement at `36975af`, PR #88 feat/v2-beta/welle-17a-cleanup at `44c5102`). **W17b WIP at breakpoint:** 2026-05-14 — branch `feat/v2-beta/welle-17b-arcadedb-impl` pushed at commit `5382d3c` (subagent stopped clippy-clean, ~2035 LOC across 3 sub-module files + cross-backend test; PR NOT yet opened — see §0-NOW). **Status:** v2.0.0-alpha.2 LIVE on master + GitHub + npm. Master HEAD `44c5102` after the W17a-cleanup (begin() lifetime `'static` + `check_workspace_id` + `check_value_depth_and_size` boundary helpers + `ProjectorError::InvalidWorkspaceId` variant + ADR-Atlas-011 §4.3 amendment). The `graph_state_hash` byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduced through trait surface unchanged. Counsel-engagement scope-doc landed (`.handoff/v2-counsel-engagement-scope.md`, 269 lines, RFP-ready for Nelson to send). **Was als nächstes:** review the W17b WIP branch + parent-led parallel reviewer dispatch + admin-merge → Phase 10.5 consolidation PR → W17c (Docker-Compose CI + integration tests + benchmark capture) → W18 Mem0g cache → W19 v2.0.0-beta.1 ship. Counsel-Engagement-Kickoff parallel-track started (Nelson reviews scope-doc + selects lead firm + sends outreach — engagement-letter signature starts 6-8-week clock for the GDPR Art. 4(1) hash-as-PII opinion that is now non-reversible-without-migration-pain).
+**Erstellt:** 2026-05-12. **V2-α-α.1 SHIPPED:** 2026-05-13 (8 Welles). **V2-β Phase 0–9.5 SHIPPED:** 2026-05-13 (18 PRs merged: #67-#86). **V2-β Phase 10-counsel + 10-cleanup SHIPPED:** 2026-05-14 (PR #87 `36975af`, PR #88 `44c5102`). **V2-β Phase 10-breakpoint handoff SHIPPED:** 2026-05-14 (PR #89 `ddfe3d0`). **V2-β Phase 10 (W17b ArcadeDB driver impl) SHIPPED:** 2026-05-14 (PR #90 `d216844`). **V2-β Phase 10.5 consolidation SHIPPED:** 2026-05-14 (THIS PR). **Status:** v2.0.0-alpha.2 LIVE on master + GitHub + npm. Master HEAD `d216844` (W17b merge — ArcadeDB driver fills the W17a stub with `reqwest 0.12 + rustls-tls + blocking`; ~1860 LOC across `crates/atlas-projector/src/backend/arcadedb/{mod.rs, client.rs, cypher.rs}`; parallel reviewer-dispatch closed 0 CRITICAL + 2 HIGH + 3 MEDIUM + 2 LOW in-commit). The `graph_state_hash` byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduced through the trait surface unchanged. Counsel-engagement scope-doc landed RFP-ready. **Was als nächstes:** W17c Docker-Compose CI workflow (`.github/workflows/atlas-arcadedb-smoke.yml`) + cross-backend byte-determinism actual run against live ArcadeDB sidecar + benchmark capture (replaces ADR-010 §4.10 estimates with measured numbers) → W18 Mem0g Layer-3 cache (ADR-Atlas-012 reserved) → W19 v2.0.0-beta.1 ship. Counsel-Engagement-Kickoff parallel-track Nelson-led (6-8-week clock starts at engagement-letter signature).
 
 ---
 
-## 0-NOW. 2026-05-14 Docker-Restart Breakpoint — Resume Guide
+## 0z2. V2-β Phase 10 (W17b ArcadeDB driver) SHIPPED — 2026-05-14 post-Docker-restart
+
+> **Read this first** if you're a fresh agent continuing V2-β work after 2026-05-14. The Docker-restart breakpoint (§0-NOW below) has been resolved — W17b is merged and on master. This section is the operational summary of what landed and what's queued next.
+
+### What landed today (2026-05-14 master timeline)
+
+| Commit | PR | Welle | Brief |
+|---|---|---|---|
+| `36975af` | #87 | counsel-enablement | RFP-ready 7-SOW counsel scope-doc + README Art. 12 verbatim fix + pin-file sync |
+| `44c5102` | #88 | W17a-cleanup | begin() lifetime → `'static`; `check_workspace_id` + `check_value_depth_and_size` boundary helpers; `ProjectorError::InvalidWorkspaceId` variant; ADR-011 §4.3 amendment. 3 of 4 W17a carry-over MEDIUMs resolved at trait surface. |
+| `ddfe3d0` | #89 | Phase-10-breakpoint | §0-NOW Docker-restart resume guide added to handoff. |
+| `d216844` | #90 | **W17b** | **ArcadeDB driver implementation.** Sub-module split `crates/atlas-projector/src/backend/arcadedb/{mod.rs, client.rs, cypher.rs}` (~1860 LOC). `reqwest 0.12` + `rustls-tls` + `blocking` features added. Cross-backend byte-determinism test `#[ignore]`-gated behind `ATLAS_ARCADEDB_URL`. Parallel `code-reviewer` + `security-reviewer` dispatch (Lesson #8) found 0 CRITICAL + 2 HIGH + 3 MEDIUM + 2 LOW; all fixed in single in-commit fix-commit (`483709a` post-rebase). 153 tests green; clippy `-D warnings` clean; byte-pin `8962c168...e013ac4` reproduced. |
+| THIS commit | (this PR) | Phase 10.5 | Consolidation — CHANGELOG + V2-MASTER-PLAN §6 + decisions.md + V2-BETA-ORCHESTRATION-PLAN + V2-BETA-DEPENDENCY-GRAPH + handoff §0z2. |
+
+### What W17b actually closed
+
+- **All 4 W17a carry-over MEDIUMs disposition is final.** #2 (depth+size cap), #3 (WorkspaceId validation), #4 (`begin()` lifetime) all CLOSED at call-sites. #5 (`MalformedEntityUuid` umbrella) V2-γ-DEFERRED per original plan-doc rationale.
+- **W17b's own reviewer findings** all closed in-commit: HIGH-1 (`run_command` Value-return latent bypass — narrowed to `()`); HIGH-2 (`format!("create database {db_name}")` admin-command injection — closed via stricter `[a-zA-Z0-9_]` db-name allowlist in `db_name_for_workspace`); MEDIUM-1 (SecretString visibility tightened to `pub(crate)`); MEDIUM-2/3 (`ArcadeDbBackend::new` rejects userinfo URLs + non-http/https schemes); LOW-1 (bounded `ensure_database_exists` body read); 15 clippy `doc_lazy_continuation` lints (13 W17b-new + 2 pre-existing on master, all fixed opportunistically).
+- **Trait surface UNCHANGED.** Only one doc-comment paragraph in `backend/mod.rs` was touched (clippy fix). All public items in `GraphStateBackend` / `WorkspaceTxn` / `Vertex` / `Edge` / `UpsertResult` are identical to pre-W17b state. SemVer additive.
+
+### W17b session lessons (load-bearing for W17c+)
+
+1. **Subagent self-audit claim "zero clippy warnings" was incorrect.** 15 lints surfaced under `-D warnings`. Lesson: parent ALWAYS runs `cargo clippy --no-deps -- -D warnings` as part of Step 1 (local verification) before opening a PR; don't trust the subagent's self-audit lint claim.
+2. **Strict-required-status-checks-policy + `BEHIND` mergeState.** When master advances during W17b's branch lifetime (PR #89 landed `ddfe3d0` AFTER W17b branched), the W17b PR shows `mergeStateStatus: BEHIND` and admin-merge fails with "2 of 2 required status checks are expected." Fix: local rebase + force-push-with-lease (preserves SSH-signed commits) — Atlas Standing Protocol Lesson #7 applied successfully.
+3. **Both required checks (`Verify trust-root-modifying commits` + `atlas-web-playwright`) re-ran cleanly after force-push** and both green within ~4 min combined. The `.handoff/**` change in the PR auto-triggers atlas-web-playwright's path filter (no workaround-touch needed).
+
+### What's next (queued, in priority order)
+
+1. **W17c Docker-Compose CI workflow** — `.github/workflows/atlas-arcadedb-smoke.yml` spins up an ArcadeDB sidecar, sets `ATLAS_ARCADEDB_URL`, runs `cargo test -p atlas-projector --test cross_backend_byte_determinism -- --ignored`. Expected: byte-pin reproduces through ArcadeDB path → completes the cross-backend equivalence story. **Plus benchmark capture** replacing ADR-010 §4.10 estimates with measured numbers; embedded-mode reconsideration trigger at p99 > 15 ms.
+2. **W18 Mem0g Layer-3 cache** — ADR-Atlas-012 reserved. Depends on W17c-validated ArcadeDB stability.
+3. **W19 v2.0.0-beta.1 ship** — convergence milestone. ArcadeDB-backed Layer 2 operational + all V2-β wellen merged.
+4. **Counsel-Engagement-Kickoff** (parallel, Nelson-led) — Nelson selects lead firm from 7-firm matrix in `.handoff/v2-counsel-engagement-scope.md` and sends outreach. 6-8-week clock starts at engagement-letter signature. NOT engineering-pipeline-blocking but pre-V2-β-public-materials gating per `DECISION-COUNSEL-1`.
+
+### Pre-flight checklist for W17c session
+
+```bash
+cd /c/Users/nelso/Desktop/atlas
+git status                                          # → clean
+git checkout master && git pull origin master       # → up-to-date with master HEAD d216844 (or later)
+git log --oneline -3                                # → expect:
+#   <Phase 10.5 consolidation merge>
+#   d216844 feat(v2-beta/welle-17b): ArcadeDB driver implementation (#90)
+#   ddfe3d0 docs(v2-beta/phase-10-breakpoint): handoff §0-NOW ... (#89)
+"/c/Program Files/GitHub CLI/gh.exe" pr list --state open --json number,title  # → archive PRs only (#59/#61/#62)
+/c/Users/nelso/.cargo/bin/cargo.exe test -p atlas-projector --quiet  # → 153 tests green
+/c/Users/nelso/.cargo/bin/cargo.exe clippy -p atlas-projector --no-deps -- -D warnings  # → zero warnings
+```
+
+Read `.handoff/v2-beta-welle-17b-plan.md` (lives on W17b branch — fetch via `git checkout d216844 -- .handoff/...` if needed, or read commit-level via gh) for full reviewer-dispatch outcome detail.
+
+---
+
+## 0-NOW. 2026-05-14 Docker-Restart Breakpoint — Resume Guide [HISTORICAL — W17b NOW SHIPPED]
+
+> **Status (post-2026-05-14 ~12:08 UTC):** RESOLVED. W17b shipped as PR #90 (`d216844`) per §0z2 above. This section is preserved as the operational record of how the breakpoint was bridged. Future agents: read §0z2 first; this §0-NOW is historical.
 
 > **Read this section first when resuming after Nelson's computer restart on 2026-05-14.** Brings you from cold context to actionable next step in <5 min.
 
