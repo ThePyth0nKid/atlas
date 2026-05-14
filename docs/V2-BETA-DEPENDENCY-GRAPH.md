@@ -56,9 +56,11 @@ graph TD
     W17a --> W17b
     W17b --> W17c
 
-    W17c --> W18[W18: Mem0g Layer-3 cache<br/>depends on ArcadeDB stable<br/>ADR-Atlas-012]
+    W17c --> W18[W18 Phase A: Mem0g Layer-3 cache design ✓ SHIPPED<br/>spike + ADR-Atlas-012 + plan-doc<br/>8 binding sub-decisions<br/>0 CRITICAL / 2 HIGH / 10 MEDIUM / 4 LOW all fixed in-commit<br/>LanceDB embedded + fastembed-rs LOCKED]
 
-    W18 --> CounselGate{Nelson-led<br/>Counsel sign-off<br/>DECISION-COUNSEL-1}
+    W18 --> W18b[W18b: Mem0g implementation<br/>NEW crates/atlas-mem0g/<br/>~1500-2000 LOC<br/>cross-platform determinism + secure-delete-correctness + B4/B5/B6 benches]
+
+    W18b --> CounselGate{Nelson-led<br/>Counsel sign-off<br/>DECISION-COUNSEL-1}
 
     CounselGate --> W19[W19: v2.0.0-beta.1 ship<br/>version + tag + Release + notes]
 
@@ -123,14 +125,15 @@ W15 through W19 are serial — each welle is one PR at a time. No parallel-confl
 | 009 | W15 | Cypher-validator consolidation rationale |
 | 010 | W16 | ArcadeDB backend choice + embedded-mode trade-off |
 | 011 | W17a | ArcadeDB driver scaffold + trait design |
-| 012 | W18 | Mem0g cache invariants |
-| 013-017 | (reserved for V2-γ/V2-δ) | future |
+| 012 | W18 Phase A | Mem0g Layer-3 cache design (SHIPPED 2026-05-15) |
+| 013 | W18b (optional, if implementation surfaces design amendment) | Mem0g implementation amendments |
+| 014-017 | (reserved for V2-γ/V2-δ) | future |
 
 Existing ADR high-watermark: `ADR-Atlas-006-multi-issuer-sigstore-tracking.md`. V2-β starts at 007.
 
 ## 5. Critical-path analysis
 
-**Longest serial path:** Phase 0 → W14 → W16 → W17a → W17b → W17c → W18 → Counsel-Gate → W19. **9 nodes.** Parallel batches don't shorten this path; they only reduce the wall-clock duration of phases 1 + 4.
+**Longest serial path:** Phase 0 → W14 → W16 → W17a → W17b → W17c → W18 → W18b → Counsel-Gate → W19. **10 nodes.** Parallel batches don't shorten this path; they only reduce the wall-clock duration of phases 1 + 4.
 
 **Theoretical wall-clock (Atlas's 1-welle-per-session cadence):**
 
