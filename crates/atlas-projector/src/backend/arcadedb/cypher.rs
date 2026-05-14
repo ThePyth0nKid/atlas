@@ -177,21 +177,33 @@ pub(crate) fn upsert_vertex_command(workspace_id: &WorkspaceId, v: &BackendVerte
 /// as properties on the edge so [`edges_query`]'s parser can
 /// reconstruct the `BackendEdge::from` / `to` fields without
 /// re-traversing the graph.
+///
+/// **ArcadeDB Cypher quirks** (W17c regression hotfix):
+/// - Parameter names `from` and `to` are reserved (they collide with
+///   ArcadeDB SQL's `CREATE EDGE ... FROM ... TO ...` keywords) —
+///   any Cypher query that binds `$from` or `$to` silently returns
+///   empty result sets even on `MATCH (n {p: $from})`. We use `$src`
+///   (source) and `$dst` (destination) instead.
+/// - Edge property name `label` collides with TinkerPop's
+///   `T.label` reserved token; `SET r.label = ...` raises
+///   "Value 'label' ... is not supported". We store the edge's
+///   Atlas-side label under property `edge_label` and translate back
+///   to `BackendEdge::label` in [`parse_edge_row`].
 pub(crate) fn upsert_edge_command(workspace_id: &WorkspaceId, e: &BackendEdge) -> (String, Value) {
     let command = "\
-        MATCH (a:Vertex {entity_uuid: $from, workspace_id: $ws}), \
-              (b:Vertex {entity_uuid: $to,   workspace_id: $ws}) \
+        MATCH (a:Vertex {entity_uuid: $src, workspace_id: $ws}), \
+              (b:Vertex {entity_uuid: $dst, workspace_id: $ws}) \
         MERGE (a)-[r:Edge {edge_id: $eid, workspace_id: $ws}]->(b) \
-        SET r.label = $label, r.properties = $props, r.event_uuid = $eu, \
+        SET r.edge_label = $lbl, r.properties = $props, r.event_uuid = $eu, \
             r.rekor_log_index = $rli, r.author_did = $did, \
-            r.from_entity_uuid = $from, r.to_entity_uuid = $to"
+            r.from_entity_uuid = $src, r.to_entity_uuid = $dst"
         .to_string();
     let params = json!({
         "ws": workspace_id,
         "eid": e.edge_id,
-        "from": e.from,
-        "to": e.to,
-        "label": e.label,
+        "src": e.from,
+        "dst": e.to,
+        "lbl": e.label,
         "props": serde_json::to_value(&e.properties).unwrap_or(Value::Null),
         "eu": e.event_uuid,
         "rli": e.rekor_log_index,
@@ -309,7 +321,11 @@ pub(crate) fn parse_vertex_row(
 /// Parse one row of a `RETURN e` edges query into a [`BackendEdge`].
 ///
 /// Expected shape mirrors [`parse_vertex_row`] but with `edge_id`,
-/// `from_entity_uuid`, `to_entity_uuid`, `label` instead.
+/// `from_entity_uuid`, `to_entity_uuid`, `edge_label` instead.
+/// The Atlas-side `BackendEdge::label` is stored under property
+/// `edge_label` on the ArcadeDB side because `label` collides with
+/// TinkerPop's `T.label` token (W17c regression hotfix; see
+/// [`upsert_edge_command`] doc).
 pub(crate) fn parse_edge_row(
     row: &Value,
     workspace_id: &WorkspaceId,
@@ -331,7 +347,7 @@ pub(crate) fn parse_edge_row(
     }
     let from = require_string(map, "from_entity_uuid")?;
     let to = require_string(map, "to_entity_uuid")?;
-    let label = require_string(map, "label")?;
+    let label = require_string(map, "edge_label")?;
     let properties = parse_properties(map.get("properties"))?;
     let event_uuid = require_string(map, "event_uuid")?;
     let rekor_log_index = parse_optional_u64(map.get("rekor_log_index"))?;
@@ -543,11 +559,19 @@ mod tests {
         assert!(!cmd.contains("node-b"));
         assert!(!cmd.contains("knows"));
         for placeholder in [
-            "$ws", "$eid", "$from", "$to", "$label", "$props", "$eu", "$rli", "$did",
+            "$ws", "$eid", "$src", "$dst", "$lbl", "$props", "$eu", "$rli", "$did",
         ] {
             assert!(
                 cmd.contains(placeholder),
                 "placeholder {placeholder} missing in {cmd:?}"
+            );
+        }
+        // Reserved param names (collide with ArcadeDB SQL keywords +
+        // TinkerPop tokens) MUST be absent.
+        for forbidden in ["$from", "$to", "$label"] {
+            assert!(
+                !cmd.contains(forbidden),
+                "forbidden placeholder {forbidden} present in {cmd:?}"
             );
         }
         assert_eq!(params.get("eid").and_then(|v| v.as_str()), Some("edge-1"));
@@ -682,7 +706,9 @@ mod tests {
             "workspace_id": "ws-1",
             "from_entity_uuid": "node-a",
             "to_entity_uuid": "node-b",
-            "label": "uses",
+            // `edge_label` not `label` — `label` collides with
+            // TinkerPop's T.label token (W17c hotfix).
+            "edge_label": "uses",
             "properties": {},
             "event_uuid": "ev2",
             "rekor_log_index": 1003,

@@ -57,7 +57,8 @@
 pub(crate) mod client;
 pub(crate) mod cypher;
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 
 use reqwest::blocking::Client;
 use serde_json::{json, Value};
@@ -114,6 +115,17 @@ pub struct ArcadeDbBackend {
     /// allocations). The clone-on-`begin()` cost is dwarfed by the
     /// HTTP round-trip.
     credentials: BasicAuth,
+    /// Per-(backend-instance) cache of database names whose Cypher
+    /// schema types (`Vertex`, `Edge`) have already been bootstrapped
+    /// via [`ensure_schema_types_exist`]. Shared across clones so a
+    /// projector with many backend handles only pays the schema-init
+    /// HTTP cost once per process per workspace. W17c regression fix:
+    /// ArcadeDB 24.10.1 silently no-ops `MERGE (a)-[r:Edge]->(b)` when
+    /// the `Edge` type does not yet exist (CREATE auto-creates it,
+    /// MERGE does not). Without this bootstrap, edges written via the
+    /// trait surface vanish and `canonical_state()` returns a
+    /// vertex-only hash that diverges from `InMemoryBackend`.
+    schema_initialized: Arc<Mutex<HashSet<String>>>,
 }
 
 impl ArcadeDbBackend {
@@ -165,6 +177,7 @@ impl ArcadeDbBackend {
             base_url: Arc::new(base_url),
             client,
             credentials,
+            schema_initialized: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -253,6 +266,110 @@ impl ArcadeDbBackend {
         )))
     }
 
+    /// Bootstrap the Cypher schema types (`Vertex`, `Edge`) for the
+    /// per-workspace database. Idempotent; runs at most once per
+    /// `(ArcadeDbBackend instance, db_name)` pair under contention-free
+    /// conditions. Under contention (two threads racing the cache
+    /// check) the HTTP bootstrap may run multiple times — that's
+    /// harmless because the combined CREATE+DELETE Cypher statement
+    /// is itself idempotent (any leftover sentinels are matched and
+    /// deleted by the same statement that creates fresh ones).
+    ///
+    /// **W17c regression fix.** ArcadeDB 24.10.1's Cypher subset
+    /// auto-creates the `Vertex` type on first `MERGE (n:Vertex)` but
+    /// does NOT auto-create the `Edge` type on first
+    /// `MERGE (a)-[r:Edge]->(b)`. Without an existing `Edge` type the
+    /// edge MERGE silently no-ops: the HTTP call returns 2xx, the
+    /// transaction commits cleanly, but no edge row is persisted.
+    /// `vertices_sorted` then returns the written vertices while
+    /// `edges_sorted` returns an empty array, and
+    /// `canonical_state()` reports a vertex-only hash that diverges
+    /// from `InMemoryBackend`'s hash for the same input. The
+    /// cross-backend byte-determinism test (W17c CI) fires on this
+    /// drift.
+    ///
+    /// Workaround: register both types via a sentinel
+    /// `CREATE (a:Vertex {_atlas_schema_init: true})-[r:Edge
+    /// {_atlas_schema_init: true}]->(b:Vertex {_atlas_schema_init: true})`
+    /// (Cypher CREATE on edges DOES auto-create the type) and then
+    /// clean up the sentinel records via `DETACH DELETE`. Schema
+    /// changes persist; data side effects do not. ~6 ms HTTP cost,
+    /// paid at most once per (process, db_name) pair thanks to the
+    /// cache.
+    ///
+    /// V2-γ may replace this with a proper schema-DDL call once
+    /// ArcadeDB exposes a stable `create edge type X if not exists`
+    /// SQL grammar on freshly-created databases (the same DDL works
+    /// on populated databases, hinting at a parser-state bug in
+    /// 24.10.1; the sentinel workaround is robust across that
+    /// difference).
+    fn ensure_schema_types_exist(&self, db_name: &str) -> ProjectorResult<()> {
+        {
+            let cache = self.schema_initialized.lock().map_err(|_| {
+                ProjectorError::CanonicalisationFailed(
+                    "ArcadeDbBackend schema_initialized cache lock poisoned".to_string(),
+                )
+            })?;
+            if cache.contains(db_name) {
+                return Ok(());
+            }
+        }
+
+        // Combined CREATE + DETACH DELETE in a SINGLE Cypher statement
+        // so the operation is atomic from the client's perspective: if
+        // the HTTP call returns 2xx, the schema types are registered
+        // AND the sentinel records are cleaned up. If the HTTP call
+        // fails, NEITHER side effect lands. Closes the W17c review
+        // HIGH-1 finding: a separate CREATE-then-DELETE pair leaves
+        // orphan sentinel nodes if the process crashes between the
+        // two calls.
+        //
+        // ArcadeDB Cypher accepts the `CREATE ... WITH ... DETACH
+        // DELETE ...` chain in a single command and registers the
+        // Edge type as a side effect of the CREATE phase; the schema
+        // change persists even though the data records are deleted in
+        // the same statement.
+        let bootstrap_cypher = "\
+            CREATE (a:Vertex {_atlas_schema_init: true, _atlas_init_role: 'a'}) \
+                  -[r:Edge {_atlas_schema_init: true}]-> \
+                   (b:Vertex {_atlas_schema_init: true, _atlas_init_role: 'b'}) \
+            WITH a, b, r \
+            DETACH DELETE a, b";
+        self.run_admin_command(db_name, bootstrap_cypher, json!({}))?;
+
+        // Mark this db_name as initialized so subsequent begin() calls
+        // skip the ~6 ms HTTP cost.
+        let mut cache = self.schema_initialized.lock().map_err(|_| {
+            ProjectorError::CanonicalisationFailed(
+                "ArcadeDbBackend schema_initialized cache lock poisoned".to_string(),
+            )
+        })?;
+        cache.insert(db_name.to_string());
+        Ok(())
+    }
+
+    /// Run a Cypher command outside any transaction (used by
+    /// [`ensure_schema_types_exist`]). Distinct from
+    /// [`ArcadeDbTxn::run_command`] which is transaction-bound.
+    fn run_admin_command(
+        &self,
+        db_name: &str,
+        command: &str,
+        params: Value,
+    ) -> ProjectorResult<()> {
+        let url = self.endpoint(&format!("api/v1/command/{db_name}"))?;
+        let body = json!({
+            "language": "cypher",
+            "command": command,
+            "params": params,
+        });
+        let req = self.client.post(url).json(&body);
+        let req = apply_basic_auth(req, &self.credentials);
+        let resp = req.send().map_err(map_transport_error)?;
+        let _ = map_response_error(resp, &self.credentials.username)?;
+        Ok(())
+    }
+
     /// Run a Cypher query (read path) against the given database.
     /// Returns the parsed `result` array. Used by `vertices_sorted`
     /// + `edges_sorted`.
@@ -290,6 +407,14 @@ impl GraphStateBackend for ArcadeDbBackend {
         // Lazy-create the per-workspace database if needed (ADR-010 §4
         // sub-decision #4 — one DB per workspace).
         self.ensure_database_exists(&db_name)?;
+
+        // Ensure Cypher schema types (Vertex + Edge) are registered.
+        // ArcadeDB 24.10.1 silently no-ops MERGE on edges if Edge type
+        // does not yet exist; W17c regression fix — see
+        // `ensure_schema_types_exist` doc-comment. Idempotent and
+        // cached per (backend instance, db_name) so this is paid at
+        // most once per workspace per process lifetime.
+        self.ensure_schema_types_exist(&db_name)?;
 
         // POST /api/v1/begin/{db_name}, extract session id from
         // response header.

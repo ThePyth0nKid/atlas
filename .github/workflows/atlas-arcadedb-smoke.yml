@@ -1,0 +1,165 @@
+# Atlas V2-β Welle 17c — ArcadeDB integration smoke + benchmark capture.
+#
+# Spins up an ephemeral ArcadeDB Server-mode sidecar via
+# `infra/docker-compose.arcadedb-smoke.yml`, runs:
+#
+#   1. `cross_backend_byte_determinism` integration test — reproduces
+#      the byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4`
+#      through BOTH `InMemoryBackend` AND `ArcadeDbBackend`, verifying
+#      ADR-Atlas-010 §4.9 adapter contract is honoured in production.
+#
+#   2. `arcadedb_benchmark` integration test — captures three baselines
+#      (B1 sanity cross-pin, B2 incremental upsert latency p50/p95/p99,
+#      B3 depth-3 traversal latency p50/p95/p99 on 50v/100e fixture).
+#      Outputs uploaded as workflow artifact. NOT a hard CI gate; the
+#      ADR-010 §4.10 T2 trigger (p99 > 15 ms at 10M-vertex scale) is a
+#      deployment-time observation, not a CI-time observation.
+#
+# Conventions per Atlas Standing Protocol:
+#   - SHA-pinned actions (parity with `.github/workflows/hsm-byte-equivalence.yml`)
+#   - `permissions: { contents: read }` (narrowest blast radius)
+#   - paths-gated trigger (limits CI fan-out)
+#   - cancel-in-progress concurrency (force-push doesn't spawn duplicate runs)
+#   - Linux `ubuntu-latest` only (ArcadeDB docker image is amd64-linux)
+#
+# **Test password is hardcoded as `playwithdata`** — the container is
+# ephemeral within the CI runner with no inbound network exposure;
+# established pattern in `.github/workflows/hsm-byte-equivalence.yml:88`
+# (fork-PR fallback to literal `'1234'`). The same value is used by
+# `tools/run-arcadedb-smoke-local.sh` for parity with CI.
+
+name: atlas-arcadedb-smoke
+
+on:
+  pull_request:
+    branches:
+      - master
+      - main
+    paths:
+      - 'crates/atlas-projector/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'infra/docker-compose.arcadedb-smoke.yml'
+      - '.github/workflows/atlas-arcadedb-smoke.yml'
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - 'crates/atlas-projector/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'infra/docker-compose.arcadedb-smoke.yml'
+      - '.github/workflows/atlas-arcadedb-smoke.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-arcadedb-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  arcadedb-smoke:
+    name: arcadedb-smoke
+    runs-on: ubuntu-latest
+    # 10 min ceiling. Spike §4.7 budgets 8 min; we add 2 min for
+    # cargo-cache cold-misses + cold-start variance (R1 mitigation).
+    timeout-minutes: 10
+    env:
+      # Ephemeral container, no inbound exposure → hardcoded test PW
+      # acceptable per Atlas convention (see file header comment).
+      ATLAS_ARCADEDB_ROOT_PASSWORD: playwithdata
+      ATLAS_ARCADEDB_URL: http://localhost:2480
+      ATLAS_ARCADEDB_USERNAME: root
+      ATLAS_ARCADEDB_PASSWORD: playwithdata
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain
+        # NOTE: `dtolnay/rust-toolchain` does not publish version tags
+        # (it ships a `stable` rolling branch). The pinned commit
+        # `29eef336...` is the head of `refs/heads/stable` as of
+        # 2026-05-03 — a BRANCH-TIP SHA, not a tag-resolved immutable
+        # commit. This is the same posture taken by every other Atlas
+        # workflow that uses this action (see
+        # `.github/workflows/hsm-byte-equivalence.yml:209`). W17c
+        # security-review M-1: if dtolnay force-pushes `stable`, this
+        # pin still references the commit-at-pin-time (Git SHAs are
+        # immutable); but cache misses would not rebuild against a
+        # newer commit until this line is updated. Atlas accepts this
+        # supply-chain posture for the Rust toolchain action across
+        # all lanes.
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable as of 2026-05-03
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
+        with:
+          workspaces: . -> target
+
+      - name: Start ArcadeDB sidecar
+        run: docker compose -f infra/docker-compose.arcadedb-smoke.yml up -d
+
+      - name: Wait for ArcadeDB healthcheck
+        # The compose file declares a healthcheck with 12 retries at 5 s
+        # interval + 30 s start_period — total ceiling ~90 s. Our wait
+        # loop adds an outer 60 s safety net polling `docker compose
+        # ps`. If the container is not `healthy` after 30 iterations
+        # × 2 s = 60 s on top of the start_period, the run aborts.
+        run: |
+          # `set +x` defends against `RUNNER_DEBUG=1` shell-trace
+          # leaking the JAVA_OPTS string (which includes the
+          # `-Darcadedb.server.rootPassword=...` literal) into the
+          # workflow log via docker-compose env-expansion echo. Same
+          # posture as `.github/workflows/hsm-byte-equivalence.yml`.
+          # W17c security-review L-2.
+          set +x
+          set -euo pipefail
+          tries=0
+          until docker compose -f infra/docker-compose.arcadedb-smoke.yml ps arcadedb \
+                  --format json | grep -q '"Health":"healthy"'; do
+            tries=$((tries + 1))
+            if [ "$tries" -gt 30 ]; then
+              echo "ArcadeDB did not become healthy within 60 s after start_period"
+              docker compose -f infra/docker-compose.arcadedb-smoke.yml logs arcadedb
+              exit 1
+            fi
+            sleep 2
+          done
+          echo "ArcadeDB is healthy (after $((tries * 2)) s of polling on top of start_period)"
+
+      - name: Cross-backend byte-determinism test
+        # The flagship assertion: byte-pin reproduces through the
+        # ArcadeDB path. Failure here means the §4.9 adapter contract
+        # (`ORDER BY entity_uuid ASC` / `ORDER BY edge_id ASC` in the
+        # Cypher templates) is violated OR a stamping field
+        # (event_uuid / rekor_log_index / author_did) does not
+        # round-trip correctly through the ArcadeDB schema.
+        run: cargo test -p atlas-projector --test cross_backend_byte_determinism -- --ignored --nocapture
+
+      - name: ArcadeDB benchmark capture
+        # Three measurements (B1 sanity, B2 upsert latency, B3 depth-3
+        # traversal). Output captured to `target/arcadedb-bench.log`
+        # and uploaded as workflow artifact. Failure here is a test
+        # panic — measurement excursions (e.g. B3 p99 > 15 ms) DO NOT
+        # fail the run; ADR-010 §4.10 T2 trigger is a
+        # deployment-telemetry observation, not a CI gate.
+        run: |
+          set -o pipefail
+          mkdir -p target
+          cargo test -p atlas-projector --test arcadedb_benchmark -- --ignored --nocapture \
+            2>&1 | tee target/arcadedb-bench.log
+
+      - name: Upload benchmark log artifact
+        if: always()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: arcadedb-bench-log
+          path: target/arcadedb-bench.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Stop ArcadeDB sidecar
+        if: always()
+        run: docker compose -f infra/docker-compose.arcadedb-smoke.yml down -v

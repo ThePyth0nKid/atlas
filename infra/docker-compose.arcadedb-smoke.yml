@@ -1,0 +1,66 @@
+# Atlas V2-β Welle 17c — ArcadeDB smoke test sidecar.
+#
+# Spins up a single ArcadeDB Server-mode container against which the
+# `atlas-projector` `cross_backend_byte_determinism` + `arcadedb_benchmark`
+# integration tests run. Used by:
+#
+#   - .github/workflows/atlas-arcadedb-smoke.yml (CI)
+#   - tools/run-arcadedb-smoke-local.sh         (local dev)
+#
+# Implements `docs/V2-BETA-ARCADEDB-SPIKE.md` §4.7 sketch with two
+# adjustments documented in `.handoff/v2-beta-welle-17c-plan.md`:
+#   1. healthcheck retries=12 + start_period=30s (was 6) — robuster
+#      gegen CI-runner cold-start variance.
+#   2. No persistent named volume — every test run is ephemeral (CI tears
+#      the container down after each run; local-dev script uses
+#      `down -v` in its EXIT trap).
+#
+# Image: `arcadedata/arcadedb:24.10.1` (~480 MB; startup 15-25 s).
+# Port:  2480 (HTTP API; UI also serves here).
+# Auth:  HTTP Basic, root / ATLAS_ARCADEDB_ROOT_PASSWORD env-var
+#        (default 'playwithdata' from workflow / local-script).
+
+services:
+  arcadedb:
+    image: arcadedata/arcadedb:24.10.1
+    container_name: atlas-arcadedb-smoke
+    # Explicit restart policy so the compose file is portable across
+    # docker-compose versions whose default `restart:` policy might
+    # differ. W17c review L-1: ephemeral CI container — never auto-
+    # restart on failure.
+    restart: "no"
+    environment:
+      # ArcadeDB reads its server-mode + root-password config via Java
+      # system properties on the JVM command line — `-D<prop>=<value>`
+      # in `JAVA_OPTS`. Setting these as docker-compose `environment:`
+      # entries (e.g. `arcadedb.server.rootPassword: ...`) does NOT
+      # work: the 24.10.1 entrypoint falls into an interactive
+      # `Root password [BLANK=auto generate it]:` prompt and the
+      # container never reaches the HTTP listener. Spike §4.7 sketch
+      # documented the env-var shape but the in-flight container
+      # behaviour requires the JVM-property form.
+      #
+      # JVM heap bounded so the container fits comfortably in a 2 GB
+      # CI runner alongside Rust build artefacts.
+      JAVA_OPTS: >-
+        -Xms256m
+        -Xmx512m
+        -Darcadedb.server.rootPassword=${ATLAS_ARCADEDB_ROOT_PASSWORD:-playwithdata}
+        -Darcadedb.server.mode=production
+    ports:
+      - "2480:2480"
+    healthcheck:
+      # `/api/v1/ready` is unauthenticated in ArcadeDB 24.x — returns
+      # 204 No Content once the HTTP listener is accepting requests.
+      # We deliberately do NOT pass `-u root:<pw>` here because that
+      # would leave the password visible in `docker inspect` output for
+      # the container's lifetime (W17c security-review M-2). Atlas
+      # standing protocol: credentials never appear in container
+      # metadata, even for ephemeral CI containers.
+      test:
+        - "CMD-SHELL"
+        - "curl -fsS http://localhost:2480/api/v1/ready || exit 1"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
