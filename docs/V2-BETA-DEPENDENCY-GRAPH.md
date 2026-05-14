@@ -58,15 +58,21 @@ graph TD
 
     W17c --> W18[W18 Phase A: Mem0g Layer-3 cache design ✓ SHIPPED<br/>spike + ADR-Atlas-012 + plan-doc<br/>8 binding sub-decisions<br/>0 CRITICAL / 2 HIGH / 10 MEDIUM / 4 LOW all fixed in-commit<br/>LanceDB embedded + fastembed-rs LOCKED]
 
-    W18 --> W18b[W18b: Mem0g implementation<br/>NEW crates/atlas-mem0g/<br/>~1500-2000 LOC<br/>cross-platform determinism + secure-delete-correctness + B4/B5/B6 benches]
+    W18 --> W18b[W18b: Mem0g implementation ✓ SHIPPED<br/>NEW crates/atlas-mem0g/ ~2300 LOC<br/>W17a-pattern Phase-A-scaffold<br/>0 CRITICAL / 4 unique HIGH / 6 MEDIUM all fixed in-commit<br/>578 tests; clippy clean; byte-pin reproduces]
+
+    W18b --> W18c[W18c parallel-track: pre-V2-β-1-ship gate<br/>Nelson supply-chain constant lift<br/>fastembed try_new_from_user_defined wiring<br/>+ 3 tokenizer-file SHA-256 pins<br/>+ close spike §12 V1-V4 verification gaps<br/>+ lift LanceDB ANN/search body stubs<br/>ADR-Atlas-013 reserved]
 
     W18b --> CounselGate{Nelson-led<br/>Counsel sign-off<br/>DECISION-COUNSEL-1}
 
-    CounselGate --> W19[W19: v2.0.0-beta.1 ship<br/>version + tag + Release + notes]
+    W18c --> W19[W19: v2.0.0-beta.1 ship<br/>version + tag + Release + notes]
+    CounselGate --> W19
 
     style Phase0 fill:#ffcccc
     style Phase3 fill:#ccffcc
+    style W18 fill:#ccffcc
+    style W18b fill:#ccffcc
     style W19 fill:#ccffcc
+    style W18c fill:#ffffcc
     style CounselGate fill:#ffffcc
     style PB1 fill:#e6f3ff
     style PB2 fill:#e6f3ff
@@ -85,9 +91,10 @@ Phase 3 → W12, W13, W14
 W12, W13 → W15 (Cypher consolidation, rule-of-three)
 W14, W15 → W16
 
-W16 (spike) → W17a → W17b → W17c → W18
+W16 (spike) → W17a → W17b → W17c → W18 → W18b
 
-W18 → Counsel-Gate (Nelson-led) → W19 (beta.1 ship)
+W18b → Counsel-Gate (Nelson-led) → W19 (beta.1 ship)
+W18b → W18c (parallel-track, pre-V2-β-1-ship blocker) → W19
 ```
 
 ## 3. File-area conflict matrix
@@ -126,14 +133,14 @@ W15 through W19 are serial — each welle is one PR at a time. No parallel-confl
 | 010 | W16 | ArcadeDB backend choice + embedded-mode trade-off |
 | 011 | W17a | ArcadeDB driver scaffold + trait design |
 | 012 | W18 Phase A | Mem0g Layer-3 cache design (SHIPPED 2026-05-15) |
-| 013 | W18b (optional, if implementation surfaces design amendment) | Mem0g implementation amendments |
+| 013 | W18c (reserved) | Mem0g implementation amendments — Nelson supply-chain constant lift + fastembed `try_new_from_user_defined` wiring + V1-V4 verification + LanceDB body fill-in |
 | 014-017 | (reserved for V2-γ/V2-δ) | future |
 
 Existing ADR high-watermark: `ADR-Atlas-006-multi-issuer-sigstore-tracking.md`. V2-β starts at 007.
 
 ## 5. Critical-path analysis
 
-**Longest serial path:** Phase 0 → W14 → W16 → W17a → W17b → W17c → W18 → W18b → Counsel-Gate → W19. **10 nodes.** Parallel batches don't shorten this path; they only reduce the wall-clock duration of phases 1 + 4.
+**Longest serial path:** Phase 0 → W14 → W16 → W17a → W17b → W17c → W18 → W18b → {Counsel-Gate ∥ W18c} → W19. **10 nodes** (W18b SHIPPED reduces remaining critical-path to 3 nodes: W18c parallel-with-Counsel-Gate → W19). Parallel batches don't shorten this path; they only reduce the wall-clock duration of phases 1 + 4.
 
 **Theoretical wall-clock (Atlas's 1-welle-per-session cadence):**
 
