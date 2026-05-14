@@ -25,6 +25,12 @@ members = [
     # will live in atlas-trust-core; the projector crate produces the
     # graph-state-hash that the attestation event payload carries.
     "crates/atlas-projector",
+    # V2-β Welle 18b: Layer-3 semantic cache crate (Mem0g concept).
+    # Implements ADR-Atlas-012's binding sub-decisions: LanceDB embedded
+    # + fastembed-rs paired (default-OFF feature `lancedb-backend`),
+    # Atlas-owned secure-delete wrapper, supply-chain-verified model
+    # download. Depends on atlas-trust-core for `AtlasEvent`; no cycle.
+    "crates/atlas-mem0g",
 ]
 
 [workspace.package]

@@ -87,6 +87,42 @@ pub struct PolicyEntry {
     pub author_did: Option<String>,
 }
 
+/// V2-β Welle 18b: a GDPR Art. 17 erasure record for a Layer-3
+/// embedding that was secure-deleted from the Mem0g cache. Keyed by
+/// the `event_id` whose embedding was erased (in
+/// `GraphState.embedding_erasures`). Append-only per event_id —
+/// `apply_embedding_erased` refuses to re-erase an event (the cached
+/// Layer-1 erasure record is itself an append-only auditable artefact
+/// for regulator evidence per ADR-Atlas-012 §4 sub-decision #5).
+///
+/// The audit-event itself is NEVER subject to secure-delete; this
+/// record stays in `events.jsonl` as cryptographic evidence of the
+/// erasure for regulator-evidentiary completeness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbeddingErasureEntry {
+    /// Per-tenant workspace identifier whose data was erased. Lets a
+    /// regulator scope the erasure to a specific tenant in cross-
+    /// reference with the Subject Access Request log.
+    pub workspace_id: String,
+
+    /// ISO-8601 timestamp the erasure was performed at.
+    pub erased_at: String,
+
+    /// Optional DID of the operator or data-subject-identified
+    /// requestor. Defaults to the event's `author_did` if omitted from
+    /// payload (resolved at projection time).
+    pub requestor_did: Option<String>,
+
+    /// Canonical reason code: `"gdpr_art_17"`, `"operator_purge"`, or
+    /// `"retention_policy_expiry"`. Defaults to `"operator_purge"` if
+    /// omitted from payload (resolved at projection time).
+    pub reason_code: String,
+
+    /// V2-α Welle 1 optional agent-identity of the erasure emitter.
+    /// `None` for V1-era events without agent attribution.
+    pub author_did: Option<String>,
+}
+
 /// V2-β Welle 14: a Sigstore Rekor anchor reference for a previously-
 /// emitted event. Keyed by `event_id` (the event being anchored) in
 /// `GraphState.rekor_anchors`. Append-only per event_id —
@@ -229,6 +265,16 @@ pub struct GraphState {
     /// append-only by spec). Empty for V1 / V2-α-shape traces (omitted
     /// from canonical bytes).
     pub rekor_anchors: BTreeMap<String, AnchorEntry>,
+
+    /// V2-β Welle 18b schema-additive: GDPR Art. 17 erasure records
+    /// keyed by `event_id` (the event whose Layer-3 embedding was
+    /// secure-deleted). One erasure record per event — duplicate
+    /// erasure attempts surface a structured error rather than
+    /// last-write-wins (the erasure record itself is append-only
+    /// regulator evidence per ADR-Atlas-012 §4 sub-decision #5).
+    /// Empty for V1 / V2-α-shape / V2-β-pre-W18b traces (omitted
+    /// from canonical bytes, preserving byte-pin compatibility).
+    pub embedding_erasures: BTreeMap<String, EmbeddingErasureEntry>,
 }
 
 impl GraphState {
@@ -270,6 +316,21 @@ impl GraphState {
         self.rekor_anchors.insert(event_id, anchor)
     }
 
+    /// V2-β Welle 18b: insert a Layer-3 embedding-erasure record.
+    /// Returns the previous record if the `event_id` was already
+    /// erased — caller's dispatch layer (`upsert::apply_embedding_erased`)
+    /// treats a non-`None` return as a security-conservative error
+    /// (the audit record itself is append-only regulator evidence
+    /// per ADR-Atlas-012 §4 sub-decision #5). Mirrors the
+    /// `upsert_anchor` + W14-duplicate-policy split.
+    pub fn upsert_embedding_erasure(
+        &mut self,
+        event_id: String,
+        erasure: EmbeddingErasureEntry,
+    ) -> Option<EmbeddingErasureEntry> {
+        self.embedding_erasures.insert(event_id, erasure)
+    }
+
     /// Structural-integrity check: every edge's `from_entity` and
     /// `to_entity` MUST reference an `entity_uuid` present in `nodes`.
     /// Called by `canonical::build_canonical_bytes` before encoding
@@ -295,6 +356,15 @@ impl GraphState {
             if anchor_key.is_empty() {
                 return Err(ProjectorError::MalformedEntityUuid(
                     "rekor_anchor event_id key is empty".to_string(),
+                ));
+            }
+        }
+        // V2-β Welle 18b: same emptiness guard for embedding-erasure
+        // event_id keys (symmetric to rekor_anchors).
+        for erasure_key in self.embedding_erasures.keys() {
+            if erasure_key.is_empty() {
+                return Err(ProjectorError::MalformedEntityUuid(
+                    "embedding_erasure event_id key is empty".to_string(),
                 ));
             }
         }
