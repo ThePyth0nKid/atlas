@@ -24,6 +24,11 @@ services:
   arcadedb:
     image: arcadedata/arcadedb:24.10.1
     container_name: atlas-arcadedb-smoke
+    # Explicit restart policy so the compose file is portable across
+    # docker-compose versions whose default `restart:` policy might
+    # differ. W17c review L-1: ephemeral CI container — never auto-
+    # restart on failure.
+    restart: "no"
     environment:
       # ArcadeDB reads its server-mode + root-password config via Java
       # system properties on the JVM command line — `-D<prop>=<value>`
@@ -45,9 +50,16 @@ services:
     ports:
       - "2480:2480"
     healthcheck:
+      # `/api/v1/ready` is unauthenticated in ArcadeDB 24.x — returns
+      # 204 No Content once the HTTP listener is accepting requests.
+      # We deliberately do NOT pass `-u root:<pw>` here because that
+      # would leave the password visible in `docker inspect` output for
+      # the container's lifetime (W17c security-review M-2). Atlas
+      # standing protocol: credentials never appear in container
+      # metadata, even for ephemeral CI containers.
       test:
         - "CMD-SHELL"
-        - "curl -fsS -u root:${ATLAS_ARCADEDB_ROOT_PASSWORD:-playwithdata} http://localhost:2480/api/v1/ready || exit 1"
+        - "curl -fsS http://localhost:2480/api/v1/ready || exit 1"
       interval: 5s
       timeout: 3s
       retries: 12

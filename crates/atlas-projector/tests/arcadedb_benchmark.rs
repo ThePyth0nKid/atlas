@@ -2,11 +2,20 @@
 //!
 //! Three measurements, all `#[ignore]`-gated behind `ATLAS_ARCADEDB_URL`:
 //!
-//! - **B1 — Cross-backend byte-pin sanity.** Smaller belt-and-braces of
-//!   `cross_backend_byte_determinism::cross_backend_byte_determinism_pin`;
-//!   reuses the same 3-node + 2-edge fixture and asserts that both
-//!   backends reproduce the V2-α byte-pin. Diagnoses environment-setup
-//!   issues fast before B2/B3 run.
+//! - **B1 — Cross-backend equivalence sanity.** Smaller belt-and-braces
+//!   of `cross_backend_byte_determinism::cross_backend_byte_determinism_pin`;
+//!   reuses the same 3-node + 2-edge topology and asserts that the
+//!   InMemory and ArcadeDB backends produce IDENTICAL hashes for the
+//!   same input. Diagnoses environment-setup issues fast before B2/B3
+//!   run. **NOT the authoritative byte-pin gate** — B1 uses a
+//!   simplified `make_edge` helper that omits `author_did` on edges
+//!   to keep the call-sites compact, so its hex output differs from
+//!   the `EXPECTED_HEX` reference pin even when both backends are
+//!   correct. The authoritative cross-backend byte-pin assertion
+//!   lives in `cross_backend_byte_determinism::cross_backend_byte_determinism_pin`
+//!   which uses the full stamping fixture and asserts against
+//!   `EXPECTED_HEX` directly. CI runs BOTH; B1 is the cheap canary,
+//!   the sibling is the load-bearing gate.
 //!
 //! - **B2 — Incremental upsert latency.** Measures p50 / p95 / p99 of a
 //!   single vertex + edge upsert in its own transaction against a fresh

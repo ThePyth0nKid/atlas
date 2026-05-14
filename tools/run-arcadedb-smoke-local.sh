@@ -46,11 +46,8 @@ docker compose -f "$COMPOSE_FILE" up -d
 
 echo "waiting for ArcadeDB healthcheck (up to ~90 s)..."
 tries=0
-while true; do
-  if docker compose -f "$COMPOSE_FILE" ps arcadedb --format json 2>/dev/null \
-       | grep -q '"Health":"healthy"'; then
-    break
-  fi
+until docker compose -f "$COMPOSE_FILE" ps arcadedb --format json 2>/dev/null \
+        | grep -q '"Health":"healthy"'; do
   tries=$((tries + 1))
   if [ "$tries" -gt 45 ]; then
     echo "error: ArcadeDB did not become healthy in time" >&2

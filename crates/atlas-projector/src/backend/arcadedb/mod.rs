@@ -268,8 +268,12 @@ impl ArcadeDbBackend {
 
     /// Bootstrap the Cypher schema types (`Vertex`, `Edge`) for the
     /// per-workspace database. Idempotent; runs at most once per
-    /// `(ArcadeDbBackend instance, db_name)` pair via the
-    /// [`schema_initialized`] cache.
+    /// `(ArcadeDbBackend instance, db_name)` pair under contention-free
+    /// conditions. Under contention (two threads racing the cache
+    /// check) the HTTP bootstrap may run multiple times — that's
+    /// harmless because the combined CREATE+DELETE Cypher statement
+    /// is itself idempotent (any leftover sentinels are matched and
+    /// deleted by the same statement that creates fresh ones).
     ///
     /// **W17c regression fix.** ArcadeDB 24.10.1's Cypher subset
     /// auto-creates the `Vertex` type on first `MERGE (n:Vertex)` but
@@ -311,24 +315,27 @@ impl ArcadeDbBackend {
             }
         }
 
-        // Step 1: CREATE sentinel chain. Edge type auto-created here.
-        // Errors are intentionally tolerant — if a previous process
-        // crashed mid-bootstrap and left sentinels behind, the create
-        // succeeds anyway (we are content with multiple sentinels;
-        // step 2 cleans all of them).
-        let create_sentinel = "\
+        // Combined CREATE + DETACH DELETE in a SINGLE Cypher statement
+        // so the operation is atomic from the client's perspective: if
+        // the HTTP call returns 2xx, the schema types are registered
+        // AND the sentinel records are cleaned up. If the HTTP call
+        // fails, NEITHER side effect lands. Closes the W17c review
+        // HIGH-1 finding: a separate CREATE-then-DELETE pair leaves
+        // orphan sentinel nodes if the process crashes between the
+        // two calls.
+        //
+        // ArcadeDB Cypher accepts the `CREATE ... WITH ... DETACH
+        // DELETE ...` chain in a single command and registers the
+        // Edge type as a side effect of the CREATE phase; the schema
+        // change persists even though the data records are deleted in
+        // the same statement.
+        let bootstrap_cypher = "\
             CREATE (a:Vertex {_atlas_schema_init: true, _atlas_init_role: 'a'}) \
                   -[r:Edge {_atlas_schema_init: true}]-> \
                    (b:Vertex {_atlas_schema_init: true, _atlas_init_role: 'b'}) \
-            RETURN r";
-        self.run_admin_command(db_name, create_sentinel, json!({}))?;
-
-        // Step 2: DETACH DELETE all sentinels. The schema-type
-        // registration from step 1 persists across this cleanup.
-        let delete_sentinel = "\
-            MATCH (n:Vertex {_atlas_schema_init: true}) \
-            DETACH DELETE n";
-        self.run_admin_command(db_name, delete_sentinel, json!({}))?;
+            WITH a, b, r \
+            DETACH DELETE a, b";
+        self.run_admin_command(db_name, bootstrap_cypher, json!({}))?;
 
         // Mark this db_name as initialized so subsequent begin() calls
         // skip the ~6 ms HTTP cost.
