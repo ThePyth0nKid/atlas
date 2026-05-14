@@ -1,14 +1,178 @@
 # Atlas V2 — Session Handoff (V2-α SHIPPED + V2-β Phase 0–11.5 SHIPPED, v2.0.0-alpha.2 LIVE)
 
-> **🎯 FRESH-AGENT BOOTSTRAP DOC.** **READ §0z3 FIRST** (2026-05-14 V2-β Phase 11 SHIPPED narrative — W17c ArcadeDB CI + bench live on master; W17b Cypher hotfix shipped atomically; W18 Mem0g cache is next). Then §0z2 (Phase 10 W17b SHIPPED narrative, 2026-05-14), §0 "Fresh-Context Onboarding", §0z (V2-β Phase 0–9.5 SHIPPED, 2026-05-13), §0-NOW (HISTORICAL: 2026-05-14 Docker-restart breakpoint resume), §0a–§0d (Phase 1–4 strategic-iteration SHIPPED, historical). Then **`docs/V2-MASTER-PLAN.md`** + **`docs/V2-BETA-ORCHESTRATION-PLAN.md`** + **`docs/V2-BETA-DEPENDENCY-GRAPH.md`**. Optional: **`.handoff/v2-master-vision-v1.md`** + **`.handoff/decisions.md`** (25 explicit decisions).
+> **🎯 FRESH-AGENT BOOTSTRAP DOC.** **READ §0-NEXT FIRST** (2026-05-15+ next-session entry — 5-min snapshot + W18 Mem0g framing + ready-to-dispatch subagent prompt + Nelson-only parallel-track items). Then §0z3 (Phase 11 W17c SHIPPED narrative, 2026-05-14 late-day), §0z2 (Phase 10 W17b SHIPPED narrative, 2026-05-14), §0 "Fresh-Context Onboarding", §0z (V2-β Phase 0–9.5 SHIPPED, 2026-05-13), §0-NOW (HISTORICAL: 2026-05-14 Docker-restart breakpoint resume), §0a–§0d (Phase 1–4 strategic-iteration SHIPPED, historical). Then **`docs/V2-MASTER-PLAN.md`** + **`docs/V2-BETA-ORCHESTRATION-PLAN.md`** + **`docs/V2-BETA-DEPENDENCY-GRAPH.md`**. Optional: **`.handoff/v2-master-vision-v1.md`** + **`.handoff/decisions.md`** (25 explicit decisions).
 
-**Erstellt:** 2026-05-12. **V2-α-α.1 SHIPPED:** 2026-05-13 (8 Welles). **V2-β Phase 0–9.5 SHIPPED:** 2026-05-13 (18 PRs merged: #67-#86). **V2-β Phase 10-counsel + 10-cleanup SHIPPED:** 2026-05-14 (PRs #87/#88). **Phase 10-breakpoint SHIPPED:** 2026-05-14 (PR #89). **Phase 10 (W17b) SHIPPED:** 2026-05-14 (PR #90 `d216844`). **Phase 10.5 SHIPPED:** 2026-05-14 (PR #91 `b02ef2a`). **Phase 11 (W17c) SHIPPED:** 2026-05-14 (PR #92 `61ef036`). **Phase 11.5 SHIPPED:** 2026-05-14 (THIS PR). **Status:** v2.0.0-alpha.2 LIVE on master + GitHub + npm. Master HEAD `61ef036` (W17c merge — ArcadeDB Docker-Compose CI lane + benchmark + W17b Cypher hotfix shipped atomically: the new CI workflow found two W17b regressions on first live run (`$from`/`$to`/`$label` reserved Cypher param names; Edge type not auto-registered by MERGE) and the same PR delivered the fixes; cross-backend byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduces through both backends; W17c reviewer-dispatch closed 0 CRITICAL + 1 HIGH + 4 MEDIUM + 2 LOW in-commit). Counsel-engagement scope-doc landed RFP-ready. **Was als nächstes:** W18 Mem0g Layer-3 cache (ADR-Atlas-012 reserved) → W19 v2.0.0-beta.1 ship convergence milestone. Counsel-Engagement-Kickoff parallel-track Nelson-led (6-8-week clock starts at engagement-letter signature; blocks V2-β public materials per `DECISION-COUNSEL-1`).
+**Erstellt:** 2026-05-12. **V2-α-α.1 SHIPPED:** 2026-05-13 (8 Welles). **V2-β Phase 0–9.5 SHIPPED:** 2026-05-13 (18 PRs merged: #67-#86). **V2-β Phase 10-counsel + 10-cleanup SHIPPED:** 2026-05-14 (PRs #87/#88). **Phase 10-breakpoint SHIPPED:** 2026-05-14 (PR #89). **Phase 10 (W17b) SHIPPED:** 2026-05-14 (PR #90 `d216844`). **Phase 10.5 SHIPPED:** 2026-05-14 (PR #91 `b02ef2a`). **Phase 11 (W17c) SHIPPED:** 2026-05-14 (PR #92 `61ef036`). **Phase 11.5 SHIPPED:** 2026-05-14 (PR #93 `8bbc729`). **Next-session handoff prep SHIPPED:** 2026-05-14 (THIS PR). **Status:** v2.0.0-alpha.2 LIVE on master + GitHub + npm. Master HEAD `8bbc729` post-Phase-11.5 (W17c W17b-hotfix + Docker-Compose CI + bench all live; cross-backend byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduces through both InMemory and ArcadeDb backends in CI; 153 unit + integration tests green; clippy `-D warnings` clean; trait surface stable). Counsel-engagement scope-doc landed RFP-ready. **Was als nächstes:** **W18 Mem0g Layer-3 cache** (ADR-Atlas-012 reserved) — see §0-NEXT for actionable design questions + ready-to-dispatch subagent prompt + risk-aware entry checklist. Then W19 v2.0.0-beta.1 ship convergence milestone. Counsel-Engagement-Kickoff parallel-track Nelson-led (6-8-week clock starts at engagement-letter signature; blocks V2-β public materials per `DECISION-COUNSEL-1`).
+
+---
+
+## 0-NEXT. 2026-05-15+ next-session entry — W18 Mem0g design + kick-off
+
+> **Read this section first when resuming Atlas work after 2026-05-14.** Brings a fresh agent from cold context to actionable W18-design work in <10 min. If you are NOT continuing Atlas work — e.g. you came here for V2-α verifier knowledge, a counsel-pack reference, or general operator-runbook context — skip to §0 "Fresh-Context Onboarding" instead.
+
+### 5-min snapshot
+
+- **Master HEAD:** `8bbc729` (Phase 11.5 consolidation). Branch protections active; admin-merge pre-authorised in `.claude/settings.local.json`.
+- **V2 status:** v2.0.0-alpha.2 LIVE end-to-end. V2-β Phase 0–11.5 all SHIPPED. Layer-2 ArcadeDB integration operational (W17a trait surface, W17b driver, W17c CI + bench). 25 decisions logged in `.handoff/decisions.md`. 11 ADRs total; ADR-Atlas-012 RESERVED for W18.
+- **CI required-checks for any new PR:** (1) `Verify trust-root-modifying commits` — SSH-Ed25519 enforced; (2) `atlas-web-playwright` — path-filter auto-triggers on `.handoff/**` + `.github/workflows/**` + `apps/atlas-web/**` + `crates/atlas-{signer,trust-core,verify-wasm}/**` + `packages/*/**`. **Crates-only PRs need a `.handoff/**` doc-touch to trigger playwright** (Atlas Lesson #11 below). The new `atlas-arcadedb-smoke` workflow is NOT a required-check yet — promote when it has been stable across ≥3 unrelated PR runs.
+- **Active welle:** **W18 Mem0g Layer-3 cache.** Design phase (no code yet). ADR-Atlas-012 is reserved. Per `docs/V2-MASTER-PLAN.md` §6 + §3 Three-Layer architecture: Layer 3 is FAST, REBUILDABLE, NEVER AUTHORITATIVE. Embeddings + semantic search + cite-back to `event_uuid`. Secure-delete on GDPR erasure (overwrite, not unlink — `DECISION-SEC-5`).
+- **Blocked-on-Nelson (parallel, not engineering-pipeline-blocking):** Counsel-engagement firm selection + outreach (`.handoff/v2-counsel-engagement-scope.md` is RFP-ready); `RULESET_VERIFY_TOKEN` PAT configuration per `docs/OPERATOR-RUNBOOK.md` §16 (cosmetic-only, does not block merges).
+
+### Pre-flight checklist (bash, run from repo root)
+
+```bash
+cd /c/Users/nelso/Desktop/atlas
+git status                                                # → clean
+git checkout master && git pull origin master             # → up-to-date with master HEAD ≥ 8bbc729
+git log --oneline -5                                      # → top:
+#   <Next-session prep merge or 8bbc729 if not yet>
+#   8bbc729 docs(v2-beta/phase-11.5): consolidate W17c ... (#93)
+#   61ef036 feat(v2-beta/welle-17c): ArcadeDB Docker-Compose CI ... (#92)
+#   b02ef2a docs(v2-beta/phase-10.5): consolidate W17b ... (#91)
+#   d216844 feat(v2-beta/welle-17b): ArcadeDB driver implementation (#90)
+
+"/c/Program Files/GitHub CLI/gh.exe" pr list --state open --json number,title  # → only archive PRs #59/#61/#62
+/c/Users/nelso/.cargo/bin/cargo.exe test -p atlas-projector --quiet            # → 153 tests green
+/c/Users/nelso/.cargo/bin/cargo.exe clippy -p atlas-projector --no-deps -- -D warnings  # → 0 warnings
+git verify-tag v2.0.0-alpha.2                             # → Good ed25519 sig
+
+# Optional (~30 s; requires Docker): full ArcadeDB integration validation
+bash tools/run-arcadedb-smoke-local.sh                    # → cross-backend + B1/B2/B3 green
+```
+
+If any check fails, STOP and investigate before starting W18 work. Atlas Standing Protocol Lesson #2: *"When in doubt, RUN the code."*
+
+### W18 framing — what's known + what's open
+
+**W18 goal (per master-plan §6):** Mem0g Layer-3 cache integration that enables semantic search over Atlas Layer-1 events without ever becoming a trust authority. Cache is rebuilt from `events.jsonl` (Layer 1, authoritative); cache invalidation must NEVER block Layer-2 projection.
+
+**What's already known + binding:**
+- **Layer authority order (DECISION-ARCH-1, V2-α §3):** Layer 1 `events.jsonl` is the cryptographic ground truth. Layer 2 ArcadeDB is a derivative of Layer 1. Layer 3 Mem0g is a derivative of Layer 1 (NOT of Layer 2 — Mem0g indexes the authoritative events directly so it can be rebuilt without depending on Layer-2 availability). **Verify this in design phase — Phase 2 Architect H-3 critique flagged the "Mem0g depends on Layer 2 which depends on Layer 1" misreading and was corrected; W18 design must honour the corrected dependency.**
+- **Byte-determinism invariant (V2-α canonicalisation, `lib.rs` invariant #3):** *"No floating-point in canonicalised properties."* Mem0g embeddings ARE floats. Resolution: embeddings live OUTSIDE the canonicalisation pipeline. The trust anchor for any Mem0g response is `cite-back to event_uuid` (master-plan §3 line 64). **W18 MUST NOT introduce any path where embedding bytes flow into `graph_state_hash`.** The byte-pin `8962c168...e013ac4` MUST remain reproducible end-to-end after W18 ships.
+- **Secure-delete on GDPR Art. 17 erasure (DECISION-SEC-5):** Mem0g embeddings derived from PII-bearing events must be overwritten (not unlinked) when the originating event is erased. The erasure operation emits a **parallel audit event** so the cryptographic record of "this PII was erased on this date by this DID" is itself a Layer-1 event with the standard stamping fields.
+- **Read-API integration pattern:** Atlas-web Read-API (W12 PR #79) currently routes 6 query endpoints to ArcadeDB. W18 must decide: (a) Mem0g cache is transparent (Read-API queries Mem0g first, falls through to ArcadeDB on miss); or (b) Mem0g is an explicit endpoint (`/api/atlas/semantic-search`). Per master-plan §6 success criterion "Atlas+Mem0g end-to-end benchmark published (not Mem0g-cache-hit-only)" — both paths are needed for measurement; design should not preclude either.
+- **Hermes-skill distribution constraint (DECISION-DB-4 + ADR-010 §4):** Atlas ships via `npx`. Mem0g may not introduce a JVM dependency (ArcadeDB already pays the JVM cost via the sidecar; adding Mem0g-as-JVM would double the cold-start budget). Prefer a Rust-native or pure-WASM embedding store.
+- **ADR-Atlas-012 reserved.** Document the binding sub-decisions before writing code; mirror ADR-010's structure (Apache-2.0 dependency choice + embedded-vs-server-mode trade-off + Rust HTTP client choice + byte-determinism preservation guarantee + Docker-Compose CI orchestration sketch + measurable fallback trigger thresholds).
+
+**Open design questions to lock in ADR-Atlas-012 BEFORE first code touches master:**
+1. **Mem0g implementation choice:** `mem0` Python package wrapped behind a Rust shim? Pure-Rust embedding store (e.g. `qdrant-client` against a sidecar)? Embed-first via `fastembed-rs`? Each has different distribution + license + JVM-avoidance implications.
+2. **Embedding determinism:** are embeddings reproducible across runs? If non-deterministic, the cite-back trust contract still holds (event_uuid is the anchor) but Mem0g cache invalidation cannot use "embedding hash" as a key — it must use `event_uuid` directly. **Verify before any cache-key design.**
+3. **Cache invalidation strategy:** on every projector run? On TTL? On explicit `events.jsonl` append signal? Or hybrid (TTL with explicit invalidation on erasure events)?
+4. **Secure-delete primitive:** which Mem0g operation guarantees overwrite-then-unlink semantics? Does the chosen Mem0g distribution document this? If not — implement explicitly via fillbytes-overwrite-then-delete.
+5. **GDPR audit event shape:** what's the `kind` for the parallel audit event? Reuse an existing V2-β event-kind (`annotation_add`?) or introduce a new one? **Consult `crates/atlas-projector/src/upsert.rs` for the dispatch surface.**
+6. **Atlas+Mem0g end-to-end benchmark:** what does the benchmark measure? p50/p99 of {pure-Cypher-read against ArcadeDB, cache-hit-read against Mem0g, cache-miss-with-rebuild}. Reuse the W17c bench-test pattern (`tests/arcadedb_benchmark.rs`).
+
+**Out-of-scope for W18 (deferred to V2-γ / W19 ship):**
+- Multi-region replication of Mem0g.
+- Mem0g sharding for >100M events.
+- Read-API endpoint-level rate-limiting on semantic-search (DECISION-SEC-4 hardens Cypher; semantic-search rate-limit is a V2-γ operator concern).
+
+### W18 ready-to-dispatch subagent prompt skeleton
+
+> **Pattern matches `§0z` W17b skeleton + `§0z3` W17c session lessons.** Customise dates + open-question answers before dispatching. SERIAL subagent dispatch (W18 is a single-welle Phase 12; no parallel-batch).
+
+```text
+Atlas project at C:\Users\nelso\Desktop\atlas. V2-β Welle 18 — Mem0g Layer-3 cache design + first code.
+
+## Pre-flight (FIRST 3 actions — non-negotiable, Atlas Lesson #1)
+1. `git fetch origin`
+2. `git checkout -B feat/v2-beta/welle-18-mem0g-cache origin/master` (master HEAD at dispatch: <current-master-sha-post-handoff-prep>)
+3. `git status` → clean
+
+## Pre-flight reading (master-resident, mandatory)
+1. `docs/V2-MASTER-PLAN.md` §3 (Three-Layer Trust Architecture — Layer 3 spec) + §6 V2-β Read-Side success criteria.
+2. `docs/V2-BETA-DEPENDENCY-GRAPH.md` — confirm W17c → W18 → W19 critical-path edge.
+3. `.handoff/decisions.md` `DECISION-SEC-5` (Mem0g embedding leakage on GDPR erasure) + `DECISION-ARCH-1` (triple-hardening: V2-α byte-determinism CI pin must survive W18) + `DECISION-DB-4` (license + JVM-cost trade-off rationale that informs Mem0g choice).
+4. `.handoff/v2-master-vision-v1.md` Doc B §3-5 (V2-Vision-knowledge-graph-layer for Mem0g operational shape).
+5. `.handoff/crit-architect.md` H-3 (the Mem0g-depends-on-FalkorDB misreading that V2-β must NOT re-introduce).
+6. `.handoff/crit-security.md` + `.handoff/crit-compliance.md` (GDPR-erasure parallel-audit-event requirement).
+7. `.handoff/v2-session-handoff.md` §0-NEXT "Open design questions for W18" — answer EACH in `docs/ADR/ADR-Atlas-012-mem0g-layer3-design.md` before writing code.
+8. `crates/atlas-projector/tests/arcadedb_benchmark.rs` — reuse this benchmark-test shape for the W18 Atlas+Mem0g end-to-end bench (B4 cache-hit, B5 cache-miss-rebuild, B6 secure-delete primitive).
+
+## Phase A — Design (NO production code yet)
+- Write `docs/ADR/ADR-Atlas-012-mem0g-layer3-design.md` mirroring ADR-Atlas-010 structure. 9-10 sections; ~250-400 lines. Lock 6+ sub-decisions in §4. Open questions tracked in §6.
+- Write `docs/V2-BETA-MEM0G-SPIKE.md` if a comparative spike is needed (e.g. fastembed-rs vs qdrant-client vs embedded mem0-rust-shim). If the choice is obvious from ADR research, skip the spike — document the obvious-call rationale in the ADR.
+- Update `.handoff/v2-beta-welle-18-plan.md` from the template.
+
+## Phase B — Implementation (separate commit, separate phase)
+Code touches per the ADR locked design. Suggested file layout (TBD by design):
+- `crates/atlas-mem0g/` NEW crate? Or extension to atlas-projector? ADR §4 decides.
+- `crates/atlas-projector/src/upsert.rs` — new event-kind dispatch arm if GDPR-erasure-audit-event is its own kind.
+- `apps/atlas-web/src/app/api/atlas/semantic-search/route.ts` — new Read-API endpoint if explicit-endpoint design chosen.
+- `crates/atlas-projector/tests/mem0g_benchmark.rs` — Atlas+Mem0g end-to-end bench (B4/B5/B6).
+
+## Forbidden files (parent consolidates in Phase 12.5)
+- CHANGELOG.md, docs/V2-MASTER-PLAN.md (status table), docs/SEMVER-AUDIT-V1.0.md, .handoff/decisions.md, .handoff/v2-session-handoff.md, docs/V2-BETA-ORCHESTRATION-PLAN.md, docs/V2-BETA-DEPENDENCY-GRAPH.md.
+
+## Hard rules (Atlas Standing Protocol)
+- The V2-α byte-determinism CI pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` MUST remain reproducible end-to-end after W18 ships. Run `cargo test -p atlas-projector --test backend_trait_conformance byte_pin --quiet` as the final go/no-go check before opening the PR.
+- No floats in canonical bytes (V2-α invariant #3). Mem0g embeddings live OUTSIDE the canonicalisation pipeline.
+- No new Cypher param names from the reserved-keyword list. Forbidden: `$from`, `$to`, `$where`, `$order`, `$label`, `$key`, `$value`, `$id` (Atlas Lesson #12).
+- SSH-Ed25519 signed commits only. No `--no-verify`. No GitHub-bot squash for trust-root-touching PRs (use `git rebase` + `git push --force-with-lease`, per Atlas Lesson #7).
+- Parent ALWAYS dispatches parallel `code-reviewer` + `security-reviewer` post-implementation (Atlas Lesson #8). The subagent's self-audit is best-effort — never load-bearing.
+
+## Acceptance criteria (parent verifies all before approving merge)
+- ADR-Atlas-012 merged and master-resident.
+- (If Phase B in same welle:) byte-pin reproduces; clippy `-D warnings` clean; trait surface stable on `atlas-projector`; new crate (if introduced) has its own clippy + test lane.
+- GDPR-secure-delete audit-event round-trips through projector + verifier; cite-back to `event_uuid` works end-to-end.
+- Atlas+Mem0g end-to-end benchmark (B4/B5/B6) captured in CI artifact.
+- Reviewer dispatch outputs: 0 unresolved CRITICAL, 0 unresolved HIGH, all applicable MEDIUMs either fixed-in-commit or explicitly documented as V2-γ-deferred.
+
+## Output (under 500 words)
+ADR-Atlas-012 PR number + URL, locked sub-decisions count, any DECISION-* entries that need updating in Phase 12.5, byte-pin-survives-W18 evidence, benchmark numbers (or "deferred to Phase B"), reviewer-finding counts + resolutions, any unexpected deviations.
+```
+
+### Nelson-only parallel-track items (engineering pipeline does NOT wait)
+
+1. **Counsel-engagement firm selection + outreach kickoff.** `.handoff/v2-counsel-engagement-scope.md` is RFP-ready (269 lines, 7 SOWs, 7-firm comparison matrix, DE + EN outreach templates). Selecting one or several firms from {Hogan Lovells Frankfurt, Bird & Bird Munich, Hengeler Mueller, Matheson, William Fry, Cleary Gottlieb Paris, Taylor Wessing} starts the 6-8-week clock for the GDPR Art. 4(1) hash-as-PII Path-B opinion. **Blocks V2-β public materials per `DECISION-COUNSEL-1`** — but does NOT block W18 / W19 engineering ship.
+2. **`RULESET_VERIFY_TOKEN` PAT configuration** per `docs/OPERATOR-RUNBOOK.md` §16. Fine-grained PAT with "Repository administration: read" scope, set as repo secret. Without it, `verify-branch-protection.yml` keeps firing red (exit 2: PAT-scope-insufficient). Cosmetic-only; does NOT block merges. ~5 min Nelson task.
+3. **First-10-customers pipeline + TAM/SAM/SOM groundwork** (per `DECISION-BIZ-3` + `DECISION-BIZ-4`). Independent of engineering.
+
+### Atlas Standing Protocol Lessons — consolidated through W17c (2026-05-14)
+
+Numbered for cross-reference. Lessons #1-#9 from V2-β Phase 0-9.5. **Lessons #10-#13 are new from W17b/W17c.**
+
+1. **Worktree-isolation leaks are real and recurring.** Subagent dispatch prompts MUST include explicit `git fetch origin && git checkout -B feat/<branch> origin/master` as first 3 actions. Parent verifies pre-flight before assuming agent worked correctly.
+2. **When reviewers disagree on whether code is broken, RUN the code.** Theoretical findings can be wrong; behavioural tests are authoritative.
+3. **Reviewer-driven MEDIUMs are non-optional for package conventions and boundary correctness.** Don't defer. (Exception: V2-γ-scope clean-ups are explicit defer-by-decision.)
+4. **Cross-batch consistency-reviewer is a load-bearing V2-β invariant** (Orchestration Plan §3.5). Earns its dispatch every Phase consolidation.
+5. **Architect subagent type has Read/Grep/Glob ONLY.** For doc-only spike welles, architect produces content; parent writes files. For code welles use `general-purpose`.
+6. **`gh pr merge --admin` is pre-authorised in `.claude/settings.local.json`.** Use directly; no prompt needed.
+7. **`strict_required_status_checks_policy: true` + trust-root-verify:** When `gh pr update-branch` creates a bot-signed merge commit, trust-root-verify fails. **Fix:** rebase locally onto fresh master (preserves SSH-Ed25519 signatures), `git push --force-with-lease`. Never use `gh pr update-branch` for trust-root-touching PRs.
+8. **Subagent self-audit is best-effort, never load-bearing.** Parent ALWAYS runs the external `code-reviewer` + `security-reviewer` dispatch post-implementation in parallel (single message, 2 Agent calls). The W17b subagent self-reported "zero clippy warnings" — was wrong by 15 lints. The W17c subagent ditto.
+9. **Branch protection blocks admin-merge while required CI checks are in-progress** (even with admin override). Wait for green via `gh run watch <id> --exit-status` in background; don't poll.
+10. **`#[ignore]`-gated integration tests are blind spots until CI runs them.** W17b's `cross_backend_byte_determinism` existed and compiled cleanly but never ran against a live backend until W17c shipped the CI workflow that runs it. Two driver regressions surfaced immediately. **Lesson:** ship the CI infrastructure that runs `#[ignore]`-gated tests alongside the gated tests themselves. Don't let "deferred to next welle" become "deferred forever".
+11. **`atlas-web-playwright` is path-filter-gated AND is a required CI check.** Crates-only PRs may not trigger it; without a triggered run, the required-check is "expected" but never fires, blocking the merge with `mergeStateStatus: BLOCKED`. **Workaround:** include any `.handoff/**` doc-touch in the PR (e.g. updating the W17b plan-doc with a status note). The W17b reviewer-fix and W17c reviewer-fix PRs both relied on this.
+12. **ArcadeDB Cypher subset has reserved param names that ArcadeDB does not document.** `$from`, `$to` collide with SQL `CREATE EDGE ... FROM ... TO ...` keywords and silently empty result sets. `$label` collides with TinkerPop `T.label` token and raises `IllegalArgumentException`. Future Atlas Cypher work MUST avoid SQL-keyword param names. Suspected-reserved list (be defensive): `$from`, `$to`, `$where`, `$order`, `$label`, `$key`, `$value`, `$id`, `$select`. Verify any new param name against a live ArcadeDB instance before relying on it.
+13. **Atomic Cypher pattern for schema-type bootstrap.** ArcadeDB Cypher's `MERGE (a)-[r:Edge]->(b)` silently no-ops if the Edge type does not yet exist. A single-statement `CREATE (a:Vertex)-[r:Edge]->(b:Vertex) WITH a, b, r DETACH DELETE a, b` registers both Vertex and Edge types as a side effect of the CREATE phase AND cleans up sentinels in one atomic HTTP roundtrip. Reusable pattern for any future ArcadeDB schema-type registration on fresh databases.
+
+### Critical files / references (W18 start-of-session reading list)
+
+- `docs/V2-MASTER-PLAN.md` §3 + §6 (Layer 3 + V2-β scope).
+- `docs/ADR/ADR-Atlas-010-arcadedb-backend-choice-and-embedded-mode-tradeoff.md` — structural template for ADR-Atlas-012.
+- `docs/V2-BETA-ARCADEDB-SPIKE.md` — structural template for an optional `docs/V2-BETA-MEM0G-SPIKE.md`.
+- `.handoff/decisions.md` `DECISION-SEC-5`, `DECISION-ARCH-1`, `DECISION-DB-4`, `DECISION-COUNSEL-1`.
+- `.handoff/v2-master-vision-v1.md` (Mem0g operational shape).
+- `.handoff/crit-architect.md` H-3 (the dependency-graph correction that W18 must honour).
+- `crates/atlas-projector/src/lib.rs` invariants #1-#5 (load-bearing constraints W18 must preserve).
+- `crates/atlas-projector/src/backend/mod.rs` — Layer-2 trait surface; W18 may need a parallel Layer-3 trait or extension.
+- `crates/atlas-projector/tests/arcadedb_benchmark.rs` — bench-test shape template for B4/B5/B6.
+- `crates/atlas-projector/src/upsert.rs` — event-kind dispatch surface; GDPR-erasure-audit-event may add a new arm here.
+- `.handoff/v2-beta-welle-N-plan.md.template` — skeleton for the W18 plan-doc.
+
+### Risk register for W18
+
+- **R1 — Mem0g distribution-choice locks an irreversible direction (HIGH).** Picking `mem0` (Python) vs `qdrant-client` (Rust) vs `fastembed-rs` (embedded) is a one-way door for Hermes-skill distribution + cold-start budget. Mitigation: ADR-Atlas-012 §4 must lock this with explicit cost/benefit per option; treat as DECISION-DB-4-equivalent (license + JVM cost + distribution channel reach).
+- **R2 — Embedding non-determinism breaks cache-key invariants (MEDIUM).** If embeddings vary across runs, `event_uuid` is the only stable cache-key. Mitigation: design phase explicitly tests embedding-determinism for the chosen Mem0g implementation; document in ADR §4.
+- **R3 — Secure-delete primitive missing from chosen Mem0g (HIGH if it fires).** GDPR Art. 17 compliance requires overwrite-not-unlink. If the chosen Mem0g doesn't expose this, W18 implements it explicitly (memset on the embedding storage location + then unlink). Adds ~50 LOC to the driver but is non-optional. Mitigation: feasibility-check during ADR-Atlas-012 design phase.
+- **R4 — Atlas+Mem0g end-to-end benchmark exceeds T2 deployment trigger (LOW for CI; HIGH for ops).** Mem0g cache-miss-with-rebuild may add seconds to a Read-API query if the rebuild walks 10M events. Mitigation: B5 benchmark in CI captures the baseline; operator-runbook documents the rebuild-trigger conditions (TTL? on-demand? background?). T2 trigger (p99 > 15 ms at 10M-vertex per ADR-010 §4.4) is for Layer-2 reads; Layer-3 cache-miss has its own latency budget — design phase locks the threshold in ADR-Atlas-012.
+- **R5 — Mem0g cache invalidation race with concurrent projector runs (MEDIUM).** If projector emits a new event during a Mem0g rebuild, the rebuild produces a stale snapshot. Mitigation: cache is content-addressed by `events.jsonl` length-at-rebuild; rebuild is rerun if a new event arrives mid-rebuild. Design phase locks the consistency model in ADR-Atlas-012.
 
 ---
 
 ## 0z3. V2-β Phase 11 (W17c ArcadeDB CI + bench) SHIPPED — 2026-05-14 late-day
 
-> **Read this first** if you're a fresh agent continuing V2-β work after 2026-05-14 late-day. Phase 11 wraps the Layer-2 ArcadeDB integration story end-to-end: driver (W17b) + CI infrastructure that validates it (W17c). W18 Mem0g Layer-3 cache is now the next active welle.
+> **W17c-shipped narrative.** §0-NEXT above is the actionable next-session entry point; read this section if you need the W17c historical detail (what landed, what regressions surfaced, reviewer-dispatch outcome, session lessons). Phase 11 wraps the Layer-2 ArcadeDB integration story end-to-end: driver (W17b) + CI infrastructure that validates it (W17c).
 
 ### What landed in PR #92 (`61ef036`)
 
@@ -67,24 +231,7 @@ V2-α InMemoryBackend baseline ~50 µs/event (B2 reference). ADR-010 §4.10 Arca
 
 ### Pre-flight checklist for W18 session
 
-```bash
-cd /c/Users/nelso/Desktop/atlas
-git status                                          # → clean
-git checkout master && git pull origin master       # → up-to-date with master HEAD ≥ 61ef036
-git log --oneline -4                                # → expect:
-#   <Phase 11.5 consolidation merge>
-#   61ef036 feat(v2-beta/welle-17c): ArcadeDB Docker-Compose CI + benchmark + W17b Cypher hotfix (#92)
-#   b02ef2a docs(v2-beta/phase-10.5): consolidate W17b ... (#91)
-#   d216844 feat(v2-beta/welle-17b): ArcadeDB driver implementation (#90)
-"/c/Program Files/GitHub CLI/gh.exe" pr list --state open --json number,title  # → archive PRs only (#59/#61/#62)
-/c/Users/nelso/.cargo/bin/cargo.exe test -p atlas-projector --quiet  # → 153 tests green
-/c/Users/nelso/.cargo/bin/cargo.exe clippy -p atlas-projector --no-deps -- -D warnings  # → zero warnings
-
-# Optional: full ArcadeDB integration validation against live sidecar
-bash tools/run-arcadedb-smoke-local.sh  # → cross-backend + B1/B2/B3 all green; ~30 s
-```
-
-Read `docs/ADR/ADR-Atlas-012-...md` (RESERVED — to be written in W18 design phase) for Mem0g architecture decisions.
+Superseded by **§0-NEXT** above (post-Phase-11.5 master HEAD `8bbc729` + risk-aware W18 entry checklist). The §0-NEXT pre-flight is the canonical command set; this §0z3 placeholder is preserved for cross-reference only.
 
 ---
 
