@@ -188,7 +188,18 @@ External `code-reviewer` + `security-reviewer` agents reviewed PR #85 in the par
 
 1. **`#[doc(hidden)]` on `InMemoryBackend::snapshot()`** (`crates/atlas-projector/src/backend/in_memory.rs:69`). Security-reviewer MEDIUM: the method is `pub` for diagnostic use but exposes raw `GraphState` internals. Added `#[doc(hidden)]` + clarifying doc note so production paths are routed through the trait surface only.
 
-### Deferred to W17b (when `.handoff/v2-beta-welle-17b-plan.md` is created, lift these in)
+### Status update (2026-05-14): 3 of 4 carry-over MEDIUMs RESOLVED at trait surface in W17a-cleanup PR #88
+
+PR #88 (`feat/v2-beta/welle-17a-cleanup`) lands ADR-Atlas-011 §4.3 sub-decisions #10/#11/#12 BEFORE W17b's first ArcadeDb method body:
+
+- **MEDIUM #2 (depth+size cap):** RESOLVED via new `pub fn check_value_depth_and_size(v, max_depth, max_bytes)` in `backend/mod.rs`. W17b's HTTP-response parser calls this AFTER `serde_json::from_slice` and BEFORE `Vertex::new` / `Edge::new`. Recommended defaults: `max_depth=32`, `max_bytes=64*1024`.
+- **MEDIUM #3 (`WorkspaceId` validation):** RESOLVED via new `pub fn check_workspace_id(s)` in `backend/mod.rs` + new `ProjectorError::InvalidWorkspaceId { reason }` variant. W17b's `ArcadeDbBackend::begin()` calls this FIRST THING before constructing the HTTP `/api/v1/begin/{db}` request. Rules: non-empty + length ≤ 128 + ASCII-only + no `/` `\` NUL `\r` `\n` (CRLF deny added in-commit per parallel security-reviewer MEDIUM on PR #88).
+- **MEDIUM #4 (`begin()` lifetime `'_` → `'static`):** RESOLVED via trait signature widening. SemVer-additive at every existing call site (18 sites verified by code-reviewer count on PR #88; type checker widens `'_` → `'static` automatically). Eliminates the SemVer-breaking-mid-W17b risk.
+- **MEDIUM #5 (error-enum cleanup):** still V2-γ-deferred per the original plan-doc rationale; W17a-cleanup does NOT touch the broader error-enum convention.
+
+W17b's residual carry-over surface is now just MEDIUM #5 (V2-γ) + the call-site application of the two helpers introduced in PR #88. The trait surface itself is SemVer-stable for W17b's implementation.
+
+### Originally deferred to W17b (when `.handoff/v2-beta-welle-17b-plan.md` is created, lift these in)
 
 2. **`serde_json::Value` depth limit at the trait surface.** Security-reviewer MEDIUM: `Vertex::properties` / `Edge::properties` are `BTreeMap<String, serde_json::Value>` with no depth-cap. W17a path is in-memory only (depth bounded by upstream V2-α event-ingestion limits in `canonical.rs`). **W17b risk:** ArcadeDB HTTP responses deserialized into `Vertex::properties` BEFORE `canonical.rs`-limits apply could DoS the projector. **Fix-in-W17b:** apply explicit depth + size cap when parsing ArcadeDB Cypher result JSON into `Vertex` / `Edge`.
 
