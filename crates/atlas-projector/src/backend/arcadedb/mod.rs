@@ -126,10 +126,40 @@ impl ArcadeDbBackend {
     /// This contract matches the W17a stub (`new()` never panicked;
     /// only trait method invocations did).
     ///
-    /// Errors only on internal client-build failure (incompatible
-    /// `reqwest` feature flags at build time, which is a deployment
-    /// bug rather than a runtime condition).
+    /// Errors on:
+    /// - Internal client-build failure (incompatible `reqwest` feature
+    ///   flags at build time, which is a deployment bug rather than a
+    ///   runtime condition).
+    /// - `base_url` carries userinfo (`user:pass@host`). HTTP Basic
+    ///   credentials MUST go through [`BasicAuth`] and the redacting
+    ///   `Debug` chain; embedding them in the URL would defeat the
+    ///   redaction discipline (the URL is `Debug`-printable). Closes
+    ///   W17b security-review M-2 (derived `Debug` leak surface).
+    /// - `base_url` scheme is anything other than `http` or `https`
+    ///   (e.g. `file:`, `ftp:`). These schemes cannot reach the
+    ///   ArcadeDB Server-mode HTTP API and would otherwise produce a
+    ///   confusing later error or, worse, exfiltrate ambient creds.
+    ///
+    /// **Plaintext HTTP note:** `http://` URLs are accepted to keep the
+    /// docker-compose §4.7 local-dev sketch frictionless, but Basic-
+    /// Auth credentials over HTTP are base64-encoded (NOT encrypted) on
+    /// the wire. Operator runbook §16 requires `https://` in
+    /// production deployments.
     pub fn new(base_url: Url, credentials: BasicAuth) -> ProjectorResult<Self> {
+        match base_url.scheme() {
+            "http" | "https" => {}
+            other => {
+                return Err(ProjectorError::CanonicalisationFailed(format!(
+                    "ArcadeDbBackend::new: unsupported URL scheme {other:?} (expected http or https)"
+                )));
+            }
+        }
+        if !base_url.username().is_empty() || base_url.password().is_some() {
+            return Err(ProjectorError::CanonicalisationFailed(
+                "ArcadeDbBackend::new: base_url must not carry userinfo (use BasicAuth instead)"
+                    .to_string(),
+            ));
+        }
         let client = build_http_client()?;
         Ok(Self {
             base_url: Arc::new(base_url),
@@ -191,7 +221,13 @@ impl ArcadeDbBackend {
         // 4xx as "post-condition met" IFF the response body contains
         // an "already exists" marker. Otherwise propagate.
         if status.is_client_error() {
-            let body_str = resp.text().unwrap_or_default();
+            // Bounded body read (W17b security-review L-1): cap at
+            // 512 bytes so a misbehaving server cannot force Atlas to
+            // buffer a megabyte response just to look for the
+            // "already exists" marker.
+            let raw = resp.bytes().unwrap_or_default();
+            let take = raw.len().min(512);
+            let body_str = String::from_utf8_lossy(&raw[..take]).into_owned();
             let lower = body_str.to_lowercase();
             if lower.contains("already exists") || lower.contains("already exist") {
                 return Ok(());
@@ -245,7 +281,11 @@ impl GraphStateBackend for ArcadeDbBackend {
         // workspace_id before any HTTP request is constructed.
         check_workspace_id(workspace_id)?;
 
-        let db_name = db_name_for_workspace(workspace_id);
+        // W17b security-review HIGH-2: db-name char-class check is a
+        // second validation layer on top of `check_workspace_id`.
+        // Closes the `create database <db_name>` admin-command
+        // injection surface in `ensure_database_exists` below.
+        let db_name = db_name_for_workspace(workspace_id)?;
 
         // Lazy-create the per-workspace database if needed (ADR-010 §4
         // sub-decision #4 — one DB per workspace).
@@ -291,7 +331,7 @@ impl GraphStateBackend for ArcadeDbBackend {
         // Same workspace-id validation at the read path — the boundary
         // also flows into the URL path segment via `db_name`.
         check_workspace_id(workspace_id)?;
-        let db_name = db_name_for_workspace(workspace_id);
+        let db_name = db_name_for_workspace(workspace_id)?;
         let (command, params) = vertices_query(workspace_id);
         let rows = self.run_query(&db_name, command, params)?;
         rows.iter()
@@ -301,7 +341,7 @@ impl GraphStateBackend for ArcadeDbBackend {
 
     fn edges_sorted(&self, workspace_id: &WorkspaceId) -> ProjectorResult<Vec<BackendEdge>> {
         check_workspace_id(workspace_id)?;
-        let db_name = db_name_for_workspace(workspace_id);
+        let db_name = db_name_for_workspace(workspace_id)?;
         let (command, params) = edges_query(workspace_id);
         let rows = self.run_query(&db_name, command, params)?;
         rows.iter()
@@ -392,7 +432,18 @@ impl ArcadeDbTxn {
 
     /// Run a Cypher command (write path: MERGE / SET / CREATE) within
     /// the open transaction. Applies session header + Basic auth.
-    fn run_command(&self, command: String, params: Value) -> ProjectorResult<Value> {
+    ///
+    /// Discards the response body — every current caller ignores the
+    /// returned value (the trait surface only requires "logical id is
+    /// in the workspace after this call returns"; one HTTP MERGE
+    /// produces either a new or updated row and the contract does not
+    /// distinguish). Discarding here closes W17b security-review HIGH-1:
+    /// returning the raw `serde_json::Value` would have created a
+    /// latent caller path that bypassed
+    /// [`check_value_depth_and_size`] (ADR-011 §4.3 sub-decision #12).
+    /// If a future caller needs the response body it MUST re-parse via
+    /// a function that applies the depth/size cap at the boundary.
+    fn run_command(&self, command: String, params: Value) -> ProjectorResult<()> {
         let url = self.endpoint(&format!("api/v1/command/{db_name}", db_name = self.db_name))?;
         let body = json!({
             "language": "cypher",
@@ -403,24 +454,8 @@ impl ArcadeDbTxn {
         let req = apply_basic_auth(req, &self.credentials);
         let req = apply_session_header(req, &self.session_id);
         let resp = req.send().map_err(map_transport_error)?;
-        let resp = map_response_error(resp, &self.credentials.username)?;
-        // Body parse: a successful command returns a JSON object
-        // similar to a query response. We surface it to the caller
-        // so batch_upsert can inspect created/updated counts if
-        // ArcadeDB ever surfaces them; today we ignore the body and
-        // synthesise `created: true` (one HTTP MERGE always
-        // produces either a new or updated row; the trait surface
-        // does not require distinguishing — the contract is "logical
-        // id is in the workspace after this call returns").
-        let bytes = resp.bytes().map_err(map_transport_error)?;
-        if bytes.is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_slice(&bytes).map_err(|e| {
-            ProjectorError::CanonicalisationFailed(format!(
-                "ArcadeDB command response JSON parse failed: {e}"
-            ))
-        })
+        let _ = map_response_error(resp, &self.credentials.username)?;
+        Ok(())
     }
 
     /// Run multiple Cypher commands as a single multi-statement
@@ -627,6 +662,51 @@ mod tests {
                 assert!(reason.contains("forbidden character"), "{reason:?}");
             }
             other => panic!("expected InvalidWorkspaceId; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn begin_rejects_workspace_id_with_db_name_incompatible_chars() {
+        // `;` survives `check_workspace_id` (ASCII, not in the forbidden
+        // set `/ \ NUL CR LF`) but would inject into the
+        // `create database <db_name>` admin command + URL path
+        // segments. W17b security-review HIGH-2: the second validation
+        // layer in `db_name_for_workspace` MUST catch this.
+        let b = ArcadeDbBackend::new(base_url(), auth()).unwrap();
+        let res = b.begin(&"foo;drop database".to_string()).map(|_| ());
+        match res {
+            Err(ProjectorError::InvalidWorkspaceId { reason }) => {
+                assert!(
+                    reason.contains("ArcadeDB database name"),
+                    "{reason:?}"
+                );
+            }
+            other => panic!("expected InvalidWorkspaceId; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_rejects_unsupported_scheme() {
+        let url = Url::parse("file:///etc/passwd").expect("static URL parses");
+        let res = ArcadeDbBackend::new(url, auth());
+        match res {
+            Err(ProjectorError::CanonicalisationFailed(msg)) => {
+                assert!(msg.contains("scheme"), "{msg:?}");
+            }
+            other => panic!("expected CanonicalisationFailed; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_rejects_url_with_userinfo() {
+        let url =
+            Url::parse("http://root:secret@localhost:2480").expect("static URL parses");
+        let res = ArcadeDbBackend::new(url, auth());
+        match res {
+            Err(ProjectorError::CanonicalisationFailed(msg)) => {
+                assert!(msg.contains("userinfo"), "{msg:?}");
+            }
+            other => panic!("expected CanonicalisationFailed; got {other:?}"),
         }
     }
 

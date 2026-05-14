@@ -542,10 +542,10 @@ pub trait GraphStateBackend: Send + Sync {
     /// is `'static`. Implementations MUST produce a transaction
     /// handle that does NOT borrow from `&self` — the in-memory
     /// impl carries an `Arc::clone` of the backend's shared storage;
-    /// the ArcadeDb impl (W17b) will carry an owned `reqwest::Client`
-    /// + an owned `arcadedb-session-id` String. The `'static` bound
-    /// is structurally honoured by both. Resolution of W17a plan-doc
-    /// MEDIUM #4 + ADR-Atlas-011 §4 sub-decision #10.
+    /// the ArcadeDb impl (W17b) carries an owned `reqwest::Client`
+    /// alongside an owned `arcadedb-session-id` String. The `'static`
+    /// bound is structurally honoured by both. Resolution of W17a
+    /// plan-doc MEDIUM #4 and ADR-Atlas-011 §4 sub-decision #10.
     ///
     /// **`WorkspaceId` validation:** [`check_workspace_id`] is
     /// available for impls that need defensive validation at the

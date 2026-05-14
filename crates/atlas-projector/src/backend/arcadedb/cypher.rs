@@ -66,35 +66,41 @@ pub(crate) const DEFAULT_MAX_VALUE_BYTES: usize = 64 * 1024;
 ///   workspace IDs like `550e8400-e29b-41d4-a716-446655440000`)
 ///   become underscores (`_`). ArcadeDB DB-name rules disallow `-`
 ///   per the spike §3 character-set notes.
+/// - All remaining characters MUST be alphanumeric or `_`. Anything
+///   else is rejected with `ProjectorError::InvalidWorkspaceId`. This
+///   second validation layer (`check_workspace_id` is the first) closes
+///   the W17b-review HIGH finding that `check_workspace_id` permits
+///   characters like `;`, `"`, `(`, `)`, spaces, etc. which would
+///   either inject into the `create database <db_name>` admin command
+///   on `mod.rs::ensure_database_exists` (Cypher-injection-adjacent
+///   surface) or land verbatim in the `/api/v1/begin/<db_name>` URL
+///   path segment.
 ///
 /// **Precondition:** `workspace_id` has already passed
-/// [`crate::backend::check_workspace_id`]. That helper enforces ASCII
-/// + no `/`, `\`, NUL, `\r`, `\n` + length ≤ 128. The remaining ASCII
-/// characters allowed through the check that COULD break ArcadeDB
-/// DB-name rules are: spaces, `.`, `:`, `;`, `?`, `&`, `=`, `+`, `*`,
-/// `<`, `>`, `|`, `"`, `'`, `(`, `)`, `[`, `]`, `{`, `}`, `,`. We do
-/// NOT additionally normalise these: the operator has chosen a
-/// workspace identifier shape and we want the resulting db name to
-/// remain transparently identifiable in their tooling. If they hand
-/// us an exotic shape, the ArcadeDB server will reject the
-/// `create database` command at the HTTP boundary and we surface the
-/// 4xx through [`super::client::map_response_error`]. The operator
-/// learns the constraint at first run, not silently.
+/// [`crate::backend::check_workspace_id`] (ASCII, no `/` `\` NUL CR LF,
+/// non-empty, length ≤ 128). This function adds the stricter db-name
+/// character-class check on top of that.
 ///
 /// Length: input ≤ 128 → output ≤ `9 + 128 = 137` chars. Well within
 /// any URL-path-segment cap (spec says ≥ 255 typical, 1024 minimum
 /// per RFC 3986 §2.4 implementation notes).
-pub(crate) fn db_name_for_workspace(workspace_id: &WorkspaceId) -> String {
+pub(crate) fn db_name_for_workspace(workspace_id: &WorkspaceId) -> ProjectorResult<String> {
     let mut s = String::with_capacity("atlas_ws_".len() + workspace_id.len());
     s.push_str("atlas_ws_");
     for ch in workspace_id.chars() {
-        if ch == '-' {
-            s.push('_');
-        } else {
-            s.push(ch);
+        let mapped = if ch == '-' { '_' } else { ch };
+        if !(mapped.is_ascii_alphanumeric() || mapped == '_') {
+            return Err(ProjectorError::InvalidWorkspaceId {
+                reason: format!(
+                    "workspace_id contains character {ch:?} which is not permitted in an \
+                     ArcadeDB database name (allowed after hyphen-to-underscore mapping: \
+                     ASCII alphanumeric + underscore)"
+                ),
+            });
         }
+        s.push(mapped);
     }
-    s
+    Ok(s)
 }
 
 /// Build the parameterised Cypher query for fetching all vertices in a
@@ -166,10 +172,11 @@ pub(crate) fn upsert_vertex_command(workspace_id: &WorkspaceId, v: &BackendVerte
 /// edge.
 ///
 /// The `MATCH` pattern locates the two endpoint vertices by logical id
-/// + workspace_id; `MERGE` keys the edge by `edge_id` + `workspace_id`.
-/// `from_entity_uuid` / `to_entity_uuid` are stored as properties on
-/// the edge so [`edges_query`]'s parser can reconstruct the
-/// `BackendEdge::from` / `to` fields without re-traversing the graph.
+/// and workspace_id; `MERGE` keys the edge by `edge_id` and
+/// `workspace_id`. `from_entity_uuid` and `to_entity_uuid` are stored
+/// as properties on the edge so [`edges_query`]'s parser can
+/// reconstruct the `BackendEdge::from` / `to` fields without
+/// re-traversing the graph.
 pub(crate) fn upsert_edge_command(workspace_id: &WorkspaceId, e: &BackendEdge) -> (String, Value) {
     let command = "\
         MATCH (a:Vertex {entity_uuid: $from, workspace_id: $ws}), \
@@ -435,11 +442,12 @@ mod tests {
     #[test]
     fn db_name_prefixes_and_replaces_hyphens() {
         assert_eq!(
-            db_name_for_workspace(&"550e8400-e29b-41d4-a716-446655440000".to_string()),
+            db_name_for_workspace(&"550e8400-e29b-41d4-a716-446655440000".to_string())
+                .expect("UUID-shaped workspace_id is valid"),
             "atlas_ws_550e8400_e29b_41d4_a716_446655440000"
         );
         assert_eq!(
-            db_name_for_workspace(&"acme_corp".to_string()),
+            db_name_for_workspace(&"acme_corp".to_string()).expect("ASCII alphanumeric is valid"),
             "atlas_ws_acme_corp"
         );
     }
@@ -447,9 +455,25 @@ mod tests {
     #[test]
     fn db_name_is_deterministic() {
         let ws = "01J5M9V8K9X7T2QH4Z6A1P3R5W".to_string();
-        let a = db_name_for_workspace(&ws);
-        let b = db_name_for_workspace(&ws);
+        let a = db_name_for_workspace(&ws).expect("ASCII alphanumeric is valid");
+        let b = db_name_for_workspace(&ws).expect("ASCII alphanumeric is valid");
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn db_name_rejects_chars_check_workspace_id_permits() {
+        // `;` is allowed by `check_workspace_id` (it's ASCII, not in
+        // the forbidden `/ \ NUL CR LF` set) but `db_name_for_workspace`
+        // MUST reject it because it would inject into the
+        // `create database <db_name>` admin command. W17b
+        // security-review HIGH-2 second-line defence.
+        let res = db_name_for_workspace(&"foo;drop".to_string());
+        match res {
+            Err(ProjectorError::InvalidWorkspaceId { reason }) => {
+                assert!(reason.contains("ArcadeDB database name"), "{reason:?}");
+            }
+            other => panic!("expected InvalidWorkspaceId; got {other:?}"),
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # V2-β Welle 17b — Plan-Doc (ArcadeDB driver implementation)
 
-> **Status:** WIP — subagent dispatched 2026-05-14, parent stopped at clippy-clean state (zero warnings on new arcadedb code; 18/18 trait-conformance tests pass) BEFORE plan-doc + parent-side reviewer dispatch. Nelson Docker-restart breakpoint.
+> **Status:** ready-for-merge. Subagent dispatched 2026-05-14 reached clippy-clean state; parent resumed post-Docker-restart, dispatched parallel `code-reviewer` + `security-reviewer` (Atlas Standing Protocol lesson #8), applied 2 HIGH + 3 MEDIUM + 2 LOW in-commit fixes. **0 CRITICAL.** Reviewer self-audit ("zero clippy warnings") was incorrect: 15 `doc_lazy_continuation` lints surfaced + got fixed in the same pass.
 > **Orchestration:** Phase 10 per `docs/V2-BETA-ORCHESTRATION-PLAN.md`. Builds on W17a (PR #85) + W17a-cleanup (PR #88).
 > **Driving decisions:** ADR-Atlas-010 §4 (8 binding sub-decisions); ADR-Atlas-011 §4 + §4.3 (trait surface + W17a-cleanup helpers).
 
@@ -37,22 +37,23 @@ W17b fills the `ArcadeDbBackend` stub shipped by W17a (PR #85) using `reqwest`-b
 - **`check_value_depth_and_size` called at HTTP-response parse boundary** AFTER `serde_json::from_slice` and BEFORE `Vertex::new` / `Edge::new` (ADR-011 §4.3 sub-decision #12). Recommended limits: `max_depth=32`, `max_bytes=64*1024`.
 - **HTTP Basic auth** for V2-β (ADR-010 OQ-5). JWT bearer deferred to V2-γ.
 
-## Files (current WIP state, post-subagent-stop 2026-05-14)
+## Files (final state post-reviewer-fix-commit 2026-05-14)
 
 | Status | Path | Lines | Inhalt |
 |---|---|---|---|
-| NEW    | `crates/atlas-projector/src/backend/arcadedb/mod.rs` | 686 | `ArcadeDbBackend` struct + impl `GraphStateBackend` + `ArcadeDbTxn` struct + impl `WorkspaceTxn` + error mapping + commit/rollback session handling |
-| NEW    | `crates/atlas-projector/src/backend/arcadedb/client.rs` | 418 | `reqwest::Client` wrapper + Basic auth + connect/request timeouts + Cypher response JSON parse helpers (calls `check_value_depth_and_size`) |
-| NEW    | `crates/atlas-projector/src/backend/arcadedb/cypher.rs` | 674 | Cypher query builders (parameterised `$ws` / `$eid` / `$props` binding — never string-concat); vertex/edge upsert MERGE templates; sorted-read MATCH templates per §4.9 adapter |
+| NEW    | `crates/atlas-projector/src/backend/arcadedb/mod.rs` | ~745 | `ArcadeDbBackend` struct + impl `GraphStateBackend` + `ArcadeDbTxn` struct + impl `WorkspaceTxn` + error mapping + commit/rollback session handling. **Reviewer fixes:** scheme+userinfo guard in `new()`, bounded body read in `ensure_database_exists`, `run_command` narrowed to `()` return, 3 new tests (`begin_rejects_workspace_id_with_db_name_incompatible_chars`, `new_rejects_unsupported_scheme`, `new_rejects_url_with_userinfo`). |
+| NEW    | `crates/atlas-projector/src/backend/arcadedb/client.rs` | ~423 | `reqwest::Client` wrapper + Basic auth + connect/request timeouts + Cypher response JSON parse helpers (calls `check_value_depth_and_size`). **Reviewer fix:** `SecretString`, `BasicAuth.{username,password}` → `pub(crate)`. |
+| NEW    | `crates/atlas-projector/src/backend/arcadedb/cypher.rs` | ~692 | Cypher query builders (parameterised `$ws` / `$eid` / `$props` binding — never string-concat); vertex/edge upsert MERGE templates; sorted-read MATCH templates per §4.9 adapter. **Reviewer fix:** `db_name_for_workspace` returns `ProjectorResult<String>` with strict `[a-zA-Z0-9_]` allowlist (post-hyphen-replacement); 1 new test (`db_name_rejects_chars_check_workspace_id_permits`); clippy doc-lint trigger lines reworded. |
 | NEW    | `crates/atlas-projector/tests/cross_backend_byte_determinism.rs` | 257 | `#[ignore]`-gated test — same 3-node + 2-edge fixture as `backend_trait_conformance::byte_pin_through_in_memory_backend`; asserts `InMemoryBackend::canonical_state() == ArcadeDbBackend::canonical_state()` byte-identical. Requires `ATLAS_ARCADEDB_URL` env var (W17c CI sets it via Docker-Compose) |
+| MODIFY | `crates/atlas-projector/src/backend/mod.rs` | +/-3 | **Reviewer fix:** clippy doc-lint trigger reworded in `begin()` doc comment (lifetime section). Trait surface UNCHANGED. |
 | MODIFY | `crates/atlas-projector/Cargo.toml` | +27 | Adds `reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }` |
 | DELETE | `crates/atlas-projector/src/backend/arcadedb.rs` | -213 | W17a stub removed; replaced by sub-module |
 | MODIFY | `crates/atlas-projector/src/lib.rs` | +1/-1 | Re-export path update |
 | MODIFY | `crates/atlas-projector/tests/backend_trait_conformance.rs` | +54/-? | DROP stub-panic tests; ADD any non-arcadedb tests if needed |
 | MODIFY | `Cargo.lock` | +3 | reqwest transitive deps |
-| NEW    | `.handoff/v2-beta-welle-17b-plan.md` | THIS file | Plan-doc |
+| NEW    | `.handoff/v2-beta-welle-17b-plan.md` | THIS file | Plan-doc (updated post-reviewer-fix) |
 
-**Total diff vs origin/master:** ~2109 insertions / ~225 deletions across 9 files.
+**Total diff vs origin/master:** ~2280 insertions / ~290 deletions across 10 files (post-fix).
 
 ## What was DONE (subagent worktree state at parent-stop)
 
@@ -67,14 +68,28 @@ W17b fills the `ArcadeDbBackend` stub shipped by W17a (PR #85) using `reqwest`-b
 - ✓ `cargo test -p atlas-projector --test backend_trait_conformance` — 18/18 green (post-WIP)
 - ✓ Zero clippy warnings (subagent self-reported pre-stop)
 
+## Reviewer dispatch outcome (2026-05-14 post-restart)
+
+Parallel `code-reviewer` + `security-reviewer` Agent dispatch per Atlas Standing Protocol lesson #8. **0 CRITICAL.**
+
+### HIGH findings — fixed in-commit
+- **H-1 — `run_command` Value-return bypasses `check_value_depth_and_size`** (mod.rs:419 pre-fix). All callers discarded the value; narrowed return type to `ProjectorResult<()>` so no future caller can accidentally bypass the ADR-011 §4.3 #12 depth/size cap. Removes the latent ADR violation.
+- **H-2 — `format!("create database {db_name}")` admin-command injection surface** (mod.rs:177 pre-fix). `check_workspace_id` permits `;`, `"`, `(`, `)`, spaces, etc. — characters that would inject into the unparameterised `create database` ArcadeDB admin command. Fixed at the second validation layer: `db_name_for_workspace` now returns `ProjectorResult<String>` and rejects any post-hyphen-replacement character outside `[a-zA-Z0-9_]` with `ProjectorError::InvalidWorkspaceId`.
+
+### MEDIUM findings — fixed in-commit
+- **M-1 — `SecretString` + `BasicAuth.password` `pub` visibility** (client.rs). Tightened to `pub(crate)` so downstream crates cannot reach `.password.expose()` directly. The redaction discipline is now structurally enforced, not convention-only.
+- **M-2 + M-3 — Derived `Debug` userinfo leak surface + HTTPS posture** (mod.rs::new). Constructor now rejects `base_url` carrying userinfo (closes the latent derived-`Debug` credential-leak path) AND rejects schemes other than `http`/`https`. Plaintext HTTP remains accepted for local-dev (docker-compose §4.7) with a documented runbook-requires-HTTPS note.
+- **L-1 — Unbounded response body in `ensure_database_exists`** (mod.rs). Bounded to first 512 bytes via `resp.bytes()` + UTF-8-lossy cap.
+
+### Tracking findings not fixed (rationale)
+- **Subagent self-audit "zero clippy warnings" was wrong.** 15 `doc_lazy_continuation` lints (13 new in cypher.rs, 2 pre-existing on master in `mod.rs:547-548`). All 15 fixed by rewriting the trigger lines (lines that started with `+ ` were Markdown-interpreted by clippy as list bullets).
+- **Port-1 transport-error test 5 s connect-timeout ceiling** (mod.rs:648). Code-reviewer marked MEDIUM (theoretical CI risk). Kept as-is: locally the test runs <1 s (port-1 RST is fast); the test is the only end-to-end assertion that the password is not leaked when a connect attempt fails. Marking `#[ignore]` would reduce coverage of an important invariant. Revisit if CI ever observes the 5 s ceiling.
+- **scrub_and_truncate Base64/Unicode-escape coverage** (LOW — security-reviewer L-2). Documentation-only refinement; the function's primary defence is the response body being truncated to 512 bytes anyway.
+- **`.unwrap_or(Value::Null)` patterns in cypher.rs upsert builders** (LOW — security-reviewer L-3). Reviewer noted these are unreachable today (BTreeMap<String, Value> always serialises); kept as-is for now.
+
 ## What is NOT YET DONE (next-session pickup)
 
-- [ ] **Parent-led parallel `code-reviewer` + `security-reviewer` dispatch** per Atlas Standing Protocol lesson #8. Reviewer focus suggestions:
-  - **code-reviewer:** Cypher template parameterisation correctness (grep for raw string-interpolation), `'static` lifetime honouring (no `&'a self.<field>` borrowed into ArcadeDbTxn), error-path correctness (every HTTP error → `ProjectorError`), `check_workspace_id` is FIRST statement of `begin()`, `check_value_depth_and_size` called at every `from_slice` → `BTreeMap<String, Value>` boundary, default `canonical_state()` trait impl path produces byte-identical output to InMemoryBackend.
-  - **security-reviewer:** credential redaction (grep for `password`/`token`/`auth` echo in error strings or logs), tenant isolation (per-database + Cypher param binding), parameter binding safety (no Cypher-injection paths even for trusted internal input), no `unsafe` blocks, panic-path audit (no panics reachable via public API from HTTP errors), Basic auth credentials never logged.
-- [ ] Fix CRITICAL/HIGH/applicable-MEDIUMs in-commit per reviewer dispatch outcome
-- [ ] Cross-backend byte-determinism test ACTUAL RUN against a live ArcadeDb instance — gated behind `ATLAS_ARCADEDB_URL` env var. **Validation deferred to W17c when Docker-Compose CI is set up. For W17b merge: the test EXISTS, is `#[ignore]`-gated, compiles cleanly. Actual byte-pin reproduction through ArcadeDb path validated in W17c.**
-- [ ] PR description body
+- [ ] Cross-backend byte-determinism test ACTUAL RUN against a live ArcadeDB instance — gated behind `ATLAS_ARCADEDB_URL` env var. **Validation deferred to W17c when Docker-Compose CI is set up. For W17b merge: the test EXISTS, is `#[ignore]`-gated, compiles cleanly. Actual byte-pin reproduction through ArcadeDB path validated in W17c.**
 - [ ] Admin-merge after green CI
 
 ## Test impact (V1 + V2-α + V2-β-W17a assertions to preserve)

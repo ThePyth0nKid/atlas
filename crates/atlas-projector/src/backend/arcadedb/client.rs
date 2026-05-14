@@ -43,11 +43,13 @@ use crate::error::{ProjectorError, ProjectorResult};
 pub struct BasicAuth {
     /// ArcadeDB username (e.g. `"root"` per ADR-Atlas-010 §4
     /// sub-decision #7 + the docker-compose §4.7 sketch).
-    pub username: String,
+    pub(crate) username: String,
     /// ArcadeDB password. Stored in a redacting wrapper so accidental
     /// `Debug` / `Display` of the surrounding struct does not leak the
-    /// secret to logs.
-    pub password: SecretString,
+    /// secret to logs. `pub(crate)` so downstream crates cannot reach
+    /// in and call `password.expose()` directly — closes W17b
+    /// security-review M-1.
+    pub(crate) password: SecretString,
 }
 
 impl BasicAuth {
@@ -91,8 +93,11 @@ impl std::fmt::Debug for BasicAuth {
 /// adding a transitive dep tree for a 30-LOC wrapper is not justified.
 /// V2-γ MAY revisit if more secrets enter the projector boundary
 /// (HSM-backed signing keys, JWT bearer tokens, …).
+/// Crate-private to enforce the "single `apply_basic_auth` call site"
+/// redaction discipline structurally rather than by convention. Closes
+/// W17b security-review M-1.
 #[derive(Clone)]
-pub struct SecretString {
+pub(crate) struct SecretString {
     inner: String,
 }
 
@@ -100,16 +105,15 @@ impl SecretString {
     /// Construct a new redacting wrapper. Callers MUST own the input
     /// string (the wrapper takes ownership).
     #[must_use]
-    pub fn new(s: String) -> Self {
+    pub(crate) fn new(s: String) -> Self {
         Self { inner: s }
     }
 
     /// Expose the inner bytes for the narrow consumer that needs them.
-    /// Only `apply_basic_auth` calls this inside the crate; outside
-    /// callers MAY call it but the redaction-discipline expectation is
-    /// "treat the return value as if it were the plaintext password".
+    /// Only `apply_basic_auth` calls this; the `pub(crate)` visibility
+    /// blocks downstream crates from reaching the plaintext password.
     #[must_use]
-    pub fn expose(&self) -> &str {
+    pub(crate) fn expose(&self) -> &str {
         &self.inner
     }
 }
