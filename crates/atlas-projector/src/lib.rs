@@ -118,7 +118,7 @@ pub mod replay;
 pub mod state;
 pub mod upsert;
 
-pub use backend::arcadedb::ArcadeDbBackend;
+pub use backend::arcadedb::{ArcadeDbBackend, BasicAuth};
 pub use backend::in_memory::InMemoryBackend;
 pub use backend::{
     check_value_depth_and_size, check_workspace_id, Edge as BackendEdge, EdgeId, EntityUuid,

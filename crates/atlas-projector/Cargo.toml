@@ -19,9 +19,36 @@ crate-type = ["rlib"]
 atlas-trust-core = { path = "../atlas-trust-core" }
 ciborium = { workspace = true }
 blake3 = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
+
+# V2-β Welle 17b: ArcadeDB driver implementation.
+#
+# `reqwest` provides the HTTP client for the ArcadeDB Server-mode HTTP
+# API (ADR-Atlas-010 §4 sub-decision #3). We pin to the same
+# `default-features = false` + `["rustls-tls", "json", "blocking"]`
+# feature set used by `atlas-signer` (rekor anchor lookups) so the
+# transitive dep graph and TLS backend are uniform across the
+# workspace:
+#   * `rustls-tls` — pure-Rust TLS; no `openssl-sys` system dependency
+#     (avoids OS-level OpenSSL version conflicts on the operator's
+#     deployment image). Matches ADR-Atlas-010 §4 sub-decision #3.
+#   * `json` — built-in JSON request/response helpers used for the
+#     `/api/v1/begin/{db}`, `/api/v1/query/{db}`, and
+#     `/api/v1/command/{db}` payloads.
+#   * `blocking` — the `GraphStateBackend` trait surface is sync; the
+#     in-memory backend is sync; W17b stays sync to avoid forcing a
+#     trait redesign. Async migration is V2-γ scope when the projector
+#     pipeline itself moves onto tokio futures.
+#
+# `url` is pulled in to construct + validate ArcadeDB base URLs at the
+# constructor boundary (`ArcadeDbBackend::new(base_url: Url, ...)`).
+# Already present transitively via `reqwest`; explicit dep keeps the
+# constructor signature stable across `reqwest` minor versions.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+url = "2"
 
 [dev-dependencies]
 # (serde_json already listed in [dependencies]; no dev-only deps needed.)
