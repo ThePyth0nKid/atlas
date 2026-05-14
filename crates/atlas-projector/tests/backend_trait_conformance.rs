@@ -1,6 +1,6 @@
-//! V2-β Welle 17a: `GraphStateBackend` trait-conformance tests.
+//! V2-β Welle 17a/17b: `GraphStateBackend` trait-conformance tests.
 //!
-//! Four invariants:
+//! Invariants exercised:
 //!
 //! 1. [`in_memory_round_trip`] — `InMemoryBackend` accepts a vertex
 //!    upsert and surfaces it via `vertices_sorted` in logical-id
@@ -13,9 +13,19 @@
 //!    This is the LOAD-BEARING regression for the byte-determinism CI
 //!    pin — any backend-trait change that breaks it trips here BEFORE
 //!    the original byte-pin test.
-//! 3. [`arcadedb_stub_panics`] — the `ArcadeDbBackend` stub's
-//!    `unimplemented!()` is reachable from the trait surface.
+//! 3. [`backend_id_strings_are_stable`] — both backends report the
+//!    documented `backend_id()` strings (W17b filled the ArcadeDb body,
+//!    so this is a stable contract for downstream
+//!    `ProjectorRunAttestation` consumers).
 //! 4. [`batch_upsert_orders_vertices_before_edges`] — OQ-2 contract.
+//!
+//! **W17b note (2026-05-14):** the W17a `arcadedb_stub_panics` test
+//! has been REMOVED here because the ArcadeDbBackend stub no longer
+//! exists — every method is now a real HTTP-bound implementation.
+//! Replaced by the cross-backend byte-determinism test in
+//! `tests/cross_backend_byte_determinism.rs`, which is `#[ignore]`-
+//! gated behind the `ATLAS_ARCADEDB_URL` env var (W17c wires CI to
+//! set it).
 
 use std::collections::BTreeMap;
 
@@ -193,16 +203,38 @@ fn byte_pin_through_in_memory_backend() {
 #[test]
 fn backend_id_strings_are_stable() {
     assert_eq!(InMemoryBackend::new().backend_id(), "in-memory");
-    assert_eq!(ArcadeDbBackend::new().backend_id(), "arcadedb-server");
+    // W17b: ArcadeDbBackend::new() now takes (base_url, credentials)
+    // — pure constructor, no network. The backend_id() return value
+    // is the stable contract for ProjectorRunAttestation consumers.
+    let b = ArcadeDbBackend::new(
+        url::Url::parse("http://localhost:2480").expect("static URL parses"),
+        atlas_projector::BasicAuth::new("root", "rootpw"),
+    )
+    .expect("constructor is pure");
+    assert_eq!(b.backend_id(), "arcadedb-server");
 }
 
 #[test]
-#[should_panic(expected = "W17b: ArcadeDbBackend::vertices_sorted")]
-fn arcadedb_stub_panics() {
-    let b = ArcadeDbBackend::new();
-    // vertices_sorted is the simplest method to invoke that does not
-    // require holding a txn first.
-    let _ = b.vertices_sorted(&ws());
+fn arcadedb_begin_validates_workspace_id_first() {
+    // W17b regression: ArcadeDbBackend::begin() MUST call
+    // check_workspace_id() FIRST, before any HTTP request is
+    // constructed. Empty workspace_id should fail with
+    // InvalidWorkspaceId, NOT a transport error. This invariant
+    // proves the helper is wired correctly at the call site (ADR-011
+    // §4.3 sub-decision #11).
+    let b = ArcadeDbBackend::new(
+        url::Url::parse("http://localhost:2480").expect("static URL parses"),
+        atlas_projector::BasicAuth::new("root", "rootpw"),
+    )
+    .expect("constructor is pure");
+    // `Box<dyn WorkspaceTxn>` doesn't implement Debug; discard the
+    // Ok payload before pattern-matching the error.
+    match b.begin(&"".to_string()).map(|_| ()) {
+        Err(ProjectorError::InvalidWorkspaceId { reason }) => {
+            assert!(reason.contains("empty"), "reason was {reason:?}");
+        }
+        other => panic!("expected InvalidWorkspaceId(empty); got {other:?}"),
+    }
 }
 
 #[test]

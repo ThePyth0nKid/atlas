@@ -100,8 +100,11 @@ dependencies = [
  "blake3",
  "ciborium",
  "hex",
+ "reqwest",
+ "serde",
  "serde_json",
  "thiserror 1.0.69",
+ "url",
 ]
 
 [[package]]
