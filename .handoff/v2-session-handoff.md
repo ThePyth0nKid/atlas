@@ -1,8 +1,90 @@
-# Atlas V2 — Session Handoff (V2-α SHIPPED + V2-β Phase 0–10.5 SHIPPED, v2.0.0-alpha.2 LIVE)
+# Atlas V2 — Session Handoff (V2-α SHIPPED + V2-β Phase 0–11.5 SHIPPED, v2.0.0-alpha.2 LIVE)
 
-> **🎯 FRESH-AGENT BOOTSTRAP DOC.** **READ §0z2 FIRST** (2026-05-14 V2-β Phase 10 SHIPPED narrative — W17b ArcadeDB driver live on master; next step is W17c Docker-Compose CI). Then §0 "Fresh-Context Onboarding" for general context, then §0z (V2-β Phase 0–9.5 SHIPPED, 2026-05-13), §0-NOW (HISTORICAL: 2026-05-14 Docker-restart breakpoint resume — W17b is now SHIPPED), §0a–§0d (Phase 1–4 strategic-iteration SHIPPED, historical), then **`docs/V2-MASTER-PLAN.md`** for the master-resident strategic plan, then **`docs/V2-BETA-ORCHESTRATION-PLAN.md`** + **`docs/V2-BETA-DEPENDENCY-GRAPH.md`** for V2-β welle orchestration + dispatch architecture. Optional: **`.handoff/v2-master-vision-v1.md`** + **`.handoff/decisions.md`** (24 explicit decisions).
+> **🎯 FRESH-AGENT BOOTSTRAP DOC.** **READ §0z3 FIRST** (2026-05-14 V2-β Phase 11 SHIPPED narrative — W17c ArcadeDB CI + bench live on master; W17b Cypher hotfix shipped atomically; W18 Mem0g cache is next). Then §0z2 (Phase 10 W17b SHIPPED narrative, 2026-05-14), §0 "Fresh-Context Onboarding", §0z (V2-β Phase 0–9.5 SHIPPED, 2026-05-13), §0-NOW (HISTORICAL: 2026-05-14 Docker-restart breakpoint resume), §0a–§0d (Phase 1–4 strategic-iteration SHIPPED, historical). Then **`docs/V2-MASTER-PLAN.md`** + **`docs/V2-BETA-ORCHESTRATION-PLAN.md`** + **`docs/V2-BETA-DEPENDENCY-GRAPH.md`**. Optional: **`.handoff/v2-master-vision-v1.md`** + **`.handoff/decisions.md`** (25 explicit decisions).
 
-**Erstellt:** 2026-05-12. **V2-α-α.1 SHIPPED:** 2026-05-13 (8 Welles). **V2-β Phase 0–9.5 SHIPPED:** 2026-05-13 (18 PRs merged: #67-#86). **V2-β Phase 10-counsel + 10-cleanup SHIPPED:** 2026-05-14 (PR #87 `36975af`, PR #88 `44c5102`). **V2-β Phase 10-breakpoint handoff SHIPPED:** 2026-05-14 (PR #89 `ddfe3d0`). **V2-β Phase 10 (W17b ArcadeDB driver impl) SHIPPED:** 2026-05-14 (PR #90 `d216844`). **V2-β Phase 10.5 consolidation SHIPPED:** 2026-05-14 (THIS PR). **Status:** v2.0.0-alpha.2 LIVE on master + GitHub + npm. Master HEAD `d216844` (W17b merge — ArcadeDB driver fills the W17a stub with `reqwest 0.12 + rustls-tls + blocking`; ~1860 LOC across `crates/atlas-projector/src/backend/arcadedb/{mod.rs, client.rs, cypher.rs}`; parallel reviewer-dispatch closed 0 CRITICAL + 2 HIGH + 3 MEDIUM + 2 LOW in-commit). The `graph_state_hash` byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduced through the trait surface unchanged. Counsel-engagement scope-doc landed RFP-ready. **Was als nächstes:** W17c Docker-Compose CI workflow (`.github/workflows/atlas-arcadedb-smoke.yml`) + cross-backend byte-determinism actual run against live ArcadeDB sidecar + benchmark capture (replaces ADR-010 §4.10 estimates with measured numbers) → W18 Mem0g Layer-3 cache (ADR-Atlas-012 reserved) → W19 v2.0.0-beta.1 ship. Counsel-Engagement-Kickoff parallel-track Nelson-led (6-8-week clock starts at engagement-letter signature).
+**Erstellt:** 2026-05-12. **V2-α-α.1 SHIPPED:** 2026-05-13 (8 Welles). **V2-β Phase 0–9.5 SHIPPED:** 2026-05-13 (18 PRs merged: #67-#86). **V2-β Phase 10-counsel + 10-cleanup SHIPPED:** 2026-05-14 (PRs #87/#88). **Phase 10-breakpoint SHIPPED:** 2026-05-14 (PR #89). **Phase 10 (W17b) SHIPPED:** 2026-05-14 (PR #90 `d216844`). **Phase 10.5 SHIPPED:** 2026-05-14 (PR #91 `b02ef2a`). **Phase 11 (W17c) SHIPPED:** 2026-05-14 (PR #92 `61ef036`). **Phase 11.5 SHIPPED:** 2026-05-14 (THIS PR). **Status:** v2.0.0-alpha.2 LIVE on master + GitHub + npm. Master HEAD `61ef036` (W17c merge — ArcadeDB Docker-Compose CI lane + benchmark + W17b Cypher hotfix shipped atomically: the new CI workflow found two W17b regressions on first live run (`$from`/`$to`/`$label` reserved Cypher param names; Edge type not auto-registered by MERGE) and the same PR delivered the fixes; cross-backend byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduces through both backends; W17c reviewer-dispatch closed 0 CRITICAL + 1 HIGH + 4 MEDIUM + 2 LOW in-commit). Counsel-engagement scope-doc landed RFP-ready. **Was als nächstes:** W18 Mem0g Layer-3 cache (ADR-Atlas-012 reserved) → W19 v2.0.0-beta.1 ship convergence milestone. Counsel-Engagement-Kickoff parallel-track Nelson-led (6-8-week clock starts at engagement-letter signature; blocks V2-β public materials per `DECISION-COUNSEL-1`).
+
+---
+
+## 0z3. V2-β Phase 11 (W17c ArcadeDB CI + bench) SHIPPED — 2026-05-14 late-day
+
+> **Read this first** if you're a fresh agent continuing V2-β work after 2026-05-14 late-day. Phase 11 wraps the Layer-2 ArcadeDB integration story end-to-end: driver (W17b) + CI infrastructure that validates it (W17c). W18 Mem0g Layer-3 cache is now the next active welle.
+
+### What landed in PR #92 (`61ef036`)
+
+| File | Status | Brief |
+|---|---|---|
+| `infra/docker-compose.arcadedb-smoke.yml` | NEW | ArcadeDB 24.10.1 sidecar; `JAVA_OPTS=-D...rootPassword=...` (env-var shape doesn't work — interactive password prompt blocks startup); unauthenticated `/api/v1/ready` healthcheck (no credentials in `docker inspect`); `restart: "no"`; retries=12 + start_period=30s |
+| `.github/workflows/atlas-arcadedb-smoke.yml` | NEW | Linux Ubuntu lane; SHA-pinned actions; `permissions: contents: read`; paths-gated; 10 min timeout; compose up → healthcheck wait → cross_backend test → bench → artifact → compose down |
+| `crates/atlas-projector/tests/arcadedb_benchmark.rs` | NEW | 3 `#[ignore]`-gated benches: B1 sanity, B2 incremental_upsert p50/p95/p99, B3 sorted_read p50/p95/p99 over 50v/100e |
+| `tools/run-arcadedb-smoke-local.sh` | NEW | Bash helper mirroring CI for local dev |
+| `crates/atlas-projector/src/backend/arcadedb/cypher.rs` | MODIFY | `upsert_edge_command` params renamed: `$from`/`$to`/`$label` → `$src`/`$dst`/`$lbl`; stored edge property `label` → `edge_label`; `parse_edge_row` translates back. Trait surface unchanged. |
+| `crates/atlas-projector/src/backend/arcadedb/mod.rs` | MODIFY | New `schema_initialized: Arc<Mutex<HashSet<String>>>` cache + `ensure_schema_types_exist` method (single atomic Cypher `CREATE ... WITH ... DETACH DELETE` registers Vertex + Edge types via sentinel); called from `begin()` after `ensure_database_exists` |
+
+### Two W17b regressions surfaced + closed atomically in W17c
+
+1. **ArcadeDB Cypher 24.10.1 reserved param names:** `$from` and `$to` (collide with SQL `CREATE EDGE ... FROM ... TO ...` keywords) silently empty result sets; `$label` raises `IllegalArgumentException` (TinkerPop `T.label` token). Diagnosis: extensive curl-against-live-ArcadeDB probing isolated each trigger; renames preserve the public API (only the Cypher placeholder names and the stored ArcadeDB property name change; `BackendEdge::label` and `from_entity_uuid` / `to_entity_uuid` stored properties are unchanged).
+2. **ArcadeDB Edge type not auto-registered by MERGE:** `MERGE (a)-[r:Edge]->(b)` silently no-ops if Edge type doesn't yet exist (CREATE auto-registers; MERGE does not). Symptom: edge writes returned 2xx + COMMIT succeeded but zero edges persisted; `canonical_state()` produced vertex-only hash that diverged from InMemory. Fix: single atomic Cypher `CREATE (a)-[r:Edge]->(b) WITH a, b, r DETACH DELETE a, b` statement registers both types and cleans up sentinels in one HTTP roundtrip. Idempotent across per-(backend, db_name) cache.
+
+### W17c reviewer-dispatch outcome (Atlas Standing Protocol lesson #8)
+
+Parallel `code-reviewer` + `security-reviewer`. **0 CRITICAL.**
+- **1 HIGH** (schema-bootstrap orphan window with separate CREATE+DELETE HTTP calls) — fixed: single-statement Cypher.
+- **4 MEDIUM:** (1) `dtolnay/rust-toolchain` branch-tip SHA — documented; (2) healthcheck cmdline password — fixed via unauthenticated `/ready`; (3) Mutex TOCTOU doc accuracy — fixed; (4) two password env vars — documented as by-design.
+- **2 LOW:** (1) missing `restart: "no"` — fixed; (2) missing `set +x` guard — fixed.
+- **H-2** (B1 documentation gap) — fixed: B1 explicitly labeled "NOT the authoritative byte-pin gate".
+
+### CI / verification results
+
+- `cross_backend_byte_determinism_pin` reproduces `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` through ArcadeDB live (in CI Linux + local Windows Docker Desktop).
+- 119 unit + 18 trait-conformance + 16 other = 153 tests green; clippy `-D warnings` clean.
+- Trait surface (`backend/mod.rs` public items) unchanged. SemVer additive.
+- Workflow timing: compose up + healthcheck + 2 cargo-test runs + artifact upload + compose down completes in ~75-90 s on Linux runners.
+
+### Bench baseline (Windows Docker Desktop + WSL2, post-fix; CI Linux numbers will differ)
+
+| Bench | n | p50 | p95 | p99 |
+|---|---|---|---|---|
+| B2 incremental_upsert | 200 | 24.3 ms | 47.7 ms | 56.7 ms |
+| B3 sorted_read_vertices_50v | 100 | 10.0 ms | 14.2 ms | 26.1 ms |
+| B3 sorted_read_edges_100e | 100 | 16.4 ms | 22.1 ms | 26.0 ms |
+
+V2-α InMemoryBackend baseline ~50 µs/event (B2 reference). ADR-010 §4.10 ArcadeDB estimate 300-500 µs/event. Local Windows Docker Desktop adds substantial HTTP-loopback overhead vs native Linux CI; Linux CI numbers will be archived as artifact and reflect the operational baseline.
+
+### W17c session lessons (load-bearing for W18+)
+
+1. **`#[ignore]`-gated integration tests are blind spots until CI runs them.** W17b's cross_backend_byte_determinism existed and compiled cleanly but never ran against a live backend. W17c's first run surfaced two real driver regressions immediately. **Lesson:** ship the CI infrastructure that runs `#[ignore]`-gated tests alongside the gated tests themselves; don't let "deferred to W17c" become "deferred forever".
+2. **ArcadeDB Cypher subset has reserved param names that are not documented.** `$from`, `$to`, `$label` all collide with SQL keywords or TinkerPop tokens and silently break queries that bind them. Future Atlas Cypher work in `cypher.rs` MUST avoid SQL-keyword param names (`$from`, `$to`, `$where`, `$order`, etc.). The W17c reviewer-dispatch did not flag this as a regression risk for future welles — should be added to the W18 Mem0g checklist.
+3. **W17c bench shape:** measurement-only tests can be `#[ignore]`-gated with the same env-var contract as the cross-backend test; output goes to stderr via `eprintln!` and is captured by `cargo test -- --nocapture` and tee'd to a workflow artifact. No criterion / no `[[bench]]` overhead. Pattern reusable for W18 Mem0g latency benches.
+4. **Atomic-Cypher pattern for schema bootstrap.** `CREATE ... WITH ... DETACH DELETE` in one statement is atomic from the client side AND registers the schema-type as a side effect of the CREATE phase. This pattern works for any ArcadeDB schema-type registration that doesn't have a direct DDL path on fresh databases.
+
+### What's next (Phase 12+, in priority order)
+
+1. **W18 Mem0g Layer-3 cache** — ADR-Atlas-012 reserved. Now unblocked by W17c-validated ArcadeDB stability. Design questions: (a) where does Mem0g cache invalidation hook into the projector pipeline? (b) what's the byte-determinism story for embedding outputs? (c) is the cache hit-rate measurement separate from Atlas+Mem0g end-to-end benchmark or combined?
+2. **W19 v2.0.0-beta.1 ship** — convergence milestone. ArcadeDB Layer 2 + Mem0g Layer 3 operational; all V2-β wellen merged; signed tag + GitHub Release + npm publish (analog V2-α-α.1 ship pattern from W8).
+3. **Counsel-Engagement-Kickoff** (parallel, Nelson-led). Per `DECISION-COUNSEL-1` blocks V2-β public materials. 6-8-week clock starts at engagement-letter signature.
+4. **W17 post-mortem (optional)** — operator-runbook §16 update documenting ArcadeDB Cypher quirks discovered in W17c (reserved param names, MERGE-vs-CREATE for edges) for future Atlas integrations.
+
+### Pre-flight checklist for W18 session
+
+```bash
+cd /c/Users/nelso/Desktop/atlas
+git status                                          # → clean
+git checkout master && git pull origin master       # → up-to-date with master HEAD ≥ 61ef036
+git log --oneline -4                                # → expect:
+#   <Phase 11.5 consolidation merge>
+#   61ef036 feat(v2-beta/welle-17c): ArcadeDB Docker-Compose CI + benchmark + W17b Cypher hotfix (#92)
+#   b02ef2a docs(v2-beta/phase-10.5): consolidate W17b ... (#91)
+#   d216844 feat(v2-beta/welle-17b): ArcadeDB driver implementation (#90)
+"/c/Program Files/GitHub CLI/gh.exe" pr list --state open --json number,title  # → archive PRs only (#59/#61/#62)
+/c/Users/nelso/.cargo/bin/cargo.exe test -p atlas-projector --quiet  # → 153 tests green
+/c/Users/nelso/.cargo/bin/cargo.exe clippy -p atlas-projector --no-deps -- -D warnings  # → zero warnings
+
+# Optional: full ArcadeDB integration validation against live sidecar
+bash tools/run-arcadedb-smoke-local.sh  # → cross-backend + B1/B2/B3 all green; ~30 s
+```
+
+Read `docs/ADR/ADR-Atlas-012-...md` (RESERVED — to be written in W18 design phase) for Mem0g architecture decisions.
 
 ---
 

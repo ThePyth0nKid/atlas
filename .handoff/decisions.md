@@ -322,4 +322,37 @@
 
 ---
 
-**End of decisions.md.** 24 decisions documented. All Phase-2 CRITICAL findings addressed (accepted/modified/deferred/rejected with rationale). V2-α Welle 1 + Welle 2 strategic decisions added 2026-05-12. V2-β Welle 17b shipped + W17a carry-over MEDIUMs closed 2026-05-14.
+---
+
+## 2026-05-14: Welle 17c ArcadeDB Docker-Compose CI + W17b Cypher Hotfix [DECISION-ARCH-W17c]
+- **Source:** V2-β Welle 17c (PR #92, master commit `61ef036`). Parallel `code-reviewer` + `security-reviewer` dispatch per Atlas Standing Protocol Lesson #8.
+- **Master Plan affected:** §6 Welle Decomposition (Phase 11 SHIPPED → Phase 12 W18 next).
+- **Decision:** **ACCEPT.** New `.github/workflows/atlas-arcadedb-smoke.yml` Linux lane + `infra/docker-compose.arcadedb-smoke.yml` (ArcadeDB 24.10.1 sidecar) + `tests/arcadedb_benchmark.rs` (B1/B2/B3) + `tools/run-arcadedb-smoke-local.sh`. Same PR atomically lands the W17b Cypher hotfix discovered when the CI test first ran live.
+- **W17b regressions surfaced + fixed:**
+  - **Cypher reserved param-name collision:** ArcadeDB 24.10.1 silently empties result sets when a query binds `$from` or `$to` (collide with SQL `CREATE EDGE ... FROM ... TO ...` keywords); `$label` raises `IllegalArgumentException` (TinkerPop `T.label` reserved token). `upsert_edge_command` renamed to `$src` / `$dst` / `$lbl` and stored edge-property `label` renamed to `edge_label` (`parse_edge_row` translates back). Trait surface + public API unchanged.
+  - **Edge type not auto-registered by MERGE:** ArcadeDB Cypher's `MERGE (a)-[r:Edge]->(b)` silently no-ops if Edge type doesn't yet exist (CREATE would auto-register). `ensure_schema_types_exist` added to `ArcadeDbBackend`: single atomic Cypher `CREATE ... WITH ... DETACH DELETE` statement registers both Vertex and Edge types and cleans up sentinels in one HTTP roundtrip; idempotent across a per-(backend, db_name) `Arc<Mutex<HashSet<String>>>` cache; lock NOT held across HTTP.
+- **W17c reviewer-fix findings (all in-commit):**
+  - **HIGH-1 (schema-bootstrap orphan window):** CLOSED. Single combined CREATE+DETACH DELETE Cypher statement is atomic from the client's perspective.
+  - **MEDIUM-1 (`dtolnay/rust-toolchain` branch-tip SHA):** DOCUMENTED. Matches Atlas convention across all workflows; pin SHA is immutable even though it's branch-tip.
+  - **MEDIUM-2 (healthcheck cmdline password leak):** CLOSED. ArcadeDB `/api/v1/ready` is unauthenticated; `curl -fsS http://localhost:2480/api/v1/ready` (no credentials).
+  - **MEDIUM-3 (Mutex TOCTOU doc accuracy):** CLOSED. Doc-comment now says "at most once UNDER CONTENTION-FREE CONDITIONS"; the combined CREATE+DELETE statement is idempotent under contention.
+  - **MEDIUM-4 (two password env vars):** DOCUMENTED. By design.
+  - **LOW-1 (missing `restart: "no"`):** CLOSED.
+  - **LOW-2 (missing `set +x` guard):** CLOSED.
+  - **H-2 (B1 documentation gap):** CLOSED. Module-level B1 description now explicitly says "NOT the authoritative byte-pin gate".
+- **First live byte-pin reproduction through ArcadeDB:** `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduced through the live ArcadeDB driver in CI (PR #92's atlas-arcadedb-smoke run). InMemoryBackend and ArcadeDbBackend hex-identical.
+- **Bench baseline (post-fix, Windows Docker Desktop + WSL2 local):**
+  - B2 incremental_upsert (n=200): p50=24.3 ms / p95=47.7 ms / p99=56.7 ms (V2-α InMem baseline ~50 µs; ArcadeDB ADR-010 §4.10 estimate 300-500 µs).
+  - B3 sorted_read_vertices_50v (n=100): p50=10.0 ms / p95=14.2 ms / p99=26.1 ms.
+  - B3 sorted_read_edges_100e (n=100): p50=16.4 ms / p95=22.1 ms / p99=26.0 ms.
+  - Linux CI numbers expected substantially faster; concrete capture in PR #92 artifact, archived 30 days.
+- **T2 trigger status (ADR-010 §4.4):** **NOT FIRED at CI scale.** T2's depth-3 read p99 > 15 ms at 10M-vertex workspace is a deployment-telemetry observation; CI's 50-vertex sorted-read p99 = 26 ms ≠ T2 (different scale, different operation). Operator-runbook §16 deployment-validation captures the real T2 signal post-W19 customer-first deployment.
+- **FalkorDB fallback trigger T1 (≥3 Cypher rewrites needed):** **NOT FIRED.** W17c surfaced 2 Cypher quirks (param-name reservation + Edge type auto-register), but BOTH have small in-driver workarounds that preserve the ArcadeDB Cypher subset. No need to rewrite ≥3 queries; no architectural change required.
+- **Confidence:** HIGH. byte-pin reproduces; clippy `-D warnings` clean; trait surface stable; 153 tests green; CI workflow runs green in <90 s end-to-end.
+- **Reversibility:** HIGH. The CI lane + bench file are additive; the driver hotfix is a small surgical change in `cypher.rs` (param renames + 1 doc-comment + 1 method addition).
+- **Open question (OQ for W18 / V2-γ):** ArcadeDB's `dtolnay/rust-toolchain@<branch-tip-SHA>` pin: should Atlas adopt a tool-versioning policy that resolves to immutable tag SHAs only? Documented in workflow comment for now; review at V2-γ supply-chain hardening pass.
+- **Review-after:** W18 Mem0g Layer-3 cache build-out (ADR-Atlas-012). T2 deployment-telemetry validation at first customer 10M-event workspace (post-W19 ship).
+
+---
+
+**End of decisions.md.** 25 decisions documented. All Phase-2 CRITICAL findings addressed (accepted/modified/deferred/rejected with rationale). V2-α Welle 1 + Welle 2 strategic decisions added 2026-05-12. V2-β Welle 17b + 17c shipped 2026-05-14 (W17a carry-overs closed in 17b; W17b regressions surfaced + closed in 17c via live CI).

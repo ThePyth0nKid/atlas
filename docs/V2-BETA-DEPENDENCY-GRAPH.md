@@ -50,7 +50,7 @@ graph TD
     subgraph PB3[Phase 7: ArcadeDB driver — SERIAL multi-session]
         W17a[W17a: Planning + scaffold ✓ SHIPPED<br/>GraphStateBackend trait<br/>ADR-Atlas-011]
         W17b[W17b: ArcadeDB driver impl ✓ SHIPPED<br/>reqwest HTTP + Cypher per ADR-010 §4<br/>0 CRITICAL / 2 HIGH / 3 MEDIUM / 2 LOW all fixed in-commit]
-        W17c[W17c: Integration tests<br/>Docker-Compose orchestration<br/>NEXT]
+        W17c[W17c: Docker-Compose CI + benchmark ✓ SHIPPED<br/>atlas-arcadedb-smoke workflow<br/>W17b Cypher hotfix + schema-bootstrap<br/>0 CRITICAL / 1 HIGH / 4 MEDIUM / 2 LOW all fixed in-commit<br/>byte-pin reproduces through live ArcadeDB]
     end
 
     W17a --> W17b
