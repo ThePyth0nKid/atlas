@@ -2,20 +2,32 @@
 #
 # W18c Phase A — Nelson supply-chain constant lift helper.
 #
-# Resolves the six HuggingFace BAAI/bge-small-en-v1.5 constants required by
+# Resolves the seven HuggingFace BAAI/bge-small-en-v1.5 constants required by
 # crates/atlas-mem0g/src/embedder.rs:
 #
-#   HF_REVISION_SHA           (40-char hex)
-#   ONNX_SHA256               (64-char hex)
-#   MODEL_URL                 (full LFS URL incl. revision SHA)
-#   TOKENIZER_JSON_SHA256     (64-char hex)
-#   CONFIG_JSON_SHA256        (64-char hex)
-#   SPECIAL_TOKENS_MAP_SHA256 (64-char hex)
+#   HF_REVISION_SHA              (40-char hex)
+#   ONNX_SHA256                  (64-char hex)
+#   MODEL_URL                    (full LFS URL incl. revision SHA)
+#   TOKENIZER_JSON_SHA256        (64-char hex)
+#   CONFIG_JSON_SHA256           (64-char hex)
+#   SPECIAL_TOKENS_MAP_SHA256    (64-char hex)
+#   TOKENIZER_CONFIG_JSON_SHA256 (64-char hex)
 #
 # Plus the ONNX file size (V4 verification per spike §12).
 #
+# W18c Phase B fix-commit (security-reviewer MEDIUM-2): extended from the
+# original 3-tokenizer-file loop to 4 files. The fourth file
+# (`tokenizer_config.json`) was discovered during W18c Phase B API-surface
+# verification against fastembed-rs 5.13.4 `src/common.rs::TokenizerFiles`
+# (lines 26-32). The Phase B implementation initially resolved its SHA via a
+# direct `curl | sha256sum` outside the documented resolver mechanism;
+# this extension restores the auditable single-script provenance chain
+# for future rotations. The pin value itself is unchanged (was
+# independently verified pre-commit by curl|sha256sum against the
+# same HF revision the resolver targets).
+#
 # Usage:  bash tools/w18c-phase-a-resolve.sh
-# Output: six clearly-labeled values + one size-in-MB. Paste back to agent.
+# Output: seven clearly-labeled values + one size-in-MB. Paste back to agent.
 
 set -euo pipefail
 
@@ -87,10 +99,12 @@ echo "    -> sha256: $ONNX_SHA256"
 echo "    -> size:   $ONNX_SIZE_BYTES bytes ($ONNX_SIZE_MB MB)"
 echo ""
 
-# Step 3: three tokenizer files
-echo "[3/3] Downloading 3 tokenizer files + computing sha256..."
+# Step 3: four tokenizer files (W18c Phase B fix-commit: was three,
+# extended to include tokenizer_config.json — required by upstream
+# fastembed::TokenizerFiles struct; security-reviewer MEDIUM-2).
+echo "[3/3] Downloading 4 tokenizer files + computing sha256..."
 declare -A TOKENIZER_SHAS
-for f in tokenizer.json config.json special_tokens_map.json; do
+for f in tokenizer.json config.json special_tokens_map.json tokenizer_config.json; do
   curl -sfL "https://huggingface.co/$MODEL/resolve/$HF_REVISION_SHA/$f" -o "$WORK_DIR/$f"
   SHA=$(sha256sum "$WORK_DIR/$f" | cut -d' ' -f1)
   validate_sha256_hex "${f^^}_SHA256" "$SHA"
@@ -105,14 +119,15 @@ echo "================================================================="
 echo "PASTE THESE LINES BACK TO THE AGENT:"
 echo "================================================================="
 echo ""
-echo "HF_REVISION_SHA           = $HF_REVISION_SHA"
-echo "ONNX_SHA256               = $ONNX_SHA256"
-echo "MODEL_URL                 = $MODEL_URL"
-echo "TOKENIZER_JSON_SHA256     = ${TOKENIZER_SHAS[tokenizer.json]}"
-echo "CONFIG_JSON_SHA256        = ${TOKENIZER_SHAS[config.json]}"
-echo "SPECIAL_TOKENS_MAP_SHA256 = ${TOKENIZER_SHAS[special_tokens_map.json]}"
-echo "ONNX_FILE_SIZE_BYTES      = $ONNX_SIZE_BYTES"
-echo "ONNX_FILE_SIZE_MB         = $ONNX_SIZE_MB"
+echo "HF_REVISION_SHA              = $HF_REVISION_SHA"
+echo "ONNX_SHA256                  = $ONNX_SHA256"
+echo "MODEL_URL                    = $MODEL_URL"
+echo "TOKENIZER_JSON_SHA256        = ${TOKENIZER_SHAS[tokenizer.json]}"
+echo "CONFIG_JSON_SHA256           = ${TOKENIZER_SHAS[config.json]}"
+echo "SPECIAL_TOKENS_MAP_SHA256    = ${TOKENIZER_SHAS[special_tokens_map.json]}"
+echo "TOKENIZER_CONFIG_JSON_SHA256 = ${TOKENIZER_SHAS[tokenizer_config.json]}"
+echo "ONNX_FILE_SIZE_BYTES         = $ONNX_SIZE_BYTES"
+echo "ONNX_FILE_SIZE_MB            = $ONNX_SIZE_MB"
 echo ""
 echo "================================================================="
 echo "Resolved at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"

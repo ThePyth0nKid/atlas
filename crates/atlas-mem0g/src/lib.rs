@@ -67,6 +67,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod embedder;
 pub mod secure_delete;
+pub mod supply_chain;
 
 #[cfg(feature = "lancedb-backend")]
 pub mod lancedb_backend;

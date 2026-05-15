@@ -5,15 +5,28 @@
 //!
 //! The model download is NOT delegated to fastembed-rs's default
 //! download behaviour. Atlas wraps it in
-//! [`download_model_with_verification`] which:
+//! [`download_model_with_verification`](crate::supply_chain::download_model_with_verification)
+//! which:
 //!
 //! 1. Fetches the ONNX file via an Atlas-controlled `reqwest` client
 //!    (rustls-tls; same TLS posture as atlas-projector's ArcadeDB
-//!    HTTP path).
-//! 2. Verifies SHA256 BEFORE handing the file path to fastembed-rs.
-//! 3. Fails closed on mismatch ([`crate::Mem0gError::SupplyChainMismatch`]).
+//!    HTTP path) with `https_only(true)` + 300s/30s timeouts.
+//! 2. Streams the body to a sibling `.partial` path (no full-body
+//!    in-memory buffering of the 130 MB ONNX).
+//! 3. Reads-and-verifies SHA-256 in a SINGLE buffer (TOCTOU-free —
+//!    the bytes fed to fastembed-rs ARE the bytes that were hashed).
+//! 4. Fails closed on mismatch ([`crate::Mem0gError::SupplyChainMismatch`]).
 //!
-//! ## Compiled-in supply-chain pins (9 total: 5 hash digests + 4 URLs)
+//! The primitives ([`crate::supply_chain::download_file_with_sha`],
+//! [`crate::supply_chain::read_and_verify`],
+//! [`crate::supply_chain::ensure_and_read_verified`],
+//! [`crate::supply_chain::pin_omp_threads_single`], and the five
+//! `download_<file>_with_verification` wrappers) live in
+//! [`crate::supply_chain`]; this module hosts the pin CONSTANTS (the
+//! supply-chain contract) and the `AtlasEmbedder` struct that
+//! consumes them.
+//!
+//! ## Compiled-in supply-chain pins (11 total: 6 hash digests + 5 URLs)
 //!
 //! Pinned for cold-start re-verification. The complete set is:
 //!
@@ -23,13 +36,20 @@
 //! - [`ONNX_SHA256`] — SHA-256 of the `model.onnx` file bytes.
 //!   Verifies the file regardless of repo-level integrity. (1 × SHA-256)
 //! - [`TOKENIZER_JSON_SHA256`] / [`CONFIG_JSON_SHA256`] /
-//!   [`SPECIAL_TOKENS_MAP_SHA256`] — SHA-256 of the three tokenizer
-//!   support files required by `fastembed::TextEmbedding::try_new_from_user_defined`.
-//!   (3 × SHA-256)
+//!   [`SPECIAL_TOKENS_MAP_SHA256`] / [`TOKENIZER_CONFIG_JSON_SHA256`] —
+//!   SHA-256 of the four tokenizer support files required by
+//!   `fastembed::TextEmbedding::try_new_from_user_defined` via the
+//!   upstream `TokenizerFiles` struct (4 × SHA-256). The fourth
+//!   (`tokenizer_config.json`) was discovered during W18c Phase B
+//!   API-surface verification (`fastembed-rs/src/common.rs` lines
+//!   26-32) — Phase A pinned three but the upstream `TokenizerFiles`
+//!   struct requires four; the Phase B agent extended the pin set
+//!   atomically rather than blocking on a Phase-A-amendment welle.
 //! - [`MODEL_URL`] / [`TOKENIZER_JSON_URL`] / [`CONFIG_JSON_URL`] /
-//!   [`SPECIAL_TOKENS_MAP_URL`] — full HuggingFace LFS URLs each
-//!   embedding [`HF_REVISION_SHA`] in path. TLS-pinned via Atlas's
-//!   `https_only(true)` reqwest configuration. (4 × URL)
+//!   [`SPECIAL_TOKENS_MAP_URL`] / [`TOKENIZER_CONFIG_JSON_URL`] —
+//!   full HuggingFace LFS URLs each embedding [`HF_REVISION_SHA`] in
+//!   path. TLS-pinned via Atlas's `https_only(true)` reqwest
+//!   configuration. (5 × URL)
 //!
 //! ## W18c Phase A — supply-chain constants lifted (2026-05-15)
 //!
@@ -45,14 +65,63 @@
 //! 133,093,490 bytes / 126.93 MB matches spike §3.4 expected envelope
 //! (V4 verification).
 //!
-//! The W18b `pins_are_placeholder_until_nelson_verifies` gatekeeper
-//! test is retired; `pins_well_formed_after_lift` becomes the active
-//! structural-format enforcer for all 5 hash digests + 4 URLs. The
-//! fail-closed posture in [`AtlasEmbedder::new`] remains pending
-//! W18c Phase B fastembed `try_new_from_user_defined` wiring; that
-//! wiring is the only remaining gate before Layer 3 is operational.
+//! ## W18c Phase B — fastembed wiring + fourth tokenizer pin (2026-05-15)
 //!
-//! See `.handoff/v2-beta-welle-18c-plan.md` Phase A for the
+//! API-surface verification against fastembed-rs 5.13.4 source
+//! (`src/common.rs::TokenizerFiles` lines 26-32; `src/text_embedding/init.rs::UserDefinedEmbeddingModel`
+//! lines 77-96; `src/text_embedding/impl.rs::try_new_from_user_defined`
+//! lines 115-170; `src/text_embedding/impl.rs::embed` lines 447-464)
+//! revealed that the upstream `TokenizerFiles` struct requires FOUR
+//! files (tokenizer_file, config_file, special_tokens_map_file,
+//! tokenizer_config_file), not three as outlined in the plan-doc.
+//! The Phase B agent atomically extended the pin set with
+//! [`TOKENIZER_CONFIG_JSON_SHA256`] and [`TOKENIZER_CONFIG_JSON_URL`]
+//! (resolved live against HF `5c38ec7c…` during Phase B Step 0).
+//!
+//! `AtlasEmbedder::new` is now operational: SHA-verify-all-four-and-read,
+//! then `pin_omp_threads_single`, then
+//! `UserDefinedEmbeddingModel::new(…).with_pooling(Pooling::Cls)`,
+//! then `try_new_from_user_defined`. The pooling pin matches
+//! fastembed's own `get_default_pooling_method(BGESmallENV15)`
+//! (`src/text_embedding/impl.rs` line 218). The fail-closed Phase A
+//! posture is fully lifted.
+//!
+//! The W18b `pins_are_placeholder_until_nelson_verifies` gatekeeper
+//! test is retired; `pins_well_formed_after_lift` is the active
+//! structural-format enforcer for all 6 hash digests + 5 URLs.
+//!
+//! ## W18c Phase B fix-commit (2026-05-15)
+//!
+//! Reviewer-driven follow-up commit on top of the Phase B implementation:
+//!
+//! - **TOCTOU defence (security HIGH-1):** the previous code path
+//!   verified the cached file's SHA via `verify_cached_file_sha`,
+//!   then SEPARATELY called `std::fs::read(path)` to load bytes for
+//!   fastembed. Between those two calls the file on disk CAN be
+//!   atomically swapped (rename/symlink-swap). The fix collapses
+//!   verify-and-use into a single primitive `read_and_verify`:
+//!   read once into a `Vec<u8>`, hash the in-memory bytes, compare.
+//!   The bytes fed to fastembed ARE the bytes that were verified.
+//! - **reqwest timeouts (code HIGH-2):** the client builder now
+//!   pins `timeout(300s)` + `connect_timeout(30s)`. Prevents a
+//!   stalled HF endpoint from blocking `AtlasEmbedder::new`
+//!   indefinitely (5 serial downloads).
+//! - **Streaming download (security MEDIUM-1):** the ONNX body
+//!   (~130 MB) streams to disk via `Response::copy_to` instead of
+//!   `Response::bytes().into_vec()`. No double-allocation.
+//! - **Module split (code MEDIUM-2):** supply-chain primitives
+//!   moved to [`crate::supply_chain`]; this module is now under
+//!   the 800-LOC hard limit.
+//! - **Visibility (code MEDIUM-3, MEDIUM-4):** 4 tokenizer download
+//!   wrappers + `verify_cached_file_sha` demoted from `pub` to
+//!   `pub(crate)`. Only `download_model_with_verification` (planned
+//!   `bin/preload-embedder` consumer) stays `pub`.
+//! - **Phase A resolver script (security MEDIUM-2):** extended to
+//!   include `tokenizer_config.json` in the iterated tokenizer set
+//!   (4 files now, not 3). Strengthens auditable provenance for
+//!   future supply-chain rotations.
+//!
+//! See `.handoff/v2-beta-welle-18c-plan.md` Phase A + Phase B for the
 //! resolution audit trail.
 //!
 //! ## Determinism pinning (ADR §4 sub-decision #2)
@@ -66,7 +135,9 @@
 //! 3. `bge-small-en-v1.5` FP32 model only. Quantised variants are
 //!    NOT deterministic across CPU instruction-set variants.
 
-use crate::{Mem0gError, Mem0gResult};
+#[cfg(feature = "lancedb-backend")]
+use crate::Mem0gError;
+use crate::Mem0gResult;
 
 // ---------------------------------------------------------------------------
 // Compiled-in supply-chain pins (ADR §4 sub-decision #2)
@@ -98,7 +169,7 @@ pub const MODEL_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resol
 // W18c Phase B tokenizer-file pins
 //
 // Declared here in Phase A (compiled-in alongside the model pins so the
-// constant-lift is atomic across all 5 hash digests + 4 URLs); consumed
+// constant-lift is atomic across all 6 hash digests + 5 URLs); consumed
 // by the `fastembed::TextEmbedding::try_new_from_user_defined` wiring
 // that lands in W18c Phase B per HIGH-2 reviewer note (see
 // [`AtlasEmbedder::new`] fn-level doc-comment "W18c Phase B resume guide").
@@ -139,7 +210,26 @@ pub const CONFIG_JSON_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5
 /// [`HF_REVISION_SHA`].
 pub const SPECIAL_TOKENS_MAP_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/special_tokens_map.json";
 
-/// Compile-in check: all nine pins (5 hash digests + 4 URLs) are
+/// SHA-256 of `tokenizer_config.json` from `BAAI/bge-small-en-v1.5`
+/// at [`HF_REVISION_SHA`]. 64-char SHA-256 hex digest.
+///
+/// Resolved 2026-05-15 during W18c Phase B API-surface verification
+/// against `fastembed-rs/src/common.rs::TokenizerFiles` (lines 26-32),
+/// which requires this file in addition to the three pinned in Phase A.
+/// Consumed by W18c Phase B `try_new_from_user_defined` wiring.
+///
+/// Phase B fix-commit (security MEDIUM-2): `tools/w18c-phase-a-resolve.sh`
+/// has been extended to include this fourth file in the resolver
+/// loop, strengthening the auditable-provenance chain for future
+/// rotations.
+pub const TOKENIZER_CONFIG_JSON_SHA256: &str =
+    "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3";
+
+/// Full HuggingFace LFS URL for `tokenizer_config.json` at
+/// [`HF_REVISION_SHA`].
+pub const TOKENIZER_CONFIG_JSON_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/tokenizer_config.json";
+
+/// Compile-in check: all eleven pins (6 hash digests + 5 URLs) are
 /// non-empty. Catches accidental blanking during refactors.
 /// Structural-only — real-value substitution keeps the assertion
 /// passing; well-formedness is enforced by `pins_well_formed_after_lift`.
@@ -150,187 +240,26 @@ pub const _STRUCTURAL_PIN_CHECK: () = {
     assert!(!TOKENIZER_JSON_SHA256.is_empty());
     assert!(!CONFIG_JSON_SHA256.is_empty());
     assert!(!SPECIAL_TOKENS_MAP_SHA256.is_empty());
+    assert!(!TOKENIZER_CONFIG_JSON_SHA256.is_empty());
     assert!(!TOKENIZER_JSON_URL.is_empty());
     assert!(!CONFIG_JSON_URL.is_empty());
     assert!(!SPECIAL_TOKENS_MAP_URL.is_empty());
+    assert!(!TOKENIZER_CONFIG_JSON_URL.is_empty());
 };
 
 // ---------------------------------------------------------------------------
-// Determinism conditions
+// Cached-model SHA verifier (W18b backward-compat surface)
 // ---------------------------------------------------------------------------
 
-/// Set `OMP_NUM_THREADS=1` programmatically. MUST be called BEFORE
-/// any fastembed-rs init (ORT picks up the env var at session-create
-/// time, not at per-call time).
+/// Verify the cached model file's SHA-256 against the compiled-in pin.
 ///
-/// This is a process-wide setting; tests that exercise the embedder
-/// MUST call this in their setup. Idempotent — wrapped in `Once`,
-/// the `set_var` is performed exactly once across the lifetime of
-/// the process even if many threads call this concurrently.
-///
-/// Safety: `std::env::set_var` is unsafe-on-Rust-2024 because of
-/// multi-threaded race risks on the global `environ`. The `Once`
-/// wrapper (MEDIUM-5 fix) eliminates the multi-threaded race: only
-/// ONE thread performs the actual `set_var` call (the very first
-/// caller, while all other callers block in `Once::call_once`).
-/// After the first call returns, the env var is set and subsequent
-/// calls are non-mutating no-ops.
-pub fn pin_omp_threads_single() {
-    // MEDIUM-5 fix: serialise the unsafe set_var via Once so concurrent
-    // test threads do NOT race on the global `environ` block.
-    static OMP_PIN_ONCE: std::sync::Once = std::sync::Once::new();
-    OMP_PIN_ONCE.call_once(|| {
-        // SAFETY: The Once::call_once guarantees this closure runs
-        // exactly once across all threads. While it runs, no other
-        // thread can be executing pin_omp_threads_single via this
-        // path. Required for deterministic ORT embedding
-        // (ADR §4 sub-decision #2).
-        #[allow(unsafe_code)]
-        unsafe {
-            std::env::set_var("OMP_NUM_THREADS", "1");
-        }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Download-with-SHA-verification (Path 1 — preferred)
-// ---------------------------------------------------------------------------
-
-/// Atlas-controlled model download with SHA256 verification.
-///
-/// Per ADR §4 sub-decision #2 Path 1:
-///
-/// 1. Fetch [`MODEL_URL`] via Atlas-controlled HTTP client.
-/// 2. Compute SHA256 of the response bytes.
-/// 3. Compare against compiled-in [`ONNX_SHA256`].
-/// 4. On mismatch, return [`Mem0gError::SupplyChainMismatch`] —
-///    fail closed BEFORE handing the file path to fastembed-rs.
-/// 5. On match, write the file to `dest` and return its path.
-///
-/// Re-verification at every cold start: callers MUST call
-/// [`verify_cached_model_sha`] on subsequent runs.
-///
-/// # Errors
-///
-/// - [`Mem0gError::Io`] on filesystem or network failure.
-/// - [`Mem0gError::SupplyChainMismatch`] on SHA256 mismatch
-///   (fail-closed — the cache REFUSES to embed).
-#[cfg(feature = "lancedb-backend")]
-pub fn download_model_with_verification(dest: &std::path::Path) -> Mem0gResult<std::path::PathBuf> {
-    use std::io::Write;
-
-    let client = reqwest::blocking::Client::builder()
-        .https_only(true)
-        .build()
-        .map_err(|e| Mem0gError::Io(format!("reqwest client build: {e}")))?;
-
-    let response = client
-        .get(MODEL_URL)
-        .send()
-        .map_err(|e| Mem0gError::Io(format!("model download GET {MODEL_URL}: {e}")))?;
-
-    if !response.status().is_success() {
-        return Err(Mem0gError::Io(format!(
-            "model download non-success status: {}",
-            response.status()
-        )));
-    }
-
-    let bytes = response
-        .bytes()
-        .map_err(|e| Mem0gError::Io(format!("model download body read: {e}")))?;
-
-    // Verify SHA256 BEFORE writing to disk so a corrupted download
-    // never lands a poisoned file under the cache path.
-    let hash = sha256_hex(&bytes);
-    if hash != ONNX_SHA256 {
-        return Err(Mem0gError::SupplyChainMismatch {
-            expected: ONNX_SHA256.to_string(),
-            actual: hash,
-        });
-    }
-
-    std::fs::create_dir_all(
-        dest.parent()
-            .ok_or_else(|| Mem0gError::Io(format!("dest has no parent: {}", dest.display())))?,
-    )
-    .map_err(|e| Mem0gError::Io(format!("create_dir_all: {e}")))?;
-
-    let mut f = std::fs::File::create(dest)
-        .map_err(|e| Mem0gError::Io(format!("file create {}: {e}", dest.display())))?;
-    f.write_all(&bytes)
-        .map_err(|e| Mem0gError::Io(format!("file write: {e}")))?;
-    f.sync_all()
-        .map_err(|e| Mem0gError::Io(format!("file fsync: {e}")))?;
-
-    Ok(dest.to_path_buf())
-}
-
-/// Verify the cached model file's SHA256 against the compiled-in pin.
-///
-/// Called at every cold start before fastembed-rs init. Fails closed
-/// (refuses to embed) on mismatch. Streams the file in 64 KiB chunks
-/// to avoid a full-file allocation for large ONNX bodies (the
-/// `bge-small-en-v1.5` FP32 ONNX is ~130 MB).
+/// Preserved as `pub` for backward compatibility with W18b call-sites
+/// and the documented `bin/preload-embedder` operator-tool surface.
+/// Newer in-crate code should use
+/// [`crate::supply_chain::read_and_verify`] (TOCTOU-free contract for
+/// downstream byte use).
 pub fn verify_cached_model_sha(model_path: &std::path::Path) -> Mem0gResult<()> {
-    let hash = sha256_file(model_path)?;
-    if hash != ONNX_SHA256 {
-        return Err(Mem0gError::SupplyChainMismatch {
-            expected: ONNX_SHA256.to_string(),
-            actual: hash,
-        });
-    }
-    Ok(())
-}
-
-/// Compute SHA-256 of a byte slice and return lowercase hex.
-///
-/// HIGH-1 fix: this previously delegated to a `blake3-placeholder-...`
-/// string (NOT SHA-256), which silently broke supply-chain verification
-/// regardless of `ONNX_SHA256`'s value. Now uses `sha2::Sha256` for
-/// real RFC-6234 SHA-256 — the same algorithm HuggingFace and the
-/// `sha256sum` operator-runbook tool produce.
-///
-/// Empty-input contract: SHA-256 of the empty byte slice is the
-/// canonical
-/// `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
-/// Unit-tested below.
-///
-/// `#[allow(dead_code)]` because the always-on dep set sees this
-/// function only via the unit tests; the `lancedb-backend` feature
-/// gates the production call-site in `download_model_with_verification`.
-#[allow(dead_code)]
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    hex::encode(digest)
-}
-
-/// Compute SHA-256 of a file by streaming in 64 KiB chunks.
-///
-/// HIGH-1 fix companion: stream-friendly variant for large ONNX
-/// model files. Returns lowercase hex.
-fn sha256_file(path: &std::path::Path) -> Mem0gResult<String> {
-    use sha2::Digest;
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| Mem0gError::Io(format!("open {}: {e}", path.display())))?;
-    let mut hasher = sha2::Sha256::new();
-    let mut buf = [0u8; 64 * 1024];
-    loop {
-        let n = file
-            .read(&mut buf)
-            .map_err(|e| Mem0gError::Io(format!("read {}: {e}", path.display())))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    let digest = hasher.finalize();
-    Ok(hex::encode(digest))
+    crate::supply_chain::verify_cached_file_sha(model_path, ONNX_SHA256)
 }
 
 // ---------------------------------------------------------------------------
@@ -343,9 +272,22 @@ fn sha256_file(path: &std::path::Path) -> Mem0gResult<String> {
 /// Held as a singleton per backend instance. Embedder ownership lives
 /// INSIDE [`crate::SemanticCacheBackend`] (caller passes raw text,
 /// not vectors) so the embedder-version pin is a single-impl swap.
+///
+/// ## Interior mutability (W18c Phase B)
+///
+/// Upstream `fastembed::TextEmbedding::embed` takes `&mut self`
+/// (`fastembed-rs/src/text_embedding/impl.rs::embed` line 447-464).
+/// Atlas's [`embed`](AtlasEmbedder::embed) surface is `&self` so it
+/// composes through `Arc<dyn SemanticCacheBackend>` without forcing
+/// per-call exclusive ownership at the call site. The internal
+/// `Mutex<TextEmbedding>` provides the exclusivity that fastembed
+/// requires while keeping Atlas's public API ergonomic. The mutex
+/// is fine-grained — one acquire per `embed()` call — so contention
+/// is bounded by the embed latency itself (~5-10 ms per call under
+/// `OMP_NUM_THREADS=1`).
 #[cfg(feature = "lancedb-backend")]
 pub struct AtlasEmbedder {
-    inner: fastembed::TextEmbedding,
+    inner: std::sync::Mutex<fastembed::TextEmbedding>,
 }
 
 #[cfg(feature = "lancedb-backend")]
@@ -353,119 +295,179 @@ impl AtlasEmbedder {
     /// Construct a new embedder.
     ///
     /// Steps:
-    /// 1. [`pin_omp_threads_single`]
-    /// 2. Verify cached model SHA matches [`ONNX_SHA256`]
-    ///    (calls [`download_model_with_verification`] if file missing)
-    /// 3. fastembed-rs `TextEmbedding::try_new_from_user_defined`
-    ///    with the verified local path (NOT `try_new(Default)` —
-    ///    that path triggers fastembed-rs's own model fetch which
-    ///    bypasses Atlas's SHA-verified gate).
+    /// 1. Download + SHA-256-verify-and-read all five files (ONNX
+    ///    model + four tokenizer files:
+    ///    `model.onnx` + `tokenizer.json` + `config.json` +
+    ///    `special_tokens_map.json` + `tokenizer_config.json`) into
+    ///    `model_cache_dir`. Existing files are re-verified against
+    ///    the compiled-in pin (cold-start re-verification per
+    ///    ADR §4 sub-decision #2); mismatched cached files trip the
+    ///    fail-closed [`Mem0gError::SupplyChainMismatch`] path.
+    ///    The verify-and-read fuses into a single
+    ///    [`crate::supply_chain::ensure_and_read_verified`] call per
+    ///    file so the bytes consumed in step 4 ARE the bytes that
+    ///    were SHA-verified (TOCTOU-free; security HIGH-1 fix).
+    /// 2. [`crate::supply_chain::pin_omp_threads_single`] — set
+    ///    `OMP_NUM_THREADS=1` BEFORE any fastembed-rs init so the
+    ///    ORT session picks up the deterministic single-thread CPU
+    ///    path.
+    /// 3. Hand the five SHA-verified byte buffers directly to
+    ///    fastembed (no intermediate `std::fs::read` step).
+    /// 4. Construct
+    ///    [`fastembed::UserDefinedEmbeddingModel`] with
+    ///    `pooling = Pooling::Cls` (matches fastembed's own
+    ///    `get_default_pooling_method(BGESmallENV15)` —
+    ///    `fastembed-rs/src/text_embedding/impl.rs` line 218) and
+    ///    `quantization = QuantizationMode::None` (FP32; only the
+    ///    `BGESmallENV15Q` variant is `Static`).
+    /// 5. Call
+    ///    [`fastembed::TextEmbedding::try_new_from_user_defined`]
+    ///    (NOT `try_new(Default)` — the latter triggers
+    ///    fastembed-rs's own HuggingFace fetch which bypasses
+    ///    Atlas's SHA-verified gate; this was the W18b HIGH-2
+    ///    bypass that the original fail-closed posture defended
+    ///    against).
     ///
     /// # Errors
     ///
-    /// - [`Mem0gError::SupplyChainMismatch`] if SHA256 mismatch
-    ///   (fail-closed; refuses to embed).
-    /// - [`Mem0gError::Embedder`] on fastembed-rs init failure OR
-    ///   while the W18c Phase B `try_new_from_user_defined` wiring
-    ///   has not yet landed (fail-closed; refuses to embed). The
-    ///   six supply-chain pins are W18c-Phase-A lifted; the wiring
-    ///   gate is the only remaining pre-operational barrier.
+    /// - [`Mem0gError::SupplyChainMismatch`] if ANY of the five
+    ///   file SHA-256s mismatch their compiled-in pin (fail-closed
+    ///   — refuses to embed).
+    /// - [`Mem0gError::Io`] on filesystem or network failure
+    ///   during download/verify.
+    /// - [`Mem0gError::Embedder`] on fastembed-rs init failure
+    ///   (e.g. the ONNX session builder rejects the bytes).
     ///
-    /// HIGH-2 fix (reviewer-driven):
+    /// # W18c Phase B HIGH-2 fix
     ///
-    /// The W18b initial body called `fastembed::TextEmbedding::try_new(Default::default())`
-    /// which causes fastembed-rs to download `bge-small-en-v1.5` from
+    /// The W18b initial body called
+    /// `fastembed::TextEmbedding::try_new(Default::default())` which
+    /// causes fastembed-rs to download `bge-small-en-v1.5` from
     /// HuggingFace via its OWN HTTP client, completely bypassing
-    /// Atlas's [`download_model_with_verification`] SHA-256 gate. That
-    /// is a supply-chain bypass: the SHA-verified file on disk would
-    /// be ignored, and an attacker controlling the network path to
-    /// HuggingFace at runtime could substitute a poisoned model
-    /// without tripping Atlas's verification.
+    /// Atlas's SHA-256 gate. That is a supply-chain bypass: an
+    /// attacker controlling the network path to HuggingFace at
+    /// runtime could substitute a poisoned model without tripping
+    /// Atlas's verification.
     ///
-    /// The correct production wiring is
-    /// `fastembed::TextEmbedding::try_new_from_user_defined(...)` with
-    /// the SHA-verified local ONNX bytes + tokenizer config +
-    /// pooling config. That API requires three additional files
-    /// from the HuggingFace repo (`tokenizer.json`, `config.json`,
-    /// `special_tokens_map.json` per fastembed-rs 5.13.4), each of
-    /// which now has a compiled-in SHA-256 pin
-    /// ([`TOKENIZER_JSON_SHA256`] / [`CONFIG_JSON_SHA256`] /
-    /// [`SPECIAL_TOKENS_MAP_SHA256`]) plus a matching URL constant
-    /// ([`TOKENIZER_JSON_URL`] / [`CONFIG_JSON_URL`] /
-    /// [`SPECIAL_TOKENS_MAP_URL`]) — all six declared in W18c
-    /// Phase A.
-    ///
-    /// **Fail-closed posture (still in force):** the embedder
-    /// returns `Mem0gError::Embedder` while the
-    /// `try_new_from_user_defined` wiring is not yet landed. This
-    /// guarantees the bypass code path can NEVER execute in
-    /// production: if anyone enables the `lancedb-backend` feature
-    /// and tries to instantiate the embedder pre-Phase-B, they get a
-    /// clear error pointing at the remaining wiring step.
-    ///
-    /// **W18c Phase B resume guide** (engineering, mirrors
-    /// `.handoff/v2-beta-welle-18c-plan.md` Phase B):
-    ///
-    /// 1. Factor a `download_file_with_sha(url, sha, dest)` primitive
-    ///    out of [`download_model_with_verification`]. Use it for all
-    ///    four files (ONNX + 3 tokenizer files).
-    /// 2. Extend [`AtlasEmbedder`] cold-start to download/verify all
-    ///    four files into the cache directory before fastembed init.
-    /// 3. Replace the `Mem0gError::Embedder("supply-chain gate")`
-    ///    return below with a real
-    ///    `fastembed::TextEmbedding::try_new_from_user_defined(
-    ///         UserDefinedEmbeddingModel::new(model_bytes,
-    ///             tokenizer_files),
-    ///         InitOptionsUserDefined::default(),
-    ///    )?` call. (Exact 5.13.4 API surface to be confirmed
-    ///    against `cargo doc -p fastembed --features lancedb-backend`
-    ///    once `lancedb-backend` builds locally.)
-    ///
-    /// Documented in `.handoff/v2-beta-welle-18c-plan.md` Phase B.
+    /// W18b shipped with an unconditional fail-closed `Err(...)` as
+    /// the reviewer-driven HIGH-2 deferral. W18c Phase A lifted the
+    /// supply-chain constants; W18c Phase B replaced the fail-closed
+    /// `Err(...)` with the real `try_new_from_user_defined` wiring
+    /// against the four SHA-verified local files. The Phase B
+    /// fix-commit additionally collapsed verify-and-read into a
+    /// single TOCTOU-free primitive
+    /// ([`crate::supply_chain::ensure_and_read_verified`]) so the
+    /// bytes fastembed receives ARE the bytes that produced the
+    /// matching SHA — no separate `std::fs::read` window for an
+    /// atomic file swap. The bypass code path is now structurally
+    /// unreachable: `try_new(Default::default())` is never called
+    /// anywhere in the Atlas codebase.
     pub fn new(model_cache_dir: &std::path::Path) -> Mem0gResult<Self> {
+        use crate::supply_chain::{
+            download_config_with_verification, download_model_with_verification,
+            download_special_tokens_with_verification,
+            download_tokenizer_config_with_verification, download_tokenizer_with_verification,
+            ensure_and_read_verified, pin_omp_threads_single,
+        };
+
+        // Step 1: download + SHA-verify-AND-READ all FIVE files
+        // (ONNX + four tokenizer files) via the TOCTOU-free
+        // ensure_and_read_verified primitive. The returned Vec<u8>
+        // bytes ARE the bytes whose SHA was matched against the
+        // compiled-in pin — no separate `fs::read` window for an
+        // atomic file swap between verify and use.
+        let model_path = model_cache_dir.join("bge-small-en-v1.5.onnx");
+        let onnx_bytes = ensure_and_read_verified(
+            &model_path,
+            ONNX_SHA256,
+            download_model_with_verification,
+        )?;
+
+        let tokenizer_path = model_cache_dir.join("tokenizer.json");
+        let tokenizer_bytes = ensure_and_read_verified(
+            &tokenizer_path,
+            TOKENIZER_JSON_SHA256,
+            download_tokenizer_with_verification,
+        )?;
+
+        let config_path = model_cache_dir.join("config.json");
+        let config_bytes = ensure_and_read_verified(
+            &config_path,
+            CONFIG_JSON_SHA256,
+            download_config_with_verification,
+        )?;
+
+        let special_tokens_path = model_cache_dir.join("special_tokens_map.json");
+        let special_tokens_bytes = ensure_and_read_verified(
+            &special_tokens_path,
+            SPECIAL_TOKENS_MAP_SHA256,
+            download_special_tokens_with_verification,
+        )?;
+
+        let tokenizer_config_path = model_cache_dir.join("tokenizer_config.json");
+        let tokenizer_config_bytes = ensure_and_read_verified(
+            &tokenizer_config_path,
+            TOKENIZER_CONFIG_JSON_SHA256,
+            download_tokenizer_config_with_verification,
+        )?;
+
+        // Step 2: pin OMP threads BEFORE fastembed init so the ORT
+        // session is created with the deterministic single-thread
+        // CPU path (ADR §4 sub-decision #2).
         pin_omp_threads_single();
 
-        let model_path = model_cache_dir.join("bge-small-en-v1.5.onnx");
-        if !model_path.exists() {
-            download_model_with_verification(&model_path)?;
-        } else {
-            verify_cached_model_sha(&model_path)?;
-        }
+        // Step 3 + 4: construct UserDefinedEmbeddingModel. API
+        // surface verified against fastembed-rs 5.13.4 source:
+        //   - src/common.rs::TokenizerFiles (lines 26-32) requires
+        //     four named byte fields.
+        //   - src/text_embedding/init.rs::UserDefinedEmbeddingModel::new
+        //     (lines 97-107) takes (onnx_file, tokenizer_files).
+        //   - .with_pooling(Pooling::Cls) matches fastembed's own
+        //     get_default_pooling_method(BGESmallENV15) at
+        //     src/text_embedding/impl.rs line 218. CLS-pooling is
+        //     load-bearing for BGE-family embedding correctness.
+        //   - QuantizationMode::None is the implicit default
+        //     (UserDefinedEmbeddingModel::new sets it to None per
+        //     line 103); the FP32 model has no static-quant
+        //     dequantize step. We rely on the default rather than
+        //     calling .with_quantization() to keep the intent
+        //     legible.
+        let tokenizer_files = fastembed::TokenizerFiles {
+            tokenizer_file: tokenizer_bytes,
+            config_file: config_bytes,
+            special_tokens_map_file: special_tokens_bytes,
+            tokenizer_config_file: tokenizer_config_bytes,
+        };
+        let user_model = fastembed::UserDefinedEmbeddingModel::new(onnx_bytes, tokenizer_files)
+            .with_pooling(fastembed::Pooling::Cls);
 
-        // HIGH-2 fail-closed gate (reviewer-driven): refuse to call
-        // `fastembed::TextEmbedding::try_new(Default::default())` —
-        // that path bypasses Atlas's SHA-256 supply-chain verification
-        // by triggering fastembed-rs's own HuggingFace fetch. The W18c
-        // Phase A supply-chain constants are lifted; the
-        // `try_new_from_user_defined` wiring lands in W18c Phase B.
-        // Until then, refuse to construct the embedder. The production
-        // path is structurally unreachable until the wiring gate is
-        // cleared.
-        Err(Mem0gError::Embedder(
-            "supply-chain gate: AtlasEmbedder::new refuses to construct \
-             until W18c Phase B fastembed::TextEmbedding::try_new_from_user_defined \
-             wiring lands (HIGH-2 fix; W18c Phase A supply-chain pins lifted; \
-             see fn-level doc-comment + .handoff/v2-beta-welle-18c-plan.md Phase B)"
-                .to_string(),
-        ))
-    }
+        // Step 5: try_new_from_user_defined. NEVER try_new(Default).
+        let inner = fastembed::TextEmbedding::try_new_from_user_defined(
+            user_model,
+            fastembed::InitOptionsUserDefined::default(),
+        )
+        .map_err(|e| Mem0gError::Embedder(format!("fastembed init: {e}")))?;
 
-    /// Internal: kept for the `inner` field's future use once the
-    /// HIGH-2 gate is lifted. Suppresses dead-code warning during
-    /// the gated-fail-closed period.
-    #[allow(dead_code)]
-    fn _inner_field_anchor(&self) -> &fastembed::TextEmbedding {
-        &self.inner
+        Ok(Self {
+            inner: std::sync::Mutex::new(inner),
+        })
     }
 
     /// Embed a single text into an f32 vector.
     ///
-    /// Determinism contract: under pinned ORT + `OMP_NUM_THREADS=1`
-    /// + FP32 model, two calls on the same input bytes produce
+    /// Determinism contract: under pinned ORT, `OMP_NUM_THREADS=1`,
+    /// and the FP32 model, two calls on the same input bytes produce
     /// byte-equal output. Verified by `tests/embedding_determinism.rs`.
+    ///
+    /// Public surface accepts `&self`; the internal `Mutex` provides
+    /// the `&mut TextEmbedding` that the upstream `embed` method
+    /// requires. See the struct-level doc-comment for the rationale.
     pub fn embed(&self, text: &str) -> Mem0gResult<Vec<f32>> {
-        let embeddings = self
+        let mut guard = self
             .inner
+            .lock()
+            .map_err(|e| Mem0gError::Embedder(format!("embedder mutex poisoned: {e}")))?;
+        let embeddings = guard
             .embed(vec![text], None)
             .map_err(|e| Mem0gError::Embedder(format!("embed: {e}")))?;
         embeddings
@@ -482,16 +484,21 @@ mod tests {
     #[test]
     fn pins_are_non_empty() {
         // W18c Phase A: extends original 3-pin check to all 6 SHA
-        // constants + 4 URL constants (model + 3 tokenizer).
+        // constants + 5 URL constants (model + 4 tokenizer files).
+        // W18c Phase B: extended again to include the fourth
+        // tokenizer pin (TOKENIZER_CONFIG_JSON_*) discovered during
+        // API-surface verification.
         assert!(!HF_REVISION_SHA.is_empty());
         assert!(!ONNX_SHA256.is_empty());
         assert!(!MODEL_URL.is_empty());
         assert!(!TOKENIZER_JSON_SHA256.is_empty());
         assert!(!CONFIG_JSON_SHA256.is_empty());
         assert!(!SPECIAL_TOKENS_MAP_SHA256.is_empty());
+        assert!(!TOKENIZER_CONFIG_JSON_SHA256.is_empty());
         assert!(!TOKENIZER_JSON_URL.is_empty());
         assert!(!CONFIG_JSON_URL.is_empty());
         assert!(!SPECIAL_TOKENS_MAP_URL.is_empty());
+        assert!(!TOKENIZER_CONFIG_JSON_URL.is_empty());
     }
 
     // W18c Phase A: the W18b `pins_are_placeholder_until_nelson_verifies`
@@ -511,9 +518,9 @@ mod tests {
         // these assertions at test time.
         //
         // Coverage:
-        //   - 4 SHA-256 hex digests (64-char lowercase hex)
+        //   - 5 SHA-256 hex digests (64-char lowercase hex)
         //   - 1 SHA-1 hex digest (40-char lowercase hex, Git revision)
-        //   - 4 URL strings (must start with https://huggingface.co/
+        //   - 5 URL strings (must start with https://huggingface.co/
         //     AND embed HF_REVISION_SHA — revision-pinning invariant)
 
         // 64-char lowercase-hex SHA-256 digests.
@@ -522,6 +529,7 @@ mod tests {
             ("TOKENIZER_JSON_SHA256", TOKENIZER_JSON_SHA256),
             ("CONFIG_JSON_SHA256", CONFIG_JSON_SHA256),
             ("SPECIAL_TOKENS_MAP_SHA256", SPECIAL_TOKENS_MAP_SHA256),
+            ("TOKENIZER_CONFIG_JSON_SHA256", TOKENIZER_CONFIG_JSON_SHA256),
         ] {
             assert_eq!(
                 value.len(),
@@ -553,12 +561,13 @@ mod tests {
             "HF_REVISION_SHA must be lowercase hex"
         );
 
-        // 4 URL constants: huggingface.co origin + revision-SHA path.
+        // 5 URL constants: huggingface.co origin + revision-SHA path.
         for (label, value) in [
             ("MODEL_URL", MODEL_URL),
             ("TOKENIZER_JSON_URL", TOKENIZER_JSON_URL),
             ("CONFIG_JSON_URL", CONFIG_JSON_URL),
             ("SPECIAL_TOKENS_MAP_URL", SPECIAL_TOKENS_MAP_URL),
+            ("TOKENIZER_CONFIG_JSON_URL", TOKENIZER_CONFIG_JSON_URL),
         ] {
             assert!(
                 value.starts_with("https://huggingface.co/"),
@@ -570,60 +579,5 @@ mod tests {
                  (revision-pinning invariant; URL and SHA must move atomically)"
             );
         }
-    }
-
-    #[test]
-    fn sha256_hex_empty_input_known_vector() {
-        // HIGH-1 fix verification: the SHA-256 of the empty byte
-        // slice is the canonical RFC-6234 test vector. If this
-        // assertion fails, sha256_hex has regressed and supply-chain
-        // verification is silently broken.
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-    }
-
-    #[test]
-    fn sha256_hex_known_short_input() {
-        // HIGH-1 fix verification: SHA-256("abc") = the canonical
-        // RFC-6234 §B.1 test vector.
-        assert_eq!(
-            sha256_hex(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-
-    #[test]
-    fn sha256_file_streams_file_correctly() {
-        // HIGH-1 fix verification: the streaming `sha256_file`
-        // helper agrees with `sha256_hex` for a small fixture
-        // written to a temp file.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fixture.bin");
-        std::fs::write(&path, b"abc").unwrap();
-        let got = sha256_file(&path).unwrap();
-        assert_eq!(
-            got,
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-    }
-
-    #[test]
-    fn pin_omp_threads_single_idempotent() {
-        // Two calls are a no-op (process-global var, second set is
-        // structurally fine — same value).
-        pin_omp_threads_single();
-        pin_omp_threads_single();
-        // We can't assert the env-var directly because Cargo runs
-        // tests in parallel by default; other tests may have already
-        // set OMP_NUM_THREADS to a different value, then this test
-        // sets it to "1". We assert at least that the call doesn't
-        // panic and is callable from a #[test] context.
-        assert_eq!(
-            std::env::var("OMP_NUM_THREADS").as_deref(),
-            Ok("1"),
-            "OMP_NUM_THREADS should be \"1\" after pin_omp_threads_single"
-        );
     }
 }

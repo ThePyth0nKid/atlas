@@ -9,7 +9,7 @@
 //!   `bge-small-en-v1.5` FP32 embedding.
 //! - Atlas-owned [`crate::secure_delete`] wrapper for GDPR Art. 17
 //!   compliance (per ADR §4 sub-decision #4).
-//! - Atlas-owned [`crate::embedder::download_model_with_verification`]
+//! - Atlas-owned [`crate::supply_chain::download_model_with_verification`]
 //!   for supply-chain control (per ADR §4 sub-decision #2).
 //! - Per-(workspace, table) `RwLock` map for TOCTOU-race closure.
 //!
@@ -91,10 +91,10 @@ impl LanceDbCacheBackend {
     /// Steps:
     /// 1. Validate `storage_root` is a writable directory.
     /// 2. Verify model file via
-    ///    [`crate::embedder::download_model_with_verification`]
+    ///    [`crate::supply_chain::download_model_with_verification`]
     ///    (fail-closed on SHA mismatch).
     /// 3. Init fastembed-rs after
-    ///    [`crate::embedder::pin_omp_threads_single`].
+    ///    [`crate::supply_chain::pin_omp_threads_single`].
     ///
     /// # Errors
     ///
