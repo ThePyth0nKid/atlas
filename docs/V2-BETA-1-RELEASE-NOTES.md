@@ -17,7 +17,7 @@ V1's trust property is **preserved unchanged**. V2-α-α.1's cryptographic-proje
 - **Layer 2 ArcadeDB graph backend operational.** ArcadeDB Apache-2.0 embedded mode via W17a `GraphStateBackend` trait → W17b driver impl → W17c CI smoke + bench. Cross-backend trait-conformance test pins byte-determinism through both `InMemoryBackend` AND `ArcadeDbBackend`. See `docs/V2-BETA-ARCADEDB-SPIKE.md` + ADR-Atlas-011.
 - **Layer 3 Mem0g semantic cache scaffold-shipped + supply-chain pins lifted.** New workspace member `crates/atlas-mem0g/` (~2300 LOC across 4 src modules + 3 test modules). W18b implementation + W18c Phase A pin-lift (2026-05-15). Embedder still fails closed pending W18c Phase B `fastembed::TextEmbedding::try_new_from_user_defined` wiring — **scaffold-honesty disclosure mandatory** (see "Layer 3 scaffold posture" below).
 - **`POST /api/atlas/semantic-search` Read-API endpoint.** Production-shape request/response contract; 501 scaffold-response until W18c Phase B + Phase D activate the LanceDB ANN body. Contract stable across V2-β minor versions.
-- **`embedding_erased` event-kind dispatch arm + `GraphState.embedding_erasures` BTreeMap.** Audit-trail surface for GDPR Art. 17 erasure with V14 byte-pin invariant preserved (canonical-bytes omits-when-empty).
+- **`embedding_erased` event-kind dispatch arm + `GraphState.embedding_erasures` BTreeMap.** Audit-trail primitive supporting GDPR Art. 17 erasure workflows (counsel review pending per DECISION-COUNSEL-1; LanceDB secure-delete body wired in W18c Phase D); V14 byte-pin invariant preserved (canonical-bytes omits-when-empty).
 - **Workspace + 4 package.json version bump** `2.0.0-alpha.2` → `2.0.0-beta.1`. SemVer prerelease (`2.0.0-beta.1` < `2.0.0` per SemVer §11).
 
 ## Layer 1 — Verifier-rebuild
