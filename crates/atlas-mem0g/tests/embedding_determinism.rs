@@ -39,7 +39,7 @@
 
 #![allow(unused_imports)]
 
-use atlas_mem0g::embedder;
+use atlas_mem0g::{embedder, supply_chain};
 
 #[test]
 #[ignore = "requires fastembed model download + ATLAS_MEM0G_DETERMINISM_ENABLED=1"]
@@ -51,7 +51,7 @@ fn embedding_determinism_two_runs_byte_equal() {
         return;
     }
 
-    embedder::pin_omp_threads_single();
+    supply_chain::pin_omp_threads_single();
 
     let dir = tempfile::tempdir().expect("tempdir");
     let model_cache = dir.path().to_path_buf();
