@@ -1,5 +1,5 @@
 /**
- * V2-β Welle 18b — POST /api/atlas/semantic-search
+ * V2-β Welle 18b/c — POST /api/atlas/semantic-search
  *
  * Run a semantic-search query against the workspace's Layer-3 Mem0g
  * cache. Returns top-k hits, each carrying the Layer-1 `event_uuid`
@@ -7,11 +7,28 @@
  * response MUST carry an event_uuid the caller can independently
  * verify via the offline WASM verifier).
  *
- * The Layer-3 backend (`atlas-mem0g::LanceDbCacheBackend`) is the
- * V2-β W18b first-shipped impl with placeholder constants. Until
- * Nelson lifts the constants pre-V2-β-1 ship, this route returns 501
- * with a clear pointer to the supply-chain verification gate. The
- * shape contract is testable + reachable today.
+ * **W18c Phase D status (2026-05-15):** the Layer-3 Rust backend
+ * (`atlas-mem0g::LanceDbCacheBackend`) is fully OPERATIONAL — the
+ * `upsert / search / erase / rebuild` body sites that were
+ * previously `Mem0gError::Backend("not yet wired")` placeholders
+ * now drive real LanceDB 0.29 ANN search via a dedicated tokio
+ * runtime owned by the backend (deadlock-safe per spike §7).
+ *
+ * The route handler ITSELF still returns 501 because the
+ * Rust → TypeScript bridge for atlas-mem0g is V2-γ scope (analog
+ * the Layer-2 `/api/atlas/query` route which is also 501-stubbed
+ * pending the W17b ArcadeDB driver bridge). The Rust crate is
+ * verifiable today via the integration tests in
+ * `crates/atlas-mem0g/tests/lancedb_body_e2e.rs` (gated behind
+ * `ATLAS_MEM0G_EMBED_SMOKE_ENABLED=1`).
+ *
+ * Wiring this route handler to the Rust backend requires either:
+ *   (a) a NAPI / wasm-bindgen Node addon exposing
+ *       `LanceDbCacheBackend::search` to TypeScript, OR
+ *   (b) a sidecar process (`bin/atlas-mem0g-search` over Unix
+ *       socket / loopback HTTP) that the Next.js route handler
+ *       calls.
+ * Both are V2-γ scope; the W18c plan-doc explicitly defers them.
  *
  * Wire format:
  *
@@ -190,25 +207,32 @@ export async function POST(req: Request): Promise<NextResponse> {
     return jsonError(400, `invalid input: ${parsed.error.message}`);
   }
 
-  // Layer-3 backend is the V2-β W18b first-shipped impl with
-  // placeholder ONNX_SHA256 / HF_REVISION_SHA / MODEL_URL constants.
-  // Until Nelson confirms real values pre-V2-β-1 ship, the route
-  // returns 501 with a clear pointer to the supply-chain gate. The
-  // shape contract above is testable + reachable today; clients can
-  // rely on the 400-vs-501 split (400 = malformed; 501 = waiting on
-  // pre-merge constant lift).
+  // W18c Phase D: the Rust backend (`atlas-mem0g::LanceDbCacheBackend`)
+  // is OPERATIONAL — `upsert / search / erase / rebuild` bodies are
+  // wired through a backend-owned tokio runtime to LanceDB 0.29
+  // (verified by `crates/atlas-mem0g/tests/lancedb_body_e2e.rs`).
+  // The remaining gap is the Rust → TypeScript bridge — the Next.js
+  // route handler currently has no in-process path to call into the
+  // Rust crate. Wiring this is V2-γ scope (analog the parallel
+  // `/api/atlas/query` route which is similarly 501-stubbed pending
+  // its own bridge to the W17b ArcadeDB driver). See the route's
+  // module-level doc-comment for the bridge implementation options
+  // (NAPI Node addon vs sidecar process).
   //
-  // When the constants land, this branch is replaced with a real
-  // `atlas-mem0g::SemanticCacheBackend::search` call via the Rust →
-  // TypeScript bridge (analog the Layer-2 W17b ArcadeDB integration).
+  // Until then, this route returns 501 to keep the 400-vs-501 split
+  // honest: 400 = malformed; 501 = backend bridge not yet wired (NOT
+  // "Layer-3 not yet built" — the Layer-3 cache itself is fully
+  // built and tested in-crate).
   await normaliseResponseTime(startMs, minLatencyMs);
   const errorResponse: ErrorResponse = {
     ok: false,
     error:
-      "Mem0g Layer-3 backend ships in V2-β-1 after pre-merge supply-chain " +
-      "constants (ONNX_SHA256, HF_REVISION_SHA, MODEL_URL) are confirmed. " +
-      "See docs/ADR/ADR-Atlas-012-mem0g-layer3-design.md §4 sub-decision #2 " +
-      "and crates/atlas-mem0g/src/embedder.rs.",
+      "Mem0g Layer-3 Rust backend is OPERATIONAL " +
+      "(crates/atlas-mem0g::LanceDbCacheBackend; W18c Phase D shipped 2026-05-15) " +
+      "but the Rust → TypeScript bridge ships in V2-γ. Until the bridge lands, " +
+      "this route returns 501. See docs/ADR/ADR-Atlas-012-mem0g-layer3-design.md " +
+      "and crates/atlas-mem0g/tests/lancedb_body_e2e.rs for the in-crate end-to-end " +
+      "verification path.",
   };
   return NextResponse.json(errorResponse, { status: 501 });
 }
