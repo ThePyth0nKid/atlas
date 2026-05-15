@@ -151,6 +151,41 @@ jobs:
           path: ${{ steps.model-cache-path.outputs.path }}
           key: atlas-mem0g-model-${{ matrix.os }}-${{ hashFiles('crates/atlas-mem0g/src/embedder.rs') }}
 
+      - name: Install protoc (per OS)
+        # Required by `lance-encoding v6.0.0`'s `prost-build` build
+        # script when the V1-V4 step compiles atlas-mem0g with
+        # `--features lancedb-backend`. Without this step, the
+        # feature-on cargo build fails closed with `Could not find
+        # protoc` on all 3 OS legs (PR #107 fix-commit-2). The default-
+        # features `cargo check` below does NOT need protoc (lance is
+        # feature-gated off), so installing here in advance is the
+        # cleanest syntactic boundary.
+        #
+        # Per-OS package managers: apt on Ubuntu, brew on macOS,
+        # choco on Windows (the only one not pre-installed on a
+        # GitHub-hosted runner is the `protoc` binary itself; the
+        # respective package managers are pre-installed). Default arm
+        # fails loudly on unrecognized runner.
+        shell: bash
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-latest)
+              sudo apt-get update -qq
+              sudo apt-get install -y --no-install-recommends protobuf-compiler
+              ;;
+            macos-latest)
+              brew install protobuf
+              ;;
+            windows-latest)
+              choco install protoc -y --no-progress --limit-output
+              ;;
+            *)
+              echo "::error::Unrecognized matrix.os '${{ matrix.os }}' — refusing to skip protoc install"
+              exit 1
+              ;;
+          esac
+          protoc --version
+
       - name: Build atlas-mem0g (default features)
         # Always-on build sanity. Default features (= no lancedb) is the
         # contract that downstream consumers (the W12 Read-API +
