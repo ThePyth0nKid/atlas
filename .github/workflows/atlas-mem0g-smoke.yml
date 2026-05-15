@@ -170,8 +170,17 @@ jobs:
         run: |
           case "${{ matrix.os }}" in
             ubuntu-latest)
+              # `libprotobuf-dev` ships the well-known-types `.proto`
+              # files (incl. google/protobuf/empty.proto) that
+              # `lance-encoding`'s prost-build script imports. The
+              # bare `protobuf-compiler` package on Noble (Ubuntu
+              # 24.04) only ships the protoc binary without the
+              # well-known types, causing `Import "google/protobuf/empty.proto"
+              # was not found or had errors` (PR #107 fix-commit-3).
+              # macOS `brew install protobuf` and Windows `choco install
+              # protoc` both bundle the well-known types automatically.
               sudo apt-get update -qq
-              sudo apt-get install -y --no-install-recommends protobuf-compiler
+              sudo apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
               ;;
             macos-latest)
               brew install protobuf
