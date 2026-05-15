@@ -58,21 +58,32 @@ graph TD
 
     W17c --> W18[W18 Phase A: Mem0g Layer-3 cache design ✓ SHIPPED<br/>spike + ADR-Atlas-012 + plan-doc<br/>8 binding sub-decisions<br/>0 CRITICAL / 2 HIGH / 10 MEDIUM / 4 LOW all fixed in-commit<br/>LanceDB embedded + fastembed-rs LOCKED]
 
-    W18 --> W18b[W18b: Mem0g implementation ✓ SHIPPED<br/>NEW crates/atlas-mem0g/ ~2300 LOC<br/>W17a-pattern Phase-A-scaffold<br/>0 CRITICAL / 4 unique HIGH / 6 MEDIUM all fixed in-commit<br/>578 tests; clippy clean; byte-pin reproduces]
+    W18 --> W18b[W18b: Mem0g implementation ✓ SHIPPED<br/>NEW crates/atlas-mem0g/ ~2300 LOC<br/>W17a-pattern Phase-A-scaffold<br/>0 CRITICAL / 4 unique HIGH / 6 MEDIUM all fixed in-commit<br/>577 tests post-W18c-A retirement of pins_are_placeholder gatekeeper; clippy clean; byte-pin reproduces]
 
-    W18b --> W18c[W18c parallel-track: pre-V2-β-1-ship gate<br/>Nelson supply-chain constant lift<br/>fastembed try_new_from_user_defined wiring<br/>+ 3 tokenizer-file SHA-256 pins<br/>+ close spike §12 V1-V4 verification gaps<br/>+ lift LanceDB ANN/search body stubs<br/>ADR-Atlas-013 reserved]
+    W18b --> W18cA[W18c Phase A ✓ SHIPPED<br/>Mem0g supply-chain constants lifted<br/>9 compile-in pins BAAI/bge-small-en-v1.5 @ 5c38ec7c<br/>0 CRITICAL / 0 HIGH / 1 MEDIUM / 3-4 LOWs all in-commit<br/>embedder still fail-closed pending Phase B]
 
-    W18b --> CounselGate{Nelson-led<br/>Counsel sign-off<br/>DECISION-COUNSEL-1}
+    W18cA --> W19[W19: v2.0.0-beta.1 ship ✓ SHIPPED<br/>signed tag 81d363e Good Ed25519<br/>GitHub Release prerelease<br/>npm latest = 2.0.0-beta.1<br/>Sigstore Build L3 provenance attached<br/>W11 race-fix validated 2nd time end-to-end; wasm-publish run-id 25919934805<br/>0 CRITICAL / 1 HIGH / 3 MEDIUM / 1 LOW PR #102 + 6/6 PASS PR #103]
 
-    W18c --> W19[W19: v2.0.0-beta.1 ship<br/>version + tag + Release + notes]
-    CounselGate --> W19
+    W18cA --> W18cB[W18c Phase B: fastembed wiring<br/>try_new_from_user_defined using 9 lifted pins<br/>activates Layer 3 operational mode<br/>~1 session agent-only<br/>POST-v2.0.0-beta.1-LIVE primary welle<br/>ADR-Atlas-013 reserved]
+
+    W19 --> Phase146[Phase 14.6 ✓ SHIPPED<br/>W19 consolidation: handoff §0z7 + DECISION-ARCH-W19<br/>+ master-plan §6 + orchestration + dep-graph + CHANGELOG<br/>NEW Lesson #19 pre-tag-push multi-perspective review]
+
+    W18b --> CounselGate{Nelson-led<br/>Counsel sign-off<br/>DECISION-COUNSEL-1<br/>blocks public materials NOT the tag itself}
+
+    W18cB --> W18cC[W18c Phase C: V1-V4 verification gaps<br/>cross-platform CI Linux + Windows + macOS<br/>fastembed determinism + Lance v2.2 + LanceDB Windows]
+
+    W18cC --> W18cD[W18c Phase D: LanceDB ANN/search body fill-in<br/>tokio::spawn_blocking-wrapped LanceDB calls<br/>NOT Handle::current().block_on() per spike §7]
 
     style Phase0 fill:#ffcccc
     style Phase3 fill:#ccffcc
     style W18 fill:#ccffcc
     style W18b fill:#ccffcc
+    style W18cA fill:#ccffcc
     style W19 fill:#ccffcc
-    style W18c fill:#ffffcc
+    style Phase146 fill:#ccffcc
+    style W18cB fill:#ffffcc
+    style W18cC fill:#ffffcc
+    style W18cD fill:#ffffcc
     style CounselGate fill:#ffffcc
     style PB1 fill:#e6f3ff
     style PB2 fill:#e6f3ff
@@ -91,10 +102,12 @@ Phase 3 → W12, W13, W14
 W12, W13 → W15 (Cypher consolidation, rule-of-three)
 W14, W15 → W16
 
-W16 (spike) → W17a → W17b → W17c → W18 → W18b
+W16 (spike) → W17a → W17b → W17c → W18 → W18b → W18c-A → W19 → Phase 14.6
 
-W18b → Counsel-Gate (Nelson-led) → W19 (beta.1 ship)
-W18b → W18c (parallel-track, pre-V2-β-1-ship blocker) → W19
+W18c-A → W18c-B (engineering-pipeline parallel-track post-v2.0.0-beta.1-LIVE)
+W18c-B → W18c-C → W18c-D
+
+W18b → Counsel-Gate (Nelson-led, parallel) — blocks V2-β PUBLIC materials NOT the v2.0.0-beta.1 tag itself per DECISION-COUNSEL-1
 ```
 
 ## 3. File-area conflict matrix
@@ -140,7 +153,7 @@ Existing ADR high-watermark: `ADR-Atlas-006-multi-issuer-sigstore-tracking.md`. 
 
 ## 5. Critical-path analysis
 
-**Longest serial path:** Phase 0 → W14 → W16 → W17a → W17b → W17c → W18 → W18b → {Counsel-Gate ∥ W18c} → W19. **10 nodes** (W18b SHIPPED reduces remaining critical-path to 3 nodes: W18c parallel-with-Counsel-Gate → W19). Parallel batches don't shorten this path; they only reduce the wall-clock duration of phases 1 + 4.
+**Longest serial path:** Phase 0 → W14 → W16 → W17a → W17b → W17c → W18 → W18b → W18c-A → W19 → Phase 14.6. **11 nodes ALL SHIPPED as of 2026-05-15.** v2.0.0-beta.1 LIVE end-to-end. Counsel-Gate runs parallel-track Nelson-led (blocks V2-β PUBLIC materials, NOT the tag itself per `DECISION-COUNSEL-1`). Post-v2.0.0-beta.1-LIVE engineering-pipeline: W18c Phase B → Phase C → Phase D (~3 sessions agent-only, activates Layer 3 operational mode).
 
 **Theoretical wall-clock (Atlas's 1-welle-per-session cadence):**
 
