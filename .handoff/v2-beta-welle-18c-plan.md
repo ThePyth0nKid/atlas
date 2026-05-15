@@ -230,6 +230,42 @@ resolved live during Step 0 via `curl -sL ... | sha256sum` against the Phase A H
 
 **Phase C acceptance criterion:** all three CI matrix runs (Linux + Windows + macOS) green. If Windows determinism fails, the fallback policy (event_uuid-only cache-key on Windows) is documented in operator-runbook + a release-note callout.
 
+### Phase C — Implementation Notes (2026-05-15)
+
+**Verification gates (all passed):**
+
+- `cargo check -p atlas-mem0g --tests` (default features): clean
+- `cargo check -p atlas-mem0g --features lancedb-backend --tests` (with vendored `protoc`): clean
+- `cargo test --workspace`: 581 passed / 0 failed / 7 ignored (was 579 baseline; +2 from new sentinels: `embedder_size_measurement_skipped_without_feature` + `windows_lance_behaviour_skipped_on_non_windows`)
+- `cargo clippy --workspace --no-deps -- -D warnings`: zero warnings
+- `cargo test -p atlas-projector --test backend_trait_conformance byte_pin`: 1 passed (byte-pin `8962c1681a44…` reproduces)
+
+**Live local Windows results (full feature-on path):**
+
+- **V1 PASS** (`windows_lance_fragment_layout_walk_and_secure_cleanup`): recursive walk found all 3 nested `_versions/<N>/data-*.lance` fragments + the `_indices/` files; `apply_overwrite_set` overwrote-then-unlinked correctly on NTFS; sentinel bytes not recoverable post-cleanup.
+- **V2 PASS on Windows** (`embedding_byte_equal_two_runs`): two `embed("Atlas trust substrate semantic search determinism check")` calls on the same `AtlasEmbedder` instance produced byte-equal `Vec<f32>` (`equal=true`). First 4 dims: `[-0.04032726, -0.027044648, -0.027922696, -0.0108285025]`. Test wall-time: 31.02s including ~130 MB HF download + SHA-verify-all-five-files + fastembed init + 2 embed() calls.
+- **V4 PASS** (`fastembed_model_file_size_within_envelope`): `bge-small-en-v1.5.onnx` measured at exactly **133,093,490 bytes / 126.93 MiB** on Windows — matches the Phase A pin-lift claim byte-for-byte (the SHA-verified bytes ARE the on-disk bytes by TOCTOU-free construction). Sits well inside the claimed `~130 MB ± 10%` envelope. CI artifact captures the same line per OS leg.
+- **V3 deferred-by-decision (no test created):** `cargo info lancedb` (run 2026-05-15) confirmed `lancedb = "0.29.0"` is the latest available crate version. There is NO `lancedb 0.30+` to compare `_deletion_files` semantics against — the spike has nothing to spike. Decision: lock at `lancedb = "0.29"` per `Cargo.toml`. When LanceDB 0.30+ ships upstream, a follow-on welle adds `tests/lance_deletion_files_semantics.rs` BEFORE bumping the dep. Documented in the V1-V4 workflow header for operator visibility.
+
+**Cross-platform fallback policy NOT activated:** R-W18c-C1 (Windows determinism failure) did NOT materialise locally. The R-W18c-C1 branch in `tests/embedding_determinism.rs::embedding_byte_equal_two_runs` (assert message "if this fails on Windows, switch to event_uuid-only cache-key") remains documented in the test body for future regressions but is not the active operational path. Operator-runbook is NOT amended for this welle (the fallback documentation was conditional on V2 Windows failure; since V2 Windows passed, no scope creep into operator-runbook).
+
+**Workflow expansion:**
+
+- `.github/workflows/atlas-mem0g-smoke.yml` matrix expanded to `[ubuntu-latest, windows-latest, macos-latest]` with `fail-fast: false` (so a per-leg failure does not mask other-leg visibility — informs the R-W18c-C1 fallback decision).
+- Per-OS model cache via `actions/cache@v4` keyed by `atlas-mem0g-model-${os}-${hashFiles('embedder.rs')}`. Path resolved per OS via a `model-cache-path` step (Linux+macOS: `$HOME/.cache/atlas-mem0g`; Windows: `$USERPROFILE/.cache/atlas-mem0g`).
+- `Swatinem/rust-cache` per-OS workspaces key (`key: ${{ matrix.os }}`) so the three legs do not clobber each other's `target/`.
+- New step `Run V1-V4 verification suite (lancedb-backend ON)` runs `embedding_determinism + embedder_size_measurement + lancedb_windows_behaviour` with `--include-ignored --nocapture`, tee'd to `target/mem0g-v1v4-${os}.log`. Per-OS log uploaded as `mem0g-logs-${os}` artifact.
+- Timeout per leg raised from 10 → 15 min (cross-OS HF download budget + Windows runner baseline slower).
+
+**LOC delta:**
+
+- `tests/lancedb_windows_behaviour.rs` (NEW): 221 LOC (V1; ~50 LOC test body + ~171 LOC of cross-OS gating + sentinel + walker helper + doc-comments per Atlas convention)
+- `tests/embedder_size_measurement.rs` (NEW): 121 LOC (V4)
+- `tests/embedding_determinism.rs` (UPGRADED): 196 → 291 LOC (+95 — Phase C upgrade added `embedding_byte_equal_two_runs` cross-OS gate + doc-comment refresh)
+- `.github/workflows/atlas-mem0g-smoke.yml` (UPGRADED): full rewrite, 132 → 221 LOC (3-OS matrix + per-OS cache + V1-V4 verification step + per-OS artifact upload)
+
+**No code dependency on Phase D:** All V1-V4 work is CI-workflow + new test files + plan-doc edit. `lancedb_backend.rs` body sites untouched. Phase D's `RESUME(spawn_blocking)` markers remain.
+
 ## Phase D — LanceDB ANN/search body fill-in (~1-2 sessions)
 
 **Goal:** replace `Mem0gError::Backend("not yet wired")` placeholders in `crates/atlas-mem0g/src/lancedb_backend.rs::{upsert, search, erase, rebuild}` with real `tokio::task::spawn_blocking`-wrapped LanceDB calls.

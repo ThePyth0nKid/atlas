@@ -1,8 +1,23 @@
-# Atlas V2-β Welle 18b — Mem0g Layer-3 cache smoke + benchmark capture.
+# Atlas V2-β Welle 18b/c — Mem0g Layer-3 cache smoke + benchmark capture.
 #
 # Runs the always-on tests (embedding determinism + secure-delete
 # correctness) and the bench tests (B4/B5/B6 per ADR-Atlas-012 §4
 # sub-decision #8). Bench output captured as artifact.
+#
+# W18c Phase C — V1-V4 cross-platform CI matrix expansion:
+#   - V1: LanceDB cleanup_old_versions Windows behaviour test
+#         (Windows-only via #[cfg(target_os = "windows")] gate)
+#   - V2: fastembed-rs determinism — 2-run byte-equality assertion
+#         on Linux + Windows + macOS (via the matrix below)
+#   - V4: fastembed-rs model file size measurement after first-load
+#         (~130 MB ± 10%, captured in CI log per OS leg)
+#   - V3: deferred-by-decision — `lancedb = "0.29"` is the latest
+#         available crate (cargo info confirmed 2026-05-15); no 0.30+
+#         exists yet, so the `_deletion_files` semantics-change
+#         spike has nothing to compare against. When LanceDB 0.30+
+#         lands upstream, a follow-on welle adds the spike test
+#         BEFORE bumping the dependency. See plan-doc Phase C
+#         Implementation Notes.
 #
 # Conventions per Atlas Standing Protocol (mirrors
 # `.github/workflows/atlas-arcadedb-smoke.yml`):
@@ -10,12 +25,12 @@
 #   - `permissions: { contents: read }` (narrowest blast radius)
 #   - paths-gated trigger (limits CI fan-out)
 #   - cancel-in-progress concurrency
-#   - Linux `ubuntu-latest` (lancedb-backend depends on Arrow / DataFusion
-#     stack; cross-platform determinism test V2 in spike §12 expands to
-#     Windows + macOS in a follow-on)
-#   - 10 min timeout (similar to arcadedb-smoke; bench is the dominant cost)
-#   - Model cache shared across runs via actions/cache (saves ~130 MB
-#     download per workflow run after first cache hit)
+#   - 3-OS matrix: ubuntu-latest + windows-latest + macos-latest
+#     (W18c Phase C; was Linux-only in W18b)
+#   - 15 min timeout per leg (cross-OS HF download + Windows runner
+#     baseline are slower than the 10 min Linux-only baseline)
+#   - Per-OS model cache via actions/cache (~130 MB BAAI/bge-small-en-v1.5;
+#     cache-key invalidates automatically on embedder.rs source change)
 
 name: atlas-mem0g-smoke
 
@@ -54,12 +69,26 @@ concurrency:
 
 jobs:
   mem0g-smoke:
-    name: mem0g-smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    name: mem0g-smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # W18c Phase C — V1 (Windows path semantics) + V2 (cross-OS
+        # determinism) require all three OS in matrix. fail-fast: false
+        # so a Windows-only V2 failure does not block visibility into
+        # Linux + macOS results (informs the R-W18c-C1 fallback
+        # decision).
+        os: [ubuntu-latest, windows-latest, macos-latest]
     env:
-      # Spike §12 V2 determinism gate: explicitly enable so the test runs.
+      # Spike §12 V2 determinism gate (in-process, fast — runs without
+      # HF download).
       ATLAS_MEM0G_DETERMINISM_ENABLED: "1"
+      # W18c Phase C: full HF download + 2-run byte-equality smoke
+      # (V2) + model size measurement (V4). ~130 MB download budget
+      # per leg (cached after first run via actions/cache below).
+      ATLAS_MEM0G_EMBED_SMOKE_ENABLED: "1"
       # ADR §4 sub-decision #8 bench gate.
       ATLAS_MEM0G_BENCH_ENABLED: "1"
     steps:
@@ -74,21 +103,46 @@ jobs:
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@5cb072d7354962be830356aa6b146f7612846014 # v2.7.5
         with:
+          # W18c Phase C: per-OS workspace key so Linux + Windows +
+          # macOS target/ caches do not clobber each other.
           workspaces: . -> target
+          key: ${{ matrix.os }}
 
-      - name: Cache fastembed model file
-        # Saves the ~130 MB BAAI/bge-small-en-v1.5 ONNX model file
-        # across runs (spike §8 step 2). First run downloads it (with
-        # Atlas-controlled SHA verification per ADR §4 sub-decision #2);
-        # subsequent runs hit the cache. Cache key is bound to the
-        # ONNX_SHA256 constant in Cargo source so a model rotation
-        # invalidates the cache automatically.
+      - name: Resolve model cache path (per OS)
+        id: model-cache-path
+        # W18c Phase C: ~/.cache/atlas-mem0g resolves to different
+        # absolute paths per OS (Linux: $HOME/.cache, macOS: same,
+        # Windows: %USERPROFILE%\.cache). actions/cache wants the
+        # explicit path, so we resolve once and emit it.
+        shell: bash
+        run: |
+          case "${{ matrix.os }}" in
+            ubuntu-latest|macos-latest)
+              echo "path=$HOME/.cache/atlas-mem0g" >> "$GITHUB_OUTPUT"
+              ;;
+            windows-latest)
+              echo "path=$USERPROFILE/.cache/atlas-mem0g" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Cache fastembed model files
+        # Saves the ~130 MB BAAI/bge-small-en-v1.5 ONNX file PLUS the
+        # four tokenizer support files across runs (W18c Phase B
+        # extended the pin set to 5 files; spike §8 step 2). First
+        # run downloads them (with Atlas-controlled SHA-256
+        # verification per ADR §4 sub-decision #2); subsequent runs
+        # hit the cache. Cache key is bound to the embedder.rs source
+        # file digest so any pin rotation invalidates the cache
+        # automatically.
+        #
+        # Per-OS cache key: model bytes are byte-identical across
+        # OS (HuggingFace is content-addressed; SHA-256 verified by
+        # Atlas), but the OS-specific cache path differs and
+        # actions/cache scopes by OS implicitly via the key prefix.
         uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
-          path: ~/.cache/atlas-mem0g
-          # Cache key includes a digest of the embedder.rs file so any
-          # ONNX_SHA256 / MODEL_URL change invalidates the cache.
-          key: atlas-mem0g-model-${{ hashFiles('crates/atlas-mem0g/src/embedder.rs') }}
+          path: ${{ steps.model-cache-path.outputs.path }}
+          key: atlas-mem0g-model-${{ matrix.os }}-${{ hashFiles('crates/atlas-mem0g/src/embedder.rs') }}
 
       - name: Build atlas-mem0g (default features)
         # Always-on build sanity. Default features (= no lancedb) is the
@@ -97,10 +151,11 @@ jobs:
         # the LanceDB build cost.
         run: cargo check -p atlas-mem0g
 
-      - name: Verify byte-pin reproduces post-W18b
+      - name: Verify byte-pin reproduces post-W18c
         # Hard go/no-go per Atlas Standing Protocol. The W18b additions
-        # (embedding_erasures field + canonicalisation extension)
-        # MUST preserve the V2-α byte-pin
+        # (embedding_erasures field + canonicalisation extension) AND
+        # the W18c Phase B fastembed wiring AND the W18c Phase C V1-V4
+        # additions MUST all preserve the V2-α byte-pin
         # 8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4.
         run: cargo test -p atlas-projector --test backend_trait_conformance byte_pin -- --quiet
 
@@ -108,25 +163,59 @@ jobs:
         # The trait surface + secure-delete primitive + PerTableLockMap
         # are exercised here without paying the LanceDB build cost.
         # ~17 unit tests + 4 secure-delete tests + 1 determinism
-        # sentinel.
+        # sentinel + V1/V2/V4 sentinels (Phase C).
         run: cargo test -p atlas-mem0g -- --nocapture
+
+      - name: Run V1-V4 verification suite (lancedb-backend ON)
+        # W18c Phase C: explicit V1-V4 verification gates. Runs
+        # feature-on so the real fastembed wiring + LanceDB-stub
+        # paths are exercised.
+        #
+        # V1 (lancedb_windows_behaviour): Windows-only via cfg gate;
+        #     Linux + macOS legs report 0 tests run for this binary.
+        # V2 (embedding_byte_equal_two_runs): all 3 OS via the
+        #     ATLAS_MEM0G_EMBED_SMOKE_ENABLED gate. Cross-platform
+        #     byte-equality assertion is the load-bearing claim.
+        # V4 (fastembed_model_file_size_within_envelope): all 3 OS;
+        #     prints the actual file size to stdout for artifact
+        #     capture per leg.
+        #
+        # Per the W18c plan-doc R-W18c-C1: cross-platform float
+        # determinism is hard. If V2 fails on Windows, the operator
+        # runbook §"Cross-platform fallback" documents the
+        # event_uuid-only cache-key fallback. fail-fast: false at
+        # the matrix level (above) means the failure does not mask
+        # Linux + macOS PASS visibility.
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p target
+          cargo test -p atlas-mem0g --features lancedb-backend \
+            --test embedding_determinism \
+            --test embedder_size_measurement \
+            --test lancedb_windows_behaviour \
+            -- --ignored --nocapture --include-ignored \
+            2>&1 | tee target/mem0g-v1v4-${{ matrix.os }}.log
 
       - name: Run bench capture (lancedb-backend OFF — placeholder mode)
         # With the feature OFF, the bench tests print "skipping" lines
         # documenting that the lancedb body stubs are not exercised at
-        # CI time pending the V1-V4 verification phase. Output still
+        # CI time pending the Phase D body fill-in. Output still
         # uploaded as artifact for operator inspection.
+        shell: bash
         run: |
           set -o pipefail
           mkdir -p target
           cargo test -p atlas-mem0g --test mem0g_benchmark -- --ignored --nocapture \
-            2>&1 | tee target/mem0g-bench.log
+            2>&1 | tee target/mem0g-bench-${{ matrix.os }}.log
 
-      - name: Upload benchmark log artifact
+      - name: Upload V1-V4 + benchmark logs
         if: always()
         uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
-          name: mem0g-bench-log
-          path: target/mem0g-bench.log
+          name: mem0g-logs-${{ matrix.os }}
+          path: |
+            target/mem0g-v1v4-${{ matrix.os }}.log
+            target/mem0g-bench-${{ matrix.os }}.log
           if-no-files-found: warn
           retention-days: 30
