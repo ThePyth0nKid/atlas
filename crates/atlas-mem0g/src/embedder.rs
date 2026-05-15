@@ -13,17 +13,23 @@
 //! 2. Verifies SHA256 BEFORE handing the file path to fastembed-rs.
 //! 3. Fails closed on mismatch ([`crate::Mem0gError::SupplyChainMismatch`]).
 //!
-//! ## Three compiled-in constants
+//! ## Compiled-in supply-chain pins (9 total: 5 hash digests + 4 URLs)
 //!
-//! Pinned for cold-start re-verification:
+//! Pinned for cold-start re-verification. The complete set is:
 //!
-//! - [`HF_REVISION_SHA`] — HuggingFace Git revision SHA of the model
+//! - [`HF_REVISION_SHA`] — HuggingFace Git revision SHA-1 of the model
 //!   repo at the chosen model-card version. Pins against repo-rename
-//!   / repo-transfer / organisation-compromise attacks.
-//! - [`ONNX_SHA256`] — SHA256 of the model.onnx file bytes.
-//!   Verifies the file regardless of repo-level integrity.
-//! - [`MODEL_URL`] — full HuggingFace LFS URL incl. revision SHA in
-//!   path. TLS-pinned via Atlas's reqwest configuration.
+//!   / repo-transfer / organisation-compromise attacks. (1 × SHA-1)
+//! - [`ONNX_SHA256`] — SHA-256 of the `model.onnx` file bytes.
+//!   Verifies the file regardless of repo-level integrity. (1 × SHA-256)
+//! - [`TOKENIZER_JSON_SHA256`] / [`CONFIG_JSON_SHA256`] /
+//!   [`SPECIAL_TOKENS_MAP_SHA256`] — SHA-256 of the three tokenizer
+//!   support files required by `fastembed::TextEmbedding::try_new_from_user_defined`.
+//!   (3 × SHA-256)
+//! - [`MODEL_URL`] / [`TOKENIZER_JSON_URL`] / [`CONFIG_JSON_URL`] /
+//!   [`SPECIAL_TOKENS_MAP_URL`] — full HuggingFace LFS URLs each
+//!   embedding [`HF_REVISION_SHA`] in path. TLS-pinned via Atlas's
+//!   `https_only(true)` reqwest configuration. (4 × URL)
 //!
 //! ## W18c Phase A — supply-chain constants lifted (2026-05-15)
 //!
@@ -33,13 +39,15 @@
 //! W18b pins ([`HF_REVISION_SHA`] + [`ONNX_SHA256`] + [`MODEL_URL`])
 //! plus three Phase-B tokenizer-file SHA-256 pins
 //! ([`TOKENIZER_JSON_SHA256`] + [`CONFIG_JSON_SHA256`] +
-//! [`SPECIAL_TOKENS_MAP_SHA256`]) are now compiled-in. ONNX file size
+//! [`SPECIAL_TOKENS_MAP_SHA256`]) plus three tokenizer URL pins
+//! ([`TOKENIZER_JSON_URL`] + [`CONFIG_JSON_URL`] +
+//! [`SPECIAL_TOKENS_MAP_URL`]) are now compiled-in. ONNX file size
 //! 133,093,490 bytes / 126.93 MB matches spike §3.4 expected envelope
 //! (V4 verification).
 //!
 //! The W18b `pins_are_placeholder_until_nelson_verifies` gatekeeper
 //! test is retired; `pins_well_formed_after_lift` becomes the active
-//! structural-format enforcer for all 6 SHAs + 4 URLs. The
+//! structural-format enforcer for all 5 hash digests + 4 URLs. The
 //! fail-closed posture in [`AtlasEmbedder::new`] remains pending
 //! W18c Phase B fastembed `try_new_from_user_defined` wiring; that
 //! wiring is the only remaining gate before Layer 3 is operational.
@@ -90,10 +98,10 @@ pub const MODEL_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resol
 // W18c Phase B tokenizer-file pins
 //
 // Declared here in Phase A (compiled-in alongside the model pins so the
-// constant-lift is atomic across all six SHAs); consumed by the
-// `fastembed::TextEmbedding::try_new_from_user_defined` wiring that
-// lands in W18c Phase B per HIGH-2 reviewer note (see [`AtlasEmbedder::new`]
-// fn-level doc-comment "W18c Phase B resume guide").
+// constant-lift is atomic across all 5 hash digests + 4 URLs); consumed
+// by the `fastembed::TextEmbedding::try_new_from_user_defined` wiring
+// that lands in W18c Phase B per HIGH-2 reviewer note (see
+// [`AtlasEmbedder::new`] fn-level doc-comment "W18c Phase B resume guide").
 // ---------------------------------------------------------------------------
 
 /// SHA-256 of `tokenizer.json` from `BAAI/bge-small-en-v1.5` at
@@ -131,8 +139,8 @@ pub const CONFIG_JSON_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5
 /// [`HF_REVISION_SHA`].
 pub const SPECIAL_TOKENS_MAP_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/special_tokens_map.json";
 
-/// Compile-in check: all nine pins (six SHAs + three URLs + one model
-/// URL) are non-empty. Catches accidental blanking during refactors.
+/// Compile-in check: all nine pins (5 hash digests + 4 URLs) are
+/// non-empty. Catches accidental blanking during refactors.
 /// Structural-only — real-value substitution keeps the assertion
 /// passing; well-formedness is enforced by `pins_well_formed_after_lift`.
 pub const _STRUCTURAL_PIN_CHECK: () = {
