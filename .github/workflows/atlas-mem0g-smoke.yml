@@ -71,7 +71,17 @@ jobs:
   mem0g-smoke:
     name: mem0g-smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # PR #107 fix-commit-4: bumped 15 → 25 min. Empirically:
+    #   - ubuntu-latest: 7m16s end-to-end (well under 15)
+    #   - macos-latest: 12m28s end-to-end (knapp drin under 15)
+    #   - windows-latest: ~14 min compile + tests + needed extra ~3 min
+    #     for tar+zstd post-job cache-save of the larger Windows
+    #     target/ directory; got cut off at 15 min job-timeout during
+    #     cache-save, leaving the cache empty and creating a
+    #     perpetual cache-miss loop for future runs.
+    # 25 min gives Windows comfortable buffer for first-run cache
+    # populate; subsequent runs hit cache and finish faster on all OS.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
