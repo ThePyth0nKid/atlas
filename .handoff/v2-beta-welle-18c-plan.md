@@ -162,6 +162,52 @@ pub fn new(model_cache_dir: &std::path::Path) -> Mem0gResult<Self> {
 
 **Reviewer focus:** the four download_with_verification helpers must each fail-closed on SHA mismatch; the SHA-verified bytes must be the ones fed to fastembed (NO bypass path); the `cargo doc` claim about `try_new_from_user_defined` API surface should be cited in commit message.
 
+### Phase B Implementation Notes (post-code, 2026-05-15)
+
+**Status:** SHIPPED. PR drafted on `feat/v2-beta/welle-18c-phase-b`; SSH-Ed25519 signed commit; 577 workspace tests pass; clippy zero on default features; byte-pin `8962c1681a44…` reproduces.
+
+**Fastembed-rs 5.13.4 API surface (verified against vendored source, NOT cargo doc — `protoc` was procured locally to enable feature-on `cargo check`):**
+
+- `fastembed::TokenizerFiles` (`src/common.rs` lines 26-32) — pub struct with FOUR byte fields:
+  - `pub tokenizer_file: Vec<u8>`
+  - `pub config_file: Vec<u8>`
+  - `pub special_tokens_map_file: Vec<u8>`
+  - `pub tokenizer_config_file: Vec<u8>`  ← **the discovered fourth file**
+- `fastembed::UserDefinedEmbeddingModel` (`src/text_embedding/init.rs` lines 77-96) — pub struct with six fields. Constructor `UserDefinedEmbeddingModel::new(onnx_file: Vec<u8>, tokenizer_files: TokenizerFiles)` returns a struct with `pooling: None` + `quantization: QuantizationMode::None`. Builder methods `.with_pooling(Pooling::Cls)` + `.with_quantization(...)` + `.with_external_initializer(...)` available.
+- `fastembed::TextEmbedding::try_new_from_user_defined` (`src/text_embedding/impl.rs` lines 115-170) — signature `(model: UserDefinedEmbeddingModel, options: InitOptionsUserDefined) -> Result<TextEmbedding>`. Wraps the ORT session-builder.
+- `fastembed::TextEmbedding::embed` (`src/text_embedding/impl.rs` lines 447-464) — signature `(&mut self, texts: impl AsRef<[S]>, batch_size: Option<usize>) -> Result<Vec<Embedding>>` where `Embedding = Vec<f32>`. **NOTE: `&mut self`**, not `&self` — Atlas wraps in `std::sync::Mutex<TextEmbedding>` for ergonomic `&self` public surface.
+- `fastembed::Pooling::Cls` — matches `get_default_pooling_method(BGESmallENV15)` (`src/text_embedding/impl.rs` line 218). CLS-pooling is load-bearing for BGE-family correctness; using `Pooling::Mean` produces degraded embeddings.
+
+**Deviation from plan-doc outline (one):**
+
+The plan-doc (lines 64-71 + 84-87) and the W18c Phase A constant-lift pinned THREE tokenizer files (`tokenizer.json` + `config.json` + `special_tokens_map.json`). The upstream `fastembed::TokenizerFiles` struct requires FOUR (the fourth being `tokenizer_config.json`). The Phase B agent atomically extended the pin set with:
+
+- `TOKENIZER_CONFIG_JSON_SHA256: &str = "9261e7d79b44c8195c1cada2b453e55b00aeb81e907a6664974b4d7776172ab3"`
+- `TOKENIZER_CONFIG_JSON_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/tokenizer_config.json"`
+
+resolved live during Step 0 via `curl -sL ... | sha256sum` against the Phase A HF revision `5c38ec7c…`. Total pin count rises from 9 (5 SHA + 4 URL) to 11 (6 SHA + 5 URL). `_STRUCTURAL_PIN_CHECK` + `pins_well_formed_after_lift` + `pins_are_non_empty` + the integration-test `pins_remain_well_formed_post_phase_a_lift` were all extended to cover the 4th pin.
+
+**Architectural choices:**
+
+- **`Mutex<TextEmbedding>` interior mutability** — fastembed's `embed(&mut self, …)` would otherwise force `&mut AtlasEmbedder` at every call-site, which propagates upward through `SemanticCacheBackend::search` and forces `&mut dyn` everywhere. The mutex acquire is fine-grained (one per `embed()` call) so contention is bounded by embed latency itself (~5-10 ms under `OMP_NUM_THREADS=1`).
+- **`download_file_with_sha(url, sha, dest)` primitive factored out** — five thin wrappers (`download_model_with_verification` + 4 tokenizer helpers) preserve W18b's public-surface contract while removing duplicated download-verify boilerplate.
+- **`ensure_file_with_sha(path, sha, downloader)` helper** — centralises the cold-start "exists? → verify : download" branch so `AtlasEmbedder::new` reads as 5 single-line calls instead of 5 if/else blocks.
+- **`verify_cached_file_sha(path, sha)` generalised** — `verify_cached_model_sha` is preserved for backward compatibility (W18b call-site) but is now a thin wrapper that delegates to the generalised helper.
+
+**Verification gates (all passed):**
+
+- `cargo check --workspace`: clean (default features)
+- `cargo check -p atlas-mem0g --features lancedb-backend`: clean (with vendored `protoc` for `lance-file` build)
+- `cargo test --workspace`: 577 passed / 0 failed / 7 ignored
+- `cargo clippy --workspace --no-deps -- -D warnings`: zero warnings (default features)
+- `cargo test -p atlas-projector --test backend_trait_conformance byte_pin`: 1 passed (byte-pin `8962c1681a44…` reproduces)
+- **Optional real-network smoke (HF reachable)**: `cargo test -p atlas-mem0g --features lancedb-backend --test embedding_determinism embed_returns_384_dim_vector -- --ignored`: 1 passed in 22.24s. Real download + SHA-verify of 4 files + fastembed init + 384-dim FP32 embedding of `"Atlas trust substrate semantic search"`. The fail-closed `Err(Mem0gError::Embedder(...))` posture is fully lifted.
+
+**Out-of-scope deferred items (Phase D unchanged):**
+
+- `/api/atlas/semantic-search` still returns 501 because `LanceDbCacheBackend::{upsert, search, erase, rebuild}` bodies remain `Mem0gError::Backend("not yet wired")`. Phase D is the next welle.
+- A pre-existing `clippy::to_string_in_format_args` warning at `lancedb_backend.rs:353` is unaffected by Phase B and tripped only by feature-on clippy (which atlas-mem0g-smoke CI does not currently run; Phase C scope). Out of scope per Phase B forbidden-files list.
+
 ## Phase C — V1-V4 verification gap closure (~1 session)
 
 **Goal:** close the four verification gaps from W18 spike §12:
