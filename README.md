@@ -16,7 +16,7 @@
   <a href="https://opensource.org/licenses/Apache-2.0"><img alt="License: Apache-2.0 (verifier)" src="https://img.shields.io/badge/verifier_license-Apache--2.0-blue?style=flat-square" /></a>
   <a href="LICENSE-SUSTAINABLE-USE"><img alt="License: Sustainable Use (server)" src="https://img.shields.io/badge/server_license-Sustainable_Use-orange?style=flat-square" /></a>
   <a href="https://slsa.dev/spec/v1.0/levels#build-l3"><img alt="SLSA Build L3" src="https://img.shields.io/badge/SLSA-Build_L3-2ea44f?style=flat-square" /></a>
-  <a href="docs/COMPLIANCE-MAPPING.md"><img alt="EU AI Act Article 12" src="https://img.shields.io/badge/EU_AI_Act-Art._12-005599?style=flat-square" /></a>
+  <a href="docs/COMPLIANCE-MAPPING.md"><img alt="EU AI Act Art. 12 — design-aligned" src="https://img.shields.io/badge/EU_AI_Act-Art._12-005599?style=flat-square" /></a>
 </p>
 
 Atlas is a knowledge-graph backend where every fact is signed (Ed25519 + COSE_Sign1), every edge is hash-chained, every state is anchored to Sigstore Rekor, and every agent write is verified by an **offline WASM verifier** running in the customer's browser — not on our server.

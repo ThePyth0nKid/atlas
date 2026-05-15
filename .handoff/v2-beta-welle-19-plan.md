@@ -269,6 +269,10 @@ This skeleton is mandatory; deviations are flagged by the parent agent's review.
 | R-W19-5 scaffold-ship customer adoption risk | Release notes + SEMVER-AUDIT-V2.0-beta.md cross-reference operator-runbook + 501 response semantics. Counsel-track per `DECISION-COUNSEL-1` blocks public materials as additional gating layer. |
 | R-W19-6 tag-immutability under hook failure | NOT exercised pre-merge; contract documented in release notes "W18c parallel-track pointer" section. |
 
+### Post-merge polish
+
+- **Post-merge polish landed via PR #103 (`docs/v2-beta/welle-19-polish`):** Release Notes line 20 `embedding_erased` bullet rephrased per M-1 compliance finding (removes "GDPR-alignment-as-property" assertion; adds DECISION-COUNSEL-1 + W18c Phase D pending qualifiers); README badge alt-text updated per M-2 ("Article 12" → "Art. 12 — design-aligned"). Both reviewers APPROVE (6 PASS each).
+
 ### Deviations from plan
 
 1. **Root-level `package.json` not touched** despite carrying `2.0.0-alpha.2` — plan's in-scope list specified exactly 5 manifests; this 6th is a workspace-monorepo manifest at repo root. Flagged for parent review.
