@@ -75,7 +75,7 @@ Reference: `.handoff/v2-beta-welle-18c-plan.md`.
 v2.0.0-beta.1 is SemVer-compliant prerelease (`2.0.0-beta.1` < `2.0.0` per SemVer §11; prereleases sort before final). Downstream consumers:
 
 - **npm:** `npm install @atlas-trust/verify-wasm@2.0.0-beta.1` (or `^2.0.0-alpha.2` consumers WILL pick up beta.1 because prereleases match same-major-minor-patch caret).
-- **cargo:** `[dependencies] atlas-trust-core = "2.0.0-beta.1"` (cargo SemVer treats prereleases the same way).
+- **cargo:** `[dependencies] atlas-trust-core = "2.0.0-beta.1"` (explicit prerelease pin recommended; cargo caret ranges from a prerelease — e.g. `^2.0.0-alpha.2` — DO allow newer prereleases of the same `[major.minor.patch]`, but cargo does NOT auto-pick prereleases from a non-prerelease range. For beta consumers, explicit pinning is recommended.)
 
 **No source-break for V2-α-α.2 consumers.** The V2-α-α.1 → V2-α-α.2 → V2-β-1 path is largely additive: Layer 2 + Layer 3 scaffolds add public-API surface; no V1 trust surface changes. See [`docs/SEMVER-AUDIT-V2.0-beta.md`](SEMVER-AUDIT-V2.0-beta.md) for the V2-β-1 additive-surface contract.
 

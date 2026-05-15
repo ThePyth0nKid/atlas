@@ -43,7 +43,7 @@
 | `pub const TOKENIZER_JSON_SHA256`, `CONFIG_JSON_SHA256`, `SPECIAL_TOKENS_MAP_SHA256` (W18c-NEW) | **Locked** (supply-chain pin contract) | SHA-256 of the 3 tokenizer companion files. Consumed by W18c Phase B `try_new_from_user_defined` wiring. |
 | `pub const TOKENIZER_JSON_URL`, `CONFIG_JSON_URL`, `SPECIAL_TOKENS_MAP_URL` (W18c-NEW) | **Locked** (supply-chain pin contract) | Revision-pinned LFS URLs for the 3 tokenizer files. |
 
-**Atomic-lift contract:** all 9 pins (1 × SHA-1 + 5 × SHA-256 + 3 × URL ... wait: actually 1 × SHA-1 HF_REVISION + 4 × SHA-256 (ONNX + 3 tokenizer-files) + 4 × URL (MODEL + 3 tokenizer-file URLs) = 9 compile-in pins) lift atomically per Phase A. Partial-lift would silently bypass the structural-pin-check; the test `pins_well_formed_after_lift` enforces all-or-nothing at test time.
+**Atomic-lift contract:** all 9 compile-in pins (1 × SHA-1: `HF_REVISION_SHA`; 4 × SHA-256: `ONNX_SHA256` + `TOKENIZER_JSON_SHA256` + `CONFIG_JSON_SHA256` + `SPECIAL_TOKENS_MAP_SHA256`; 4 × URL: `MODEL_URL` + `TOKENIZER_JSON_URL` + `CONFIG_JSON_URL` + `SPECIAL_TOKENS_MAP_URL`) lift atomically per Phase A. The test `pins_well_formed_after_lift` enforces all-or-nothing.
 
 ### 1.3 `pub struct LanceDbCacheBackend` (from `crates/atlas-mem0g/src/lancedb_backend.rs`)
 
