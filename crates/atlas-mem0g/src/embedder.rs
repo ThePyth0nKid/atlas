@@ -25,18 +25,27 @@
 //! - [`MODEL_URL`] — full HuggingFace LFS URL incl. revision SHA in
 //!   path. TLS-pinned via Atlas's reqwest configuration.
 //!
-//! ## `TODO(W18b-NELSON-VERIFY)`
+//! ## W18c Phase A — supply-chain constants lifted (2026-05-15)
 //!
-//! The current constant values are PLACEHOLDERS. WebFetch against
-//! HuggingFace `BAAI/bge-small-en-v1.5` to resolve real revision SHA,
-//! ONNX SHA256, and LFS URL was not feasible in the W18b subagent
-//! context (network access from a Windows subagent shell is not
-//! guaranteed; placing real but stale values would be worse than
-//! placing flagged placeholders). Nelson confirms real values
-//! pre-merge.
+//! Resolved via `tools/w18c-phase-a-resolve.sh` against HuggingFace
+//! `BAAI/bge-small-en-v1.5` at revision
+//! `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`. All three load-bearing
+//! W18b pins ([`HF_REVISION_SHA`] + [`ONNX_SHA256`] + [`MODEL_URL`])
+//! plus three Phase-B tokenizer-file SHA-256 pins
+//! ([`TOKENIZER_JSON_SHA256`] + [`CONFIG_JSON_SHA256`] +
+//! [`SPECIAL_TOKENS_MAP_SHA256`]) are now compiled-in. ONNX file size
+//! 133,093,490 bytes / 126.93 MB matches spike §3.4 expected envelope
+//! (V4 verification).
 //!
-//! See `.handoff/v2-beta-welle-18b-plan.md` Implementation Notes
-//! §"Placeholder constants" for the verification protocol.
+//! The W18b `pins_are_placeholder_until_nelson_verifies` gatekeeper
+//! test is retired; `pins_well_formed_after_lift` becomes the active
+//! structural-format enforcer for all 6 SHAs + 4 URLs. The
+//! fail-closed posture in [`AtlasEmbedder::new`] remains pending
+//! W18c Phase B fastembed `try_new_from_user_defined` wiring; that
+//! wiring is the only remaining gate before Layer 3 is operational.
+//!
+//! See `.handoff/v2-beta-welle-18c-plan.md` Phase A for the
+//! resolution audit trail.
 //!
 //! ## Determinism pinning (ADR §4 sub-decision #2)
 //!
@@ -56,39 +65,86 @@ use crate::{Mem0gError, Mem0gResult};
 // ---------------------------------------------------------------------------
 
 /// HuggingFace Git revision SHA of `BAAI/bge-small-en-v1.5` at the
-/// version Atlas adopted in W18b.
+/// version Atlas adopted in W18b. 40-char Git SHA-1 hex digest.
 ///
-/// **TODO(W18b-NELSON-VERIFY):** placeholder. Real value pulled from
-/// HuggingFace API `GET https://huggingface.co/api/models/BAAI/bge-small-en-v1.5`
-/// — the response's `sha` field is this constant. Update before
-/// V2-β-1 public ship.
-pub const HF_REVISION_SHA: &str = "TODO_W18B_NELSON_VERIFY_HF_REVISION_SHA";
+/// Resolved 2026-05-15 via `tools/w18c-phase-a-resolve.sh` (W18c
+/// Phase A). Rotations happen via explicit Atlas release; never
+/// auto-bumped.
+pub const HF_REVISION_SHA: &str = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a";
 
-/// SHA256 of `model.onnx` for `bge-small-en-v1.5` (FP32).
+/// SHA-256 of `model.onnx` for `bge-small-en-v1.5` (FP32 / 133,093,490
+/// bytes / ~126.93 MB; matches spike §3.4 expected envelope).
 ///
-/// **TODO(W18b-NELSON-VERIFY):** placeholder. Compute via
-/// `curl -sL <MODEL_URL> | sha256sum` against the LFS-pointed file at
-/// the pinned revision. Update before V2-β-1 public ship. The
-/// download-with-verification path will fail closed (refusing to
-/// embed) until both this constant AND the file on disk agree.
-pub const ONNX_SHA256: &str = "TODO_W18B_NELSON_VERIFY_ONNX_SHA256";
+/// Resolved 2026-05-15 via `tools/w18c-phase-a-resolve.sh` (W18c
+/// Phase A). The download-with-verification path fails closed on
+/// mismatch ([`Mem0gError::SupplyChainMismatch`]).
+pub const ONNX_SHA256: &str =
+    "828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35";
 
-/// Full HuggingFace LFS URL incl. revision SHA in path.
+/// Full HuggingFace LFS URL incl. revision SHA in path. TLS-pinned
+/// via Atlas's reqwest configuration (`https_only(true)`); not subject
+/// to follow-redirect attacks.
+pub const MODEL_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/onnx/model.onnx";
+
+// ---------------------------------------------------------------------------
+// W18c Phase B tokenizer-file pins
+//
+// Declared here in Phase A (compiled-in alongside the model pins so the
+// constant-lift is atomic across all six SHAs); consumed by the
+// `fastembed::TextEmbedding::try_new_from_user_defined` wiring that
+// lands in W18c Phase B per HIGH-2 reviewer note (see [`AtlasEmbedder::new`]
+// fn-level doc-comment "W18c Phase B resume guide").
+// ---------------------------------------------------------------------------
+
+/// SHA-256 of `tokenizer.json` from `BAAI/bge-small-en-v1.5` at
+/// [`HF_REVISION_SHA`]. 64-char SHA-256 hex digest.
 ///
-/// **TODO(W18b-NELSON-VERIFY):** placeholder. Real value resolved by
-/// inspecting the model repo's LFS pointer at the pinned revision.
-/// Update before V2-β-1 public ship.
-pub const MODEL_URL: &str =
-    "TODO_W18B_NELSON_VERIFY_HTTPS_HUGGINGFACE_CO_BAAI_BGE_SMALL_EN_V1_5_RESOLVE_REVISION_SHA_MODEL_ONNX";
+/// Resolved 2026-05-15 via `tools/w18c-phase-a-resolve.sh`. Consumed
+/// by W18c Phase B `try_new_from_user_defined` wiring (verified
+/// pre-init against this pin).
+pub const TOKENIZER_JSON_SHA256: &str =
+    "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66";
 
-/// Compile-in check: the three pins are non-empty. Catches accidental
-/// blanking during a refactor (the placeholder strings ARE non-empty,
-/// so this assertion is structural-only — real-value substitution
-/// keeps it passing).
+/// SHA-256 of `config.json` from `BAAI/bge-small-en-v1.5` at
+/// [`HF_REVISION_SHA`]. 64-char SHA-256 hex digest.
+///
+/// Resolved 2026-05-15 via `tools/w18c-phase-a-resolve.sh`. Consumed
+/// by W18c Phase B `try_new_from_user_defined` wiring.
+pub const CONFIG_JSON_SHA256: &str =
+    "094f8e891b932f2000c92cfc663bac4c62069f5d8af5b5278c4306aef3084750";
+
+/// SHA-256 of `special_tokens_map.json` from `BAAI/bge-small-en-v1.5`
+/// at [`HF_REVISION_SHA`]. 64-char SHA-256 hex digest.
+///
+/// Resolved 2026-05-15 via `tools/w18c-phase-a-resolve.sh`. Consumed
+/// by W18c Phase B `try_new_from_user_defined` wiring.
+pub const SPECIAL_TOKENS_MAP_SHA256: &str =
+    "b6d346be366a7d1d48332dbc9fdf3bf8960b5d879522b7799ddba59e76237ee3";
+
+/// Full HuggingFace LFS URL for `tokenizer.json` at [`HF_REVISION_SHA`].
+pub const TOKENIZER_JSON_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/tokenizer.json";
+
+/// Full HuggingFace LFS URL for `config.json` at [`HF_REVISION_SHA`].
+pub const CONFIG_JSON_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/config.json";
+
+/// Full HuggingFace LFS URL for `special_tokens_map.json` at
+/// [`HF_REVISION_SHA`].
+pub const SPECIAL_TOKENS_MAP_URL: &str = "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/5c38ec7c405ec4b44b94cc5a9bb96e735b38267a/special_tokens_map.json";
+
+/// Compile-in check: all nine pins (six SHAs + three URLs + one model
+/// URL) are non-empty. Catches accidental blanking during refactors.
+/// Structural-only — real-value substitution keeps the assertion
+/// passing; well-formedness is enforced by `pins_well_formed_after_lift`.
 pub const _STRUCTURAL_PIN_CHECK: () = {
     assert!(!HF_REVISION_SHA.is_empty());
     assert!(!ONNX_SHA256.is_empty());
     assert!(!MODEL_URL.is_empty());
+    assert!(!TOKENIZER_JSON_SHA256.is_empty());
+    assert!(!CONFIG_JSON_SHA256.is_empty());
+    assert!(!SPECIAL_TOKENS_MAP_SHA256.is_empty());
+    assert!(!TOKENIZER_JSON_URL.is_empty());
+    assert!(!CONFIG_JSON_URL.is_empty());
+    assert!(!SPECIAL_TOKENS_MAP_URL.is_empty());
 };
 
 // ---------------------------------------------------------------------------
@@ -302,14 +358,14 @@ impl AtlasEmbedder {
     /// - [`Mem0gError::SupplyChainMismatch`] if SHA256 mismatch
     ///   (fail-closed; refuses to embed).
     /// - [`Mem0gError::Embedder`] on fastembed-rs init failure OR
-    ///   if the supply-chain pins are still W18b placeholders
-    ///   (fail-closed; refuses to embed UNTIL the constants are
-    ///   lifted AND the `try_new_from_user_defined` wiring is
-    ///   completed by Nelson pre-merge per HIGH-2 reviewer note).
+    ///   while the W18c Phase B `try_new_from_user_defined` wiring
+    ///   has not yet landed (fail-closed; refuses to embed). The
+    ///   six supply-chain pins are W18c-Phase-A lifted; the wiring
+    ///   gate is the only remaining pre-operational barrier.
     ///
     /// HIGH-2 fix (reviewer-driven):
     ///
-    /// The previous body called `fastembed::TextEmbedding::try_new(Default::default())`
+    /// The W18b initial body called `fastembed::TextEmbedding::try_new(Default::default())`
     /// which causes fastembed-rs to download `bge-small-en-v1.5` from
     /// HuggingFace via its OWN HTTP client, completely bypassing
     /// Atlas's [`download_model_with_verification`] SHA-256 gate. That
@@ -323,31 +379,31 @@ impl AtlasEmbedder {
     /// the SHA-verified local ONNX bytes + tokenizer config +
     /// pooling config. That API requires three additional files
     /// from the HuggingFace repo (`tokenizer.json`, `config.json`,
-    /// `special_tokens_map.json` per fastembed-rs 5.13.4) each of
-    /// which ALSO needs a compiled-in SHA-256 pin and a download
-    /// helper. Wiring that in-commit without upstream API access in
-    /// the subagent context risks landing a broken init path.
+    /// `special_tokens_map.json` per fastembed-rs 5.13.4), each of
+    /// which now has a compiled-in SHA-256 pin
+    /// ([`TOKENIZER_JSON_SHA256`] / [`CONFIG_JSON_SHA256`] /
+    /// [`SPECIAL_TOKENS_MAP_SHA256`]) plus a matching URL constant
+    /// ([`TOKENIZER_JSON_URL`] / [`CONFIG_JSON_URL`] /
+    /// [`SPECIAL_TOKENS_MAP_URL`]) — all six declared in W18c
+    /// Phase A.
     ///
-    /// **In-commit fix posture:** the embedder fails closed (returns
-    /// `Mem0gError::Embedder`) while the supply-chain pins are still
-    /// `TODO_W18B_NELSON_VERIFY_*` placeholders OR while the
-    /// `try_new_from_user_defined` wiring is incomplete. This
+    /// **Fail-closed posture (still in force):** the embedder
+    /// returns `Mem0gError::Embedder` while the
+    /// `try_new_from_user_defined` wiring is not yet landed. This
     /// guarantees the bypass code path can NEVER execute in
     /// production: if anyone enables the `lancedb-backend` feature
-    /// and tries to instantiate the embedder, they get a clear
-    /// error pointing at the pre-merge work.
+    /// and tries to instantiate the embedder pre-Phase-B, they get a
+    /// clear error pointing at the remaining wiring step.
     ///
-    /// **Pre-merge resume guide** (Nelson, mirrors plan-doc):
+    /// **W18c Phase B resume guide** (engineering, mirrors
+    /// `.handoff/v2-beta-welle-18c-plan.md` Phase B):
     ///
-    /// 1. Lift `ONNX_SHA256` / `HF_REVISION_SHA` / `MODEL_URL`
-    ///    placeholders (verifies the existing gatekeeper test).
-    /// 2. Add `TOKENIZER_JSON_SHA256` / `CONFIG_JSON_SHA256` /
-    ///    `SPECIAL_TOKENS_MAP_JSON_SHA256` constants + the matching
-    ///    URL constants.
-    /// 3. Extend [`download_model_with_verification`] to fetch all
-    ///    four files (or factor a `download_file_with_sha`
-    ///    primitive) into the cache directory.
-    /// 4. Replace the `Mem0gError::Embedder("supply-chain gate")`
+    /// 1. Factor a `download_file_with_sha(url, sha, dest)` primitive
+    ///    out of [`download_model_with_verification`]. Use it for all
+    ///    four files (ONNX + 3 tokenizer files).
+    /// 2. Extend [`AtlasEmbedder`] cold-start to download/verify all
+    ///    four files into the cache directory before fastembed init.
+    /// 3. Replace the `Mem0gError::Embedder("supply-chain gate")`
     ///    return below with a real
     ///    `fastembed::TextEmbedding::try_new_from_user_defined(
     ///         UserDefinedEmbeddingModel::new(model_bytes,
@@ -357,8 +413,7 @@ impl AtlasEmbedder {
     ///    against `cargo doc -p fastembed --features lancedb-backend`
     ///    once `lancedb-backend` builds locally.)
     ///
-    /// Documented in `.handoff/v2-beta-welle-18b-plan.md` Implementation
-    /// Notes §"HIGH-2 fastembed bypass — pre-merge resume".
+    /// Documented in `.handoff/v2-beta-welle-18c-plan.md` Phase B.
     pub fn new(model_cache_dir: &std::path::Path) -> Mem0gResult<Self> {
         pin_omp_threads_single();
 
@@ -372,18 +427,17 @@ impl AtlasEmbedder {
         // HIGH-2 fail-closed gate (reviewer-driven): refuse to call
         // `fastembed::TextEmbedding::try_new(Default::default())` —
         // that path bypasses Atlas's SHA-256 supply-chain verification
-        // by triggering fastembed-rs's own HuggingFace fetch. Until
-        // the `try_new_from_user_defined` wiring is completed by
-        // Nelson pre-merge (see fn-level doc-comment "Pre-merge
-        // resume guide"), refuse to construct the embedder. This
-        // matches the placeholder-constant posture: the production
-        // path is structurally unreachable until ALL pre-merge gates
-        // are cleared.
+        // by triggering fastembed-rs's own HuggingFace fetch. The W18c
+        // Phase A supply-chain constants are lifted; the
+        // `try_new_from_user_defined` wiring lands in W18c Phase B.
+        // Until then, refuse to construct the embedder. The production
+        // path is structurally unreachable until the wiring gate is
+        // cleared.
         Err(Mem0gError::Embedder(
             "supply-chain gate: AtlasEmbedder::new refuses to construct \
-             until fastembed::TextEmbedding::try_new_from_user_defined \
-             wiring lands (HIGH-2 fix; see fn-level doc-comment + \
-             .handoff/v2-beta-welle-18b-plan.md §HIGH-2)"
+             until W18c Phase B fastembed::TextEmbedding::try_new_from_user_defined \
+             wiring lands (HIGH-2 fix; W18c Phase A supply-chain pins lifted; \
+             see fn-level doc-comment + .handoff/v2-beta-welle-18c-plan.md Phase B)"
                 .to_string(),
         ))
     }
@@ -419,85 +473,64 @@ mod tests {
 
     #[test]
     fn pins_are_non_empty() {
+        // W18c Phase A: extends original 3-pin check to all 6 SHA
+        // constants + 4 URL constants (model + 3 tokenizer).
         assert!(!HF_REVISION_SHA.is_empty());
         assert!(!ONNX_SHA256.is_empty());
         assert!(!MODEL_URL.is_empty());
+        assert!(!TOKENIZER_JSON_SHA256.is_empty());
+        assert!(!CONFIG_JSON_SHA256.is_empty());
+        assert!(!SPECIAL_TOKENS_MAP_SHA256.is_empty());
+        assert!(!TOKENIZER_JSON_URL.is_empty());
+        assert!(!CONFIG_JSON_URL.is_empty());
+        assert!(!SPECIAL_TOKENS_MAP_URL.is_empty());
     }
 
-    #[test]
-    fn pins_are_placeholder_until_nelson_verifies() {
-        // HIGH-3 fix (reviewer-driven): the previous test asserted
-        // ONLY `ONNX_SHA256.starts_with("TODO_W18B")`. A partial
-        // constant lift (e.g. Nelson updates only `ONNX_SHA256` and
-        // forgets `HF_REVISION_SHA` or `MODEL_URL`) would pass the
-        // gatekeeper while leaving repo-integrity unchecked. All
-        // three pins move atomically; the gatekeeper asserts all
-        // three at once.
-        assert!(
-            ONNX_SHA256.starts_with("TODO_W18B"),
-            "ONNX_SHA256 lifted without updating gatekeeper — \
-             update HIGH-3 gatekeeper alongside (all three constants \
-             must move atomically)"
-        );
-        assert!(
-            HF_REVISION_SHA.starts_with("TODO_W18B"),
-            "HF_REVISION_SHA lifted without updating gatekeeper — \
-             update HIGH-3 gatekeeper alongside (all three constants \
-             must move atomically)"
-        );
-        assert!(
-            MODEL_URL.starts_with("TODO_W18B"),
-            "MODEL_URL lifted without updating gatekeeper — \
-             update HIGH-3 gatekeeper alongside (all three constants \
-             must move atomically)"
-        );
-    }
+    // W18c Phase A: the W18b `pins_are_placeholder_until_nelson_verifies`
+    // gatekeeper test is RETIRED. Its purpose — forcing an in-commit
+    // atomic constant-lift — was served when the constants were
+    // resolved via `tools/w18c-phase-a-resolve.sh` and committed in
+    // this welle. Post-lift, structural-format enforcement moves to
+    // `pins_well_formed_after_lift` (which now runs unconditionally,
+    // no more `is_placeholder` early-return).
 
     #[test]
     fn pins_well_formed_after_lift() {
-        // HIGH-3 companion: post-lift format validation. When the
-        // `pins_are_placeholder_until_nelson_verifies` gatekeeper
-        // is deleted (or its assertion inverted), this test surfaces
-        // any structural-format slip that would otherwise pass code
-        // review:
+        // W18c Phase A: structural-format invariants are now
+        // permanently enforced. The W18b `is_placeholder` early-return
+        // is removed because the constants are lifted; any future
+        // refactor that reintroduces placeholder strings will trip
+        // these assertions at test time.
         //
-        // - real `ONNX_SHA256` is exactly 64 lowercase hex chars
-        //   (RFC-6234 SHA-256 hex digest);
-        // - real `HF_REVISION_SHA` is exactly 40 lowercase hex chars
-        //   (Git revision SHA-1);
-        // - real `MODEL_URL` begins with `https://huggingface.co/`.
-        //
-        // Both constants AND well-formedness are atomic gates. This
-        // test is a NO-OP while the placeholders are in place
-        // (asserts the placeholder posture); it becomes a real
-        // structural check once the constants are lifted (asserts
-        // the post-lift posture). Keep the test forever so the
-        // structural invariants stay enforced.
-        let is_placeholder = ONNX_SHA256.starts_with("TODO_W18B")
-            && HF_REVISION_SHA.starts_with("TODO_W18B")
-            && MODEL_URL.starts_with("TODO_W18B");
+        // Coverage:
+        //   - 4 SHA-256 hex digests (64-char lowercase hex)
+        //   - 1 SHA-1 hex digest (40-char lowercase hex, Git revision)
+        //   - 4 URL strings (must start with https://huggingface.co/
+        //     AND embed HF_REVISION_SHA — revision-pinning invariant)
 
-        if is_placeholder {
-            // Pre-lift posture — well-formedness is unchecked because
-            // the placeholder strings deliberately do NOT match real
-            // formats. Defer to `pins_are_placeholder_until_nelson_verifies`.
-            return;
+        // 64-char lowercase-hex SHA-256 digests.
+        for (label, value) in [
+            ("ONNX_SHA256", ONNX_SHA256),
+            ("TOKENIZER_JSON_SHA256", TOKENIZER_JSON_SHA256),
+            ("CONFIG_JSON_SHA256", CONFIG_JSON_SHA256),
+            ("SPECIAL_TOKENS_MAP_SHA256", SPECIAL_TOKENS_MAP_SHA256),
+        ] {
+            assert_eq!(
+                value.len(),
+                64,
+                "{label} must be 64-char SHA-256 hex digest"
+            );
+            assert!(
+                value.chars().all(|c| c.is_ascii_hexdigit()),
+                "{label} must contain only ASCII hex digits"
+            );
+            assert!(
+                value.chars().all(|c| !c.is_ascii_uppercase()),
+                "{label} must be lowercase hex (HuggingFace + sha256sum convention)"
+            );
         }
 
-        // Post-lift posture — enforce real structural formats.
-        assert_eq!(
-            ONNX_SHA256.len(),
-            64,
-            "ONNX_SHA256 must be 64-char SHA-256 hex digest"
-        );
-        assert!(
-            ONNX_SHA256.chars().all(|c| c.is_ascii_hexdigit()),
-            "ONNX_SHA256 must contain only ASCII hex digits"
-        );
-        assert!(
-            ONNX_SHA256.chars().all(|c| !c.is_ascii_uppercase()),
-            "ONNX_SHA256 must be lowercase hex (HuggingFace + sha256sum convention)"
-        );
+        // 40-char lowercase-hex Git SHA-1 revision.
         assert_eq!(
             HF_REVISION_SHA.len(),
             40,
@@ -508,9 +541,27 @@ mod tests {
             "HF_REVISION_SHA must contain only ASCII hex digits"
         );
         assert!(
-            MODEL_URL.starts_with("https://huggingface.co"),
-            "MODEL_URL must point at huggingface.co (TLS-pinned origin)"
+            HF_REVISION_SHA.chars().all(|c| !c.is_ascii_uppercase()),
+            "HF_REVISION_SHA must be lowercase hex"
         );
+
+        // 4 URL constants: huggingface.co origin + revision-SHA path.
+        for (label, value) in [
+            ("MODEL_URL", MODEL_URL),
+            ("TOKENIZER_JSON_URL", TOKENIZER_JSON_URL),
+            ("CONFIG_JSON_URL", CONFIG_JSON_URL),
+            ("SPECIAL_TOKENS_MAP_URL", SPECIAL_TOKENS_MAP_URL),
+        ] {
+            assert!(
+                value.starts_with("https://huggingface.co/"),
+                "{label} must point at huggingface.co (TLS-pinned origin)"
+            );
+            assert!(
+                value.contains(HF_REVISION_SHA),
+                "{label} must embed HF_REVISION_SHA in path \
+                 (revision-pinning invariant; URL and SHA must move atomically)"
+            );
+        }
     }
 
     #[test]
