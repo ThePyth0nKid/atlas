@@ -22,10 +22,13 @@
 //!    wrapper that stands in for the cleanup-old-versions side
 //!    effect (overwrites + unlinks the pre-captured paths).
 //! 3. Windows-specific path semantics that LanceDB 0.29 *would*
-//!    encounter when running on Windows: backslash separators,
-//!    case-insensitive filesystem (NTFS), and long-path-prefix
-//!    `\\?\` handling — Atlas's primitives must traverse them
-//!    correctly.
+//!    encounter when running on Windows: backslash separators and
+//!    case-insensitive filesystem (NTFS). UNC long-path-prefix
+//!    `\\?\` handling is NOT exercised by this fixture (paths are
+//!    rooted under `tempfile::tempdir()`, which on Windows CI
+//!    resolves under `%TEMP%` — a short path); a follow-on V2-γ
+//!    test would explicitly construct `\\?\`-prefixed paths to
+//!    cover that gap (PR #107 security-reviewer LOW-2).
 //!
 //! When Phase D wires the real `cleanup_old_versions` call, the
 //! existing assertions hold because Atlas's wrapper layout
@@ -176,6 +179,14 @@ fn windows_lance_fragment_layout_walk_and_secure_cleanup() {
     // without going through raw-disk APIs (out of scope per the
     // SSD caveat). What we CAN assert: no live file in the tree
     // contains the sentinel.
+    //
+    // PR #107 reviewer MEDIUM-2 (code) — this sweep is vacuously
+    // true after a successful `apply_overwrite_set` (all four files
+    // were unlinked above; the loop body would not execute on a
+    // valid post-cleanup tree). Its conditional value: it would
+    // catch a regression where `apply_overwrite_set` was changed
+    // to overwrite-but-not-unlink (the sentinel bytes would survive
+    // in a still-present file). We retain it for that defence.
     let mut all_files: Vec<PathBuf> = Vec::new();
     walk(&workspace_root, &mut all_files, &|_p| true);
     for p in &all_files {
@@ -192,14 +203,40 @@ fn windows_lance_fragment_layout_walk_and_secure_cleanup() {
 /// `LanceDbCacheBackend::walk_collect_filtered` (private). Inlined
 /// here so the integration test stays portable to any future
 /// refactor of the backend module's pub-surface.
+///
+/// PR #107 reviewer notes:
+/// - **MEDIUM-1 (security):** `read_dir` errors used to be silently
+///   swallowed (`Err(_) => return`), which would have masked test
+///   fixture corruption. They now panic with the failing path so
+///   the test fails loudly instead of vacuously passing. If a
+///   production port of this walker re-uses the pattern, the same
+///   panic-on-error contract MUST be preserved (silent swallow
+///   would be a GDPR Art. 17 false-attestation risk identical to
+///   the W18b MEDIUM-2 fix on `apply_overwrite_set`).
+/// - **MEDIUM-2 (security):** `path.is_symlink()` guard added
+///   before the `is_dir()` recursion. On Windows CI, ephemeral
+///   unprivileged runners can't create symlinks (no
+///   `SeCreateSymbolicLinkPrivilege`), so the practical risk is
+///   negligible in this test context — but a malicious workspace
+///   directory in production with a symlink loop would otherwise
+///   recurse to stack overflow. The guard makes any production
+///   port of this walker safe by construction.
 #[cfg(all(feature = "lancedb-backend", target_os = "windows"))]
 fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>, predicate: &dyn Fn(&std::path::Path) -> bool) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(e) => panic!(
+            "walk: read_dir({}) failed: {e} — test fixture corruption, refusing to mask",
+            dir.display()
+        ),
     };
     for entry in entries.flatten() {
         let path = entry.path();
+        // Skip symlinks before any recursion or read; prevents loop
+        // recursion on a malicious workspace tree.
+        if path.is_symlink() {
+            continue;
+        }
         if path.is_dir() {
             walk(&path, out, predicate);
         } else if predicate(&path) {

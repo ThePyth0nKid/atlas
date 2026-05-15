@@ -60,8 +60,19 @@ fn embedding_determinism_two_runs_byte_equal() {
 
     supply_chain::pin_omp_threads_single();
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let model_cache = dir.path().to_path_buf();
+    // PR #107 reviewer HIGH-1: resolve model cache from env (CI cache)
+    // with tempdir fallback (local). See `embedding_byte_equal_two_runs`
+    // for full rationale.
+    let _tmp = tempfile::tempdir().expect("tempdir");
+    let model_cache: std::path::PathBuf =
+        match std::env::var("ATLAS_MEM0G_MODEL_CACHE_DIR") {
+            Ok(p) if !p.is_empty() => {
+                let pb = std::path::PathBuf::from(p);
+                std::fs::create_dir_all(&pb).expect("create persistent model cache dir");
+                pb
+            }
+            _ => _tmp.path().to_path_buf(),
+        };
 
     let embedder_a = embedder::AtlasEmbedder::new(&model_cache)
         .expect("first embedder init");
@@ -185,8 +196,20 @@ fn embed_returns_384_dim_vector() {
         return;
     }
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let embedder = embedder::AtlasEmbedder::new(dir.path())
+    // PR #107 reviewer HIGH-1: resolve model cache from env (CI cache)
+    // with tempdir fallback (local). See `embedding_byte_equal_two_runs`
+    // for full rationale.
+    let _tmp = tempfile::tempdir().expect("tempdir");
+    let model_cache: std::path::PathBuf =
+        match std::env::var("ATLAS_MEM0G_MODEL_CACHE_DIR") {
+            Ok(p) if !p.is_empty() => {
+                let pb = std::path::PathBuf::from(p);
+                std::fs::create_dir_all(&pb).expect("create persistent model cache dir");
+                pb
+            }
+            _ => _tmp.path().to_path_buf(),
+        };
+    let embedder = embedder::AtlasEmbedder::new(&model_cache)
         .expect("AtlasEmbedder::new should succeed against a valid model dir");
     let vec = embedder
         .embed("Atlas trust substrate semantic search")
@@ -249,8 +272,25 @@ fn embedding_byte_equal_two_runs() {
     // ORT session is built; subsequent changes are no-ops).
     supply_chain::pin_omp_threads_single();
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let embedder_a = embedder::AtlasEmbedder::new(dir.path())
+    // Resolve model cache dir: prefer ATLAS_MEM0G_MODEL_CACHE_DIR (set
+    // by `atlas-mem0g-smoke` to the path that `actions/cache@v4`
+    // restores) so CI hits the cache; fall back to per-test tempdir
+    // for local runs. PR #107 reviewer HIGH-1 — without this, every
+    // 3-OS leg re-downloaded ~130 MB on every run, defeating the cache
+    // step's stated purpose. The TOCTOU-free `read_and_verify` primitive
+    // still runs on cache-hit (it re-verifies the cached bytes against
+    // the compiled-in pin), so the supply-chain contract is preserved.
+    let _tmp = tempfile::tempdir().expect("tempdir");
+    let model_cache: std::path::PathBuf =
+        match std::env::var("ATLAS_MEM0G_MODEL_CACHE_DIR") {
+            Ok(p) if !p.is_empty() => {
+                let pb = std::path::PathBuf::from(p);
+                std::fs::create_dir_all(&pb).expect("create persistent model cache dir");
+                pb
+            }
+            _ => _tmp.path().to_path_buf(),
+        };
+    let embedder_a = embedder::AtlasEmbedder::new(&model_cache)
         .expect("AtlasEmbedder::new should succeed against a valid model dir");
     let text = "Atlas trust substrate semantic search determinism check";
 

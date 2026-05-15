@@ -113,7 +113,10 @@ jobs:
         # W18c Phase C: ~/.cache/atlas-mem0g resolves to different
         # absolute paths per OS (Linux: $HOME/.cache, macOS: same,
         # Windows: %USERPROFILE%\.cache). actions/cache wants the
-        # explicit path, so we resolve once and emit it.
+        # explicit path, so we resolve once and emit it. Default arm
+        # fails loudly on unrecognized runner — silently emitting an
+        # empty path would cause actions/cache to cache the entire
+        # runner root (PR #107 reviewer cross-cutting observation).
         shell: bash
         run: |
           case "${{ matrix.os }}" in
@@ -122,6 +125,10 @@ jobs:
               ;;
             windows-latest)
               echo "path=$USERPROFILE/.cache/atlas-mem0g" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::Unrecognized matrix.os '${{ matrix.os }}' — refusing to emit empty model-cache-path (would cause actions/cache to cache the runner root)"
+              exit 1
               ;;
           esac
 
@@ -172,7 +179,8 @@ jobs:
         # paths are exercised.
         #
         # V1 (lancedb_windows_behaviour): Windows-only via cfg gate;
-        #     Linux + macOS legs report 0 tests run for this binary.
+        #     Linux + macOS legs report 1 sentinel test
+        #     (windows_lance_behaviour_skipped_on_non_windows).
         # V2 (embedding_byte_equal_two_runs): all 3 OS via the
         #     ATLAS_MEM0G_EMBED_SMOKE_ENABLED gate. Cross-platform
         #     byte-equality assertion is the load-bearing claim.
@@ -180,21 +188,36 @@ jobs:
         #     prints the actual file size to stdout for artifact
         #     capture per leg.
         #
+        # PR #107 reviewer HIGH-1 fix: ATLAS_MEM0G_MODEL_CACHE_DIR is
+        # set to the actions/cache@v4-restored path so V2/V4 tests
+        # share the cached ~130 MB model file across runs. Without
+        # this env var, each test would call AtlasEmbedder::new with
+        # a fresh tempdir and re-download the model on every CI run
+        # (defeating the cache step's purpose; ~390 MB wasted per
+        # 3-OS matrix run + 3× the HF supply-chain attack window).
+        # The TOCTOU-free `read_and_verify` primitive still runs on
+        # cache hits, so the supply-chain contract is preserved.
+        #
         # Per the W18c plan-doc R-W18c-C1: cross-platform float
         # determinism is hard. If V2 fails on Windows, the operator
         # runbook §"Cross-platform fallback" documents the
         # event_uuid-only cache-key fallback. fail-fast: false at
         # the matrix level (above) means the failure does not mask
         # Linux + macOS PASS visibility.
+        env:
+          ATLAS_MEM0G_MODEL_CACHE_DIR: ${{ steps.model-cache-path.outputs.path }}
         shell: bash
         run: |
           set -o pipefail
           mkdir -p target
+          # `--include-ignored` runs all tests including #[ignore]-gated
+          # smokes (V2/V4). PR #107 reviewer MEDIUM-3 simplified from
+          # the redundant `--ignored --include-ignored` pair.
           cargo test -p atlas-mem0g --features lancedb-backend \
             --test embedding_determinism \
             --test embedder_size_measurement \
             --test lancedb_windows_behaviour \
-            -- --ignored --nocapture --include-ignored \
+            -- --nocapture --include-ignored \
             2>&1 | tee target/mem0g-v1v4-${{ matrix.os }}.log
 
       - name: Run bench capture (lancedb-backend OFF — placeholder mode)

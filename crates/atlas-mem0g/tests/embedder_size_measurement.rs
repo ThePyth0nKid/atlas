@@ -8,7 +8,7 @@
 //!
 //! The spike literature claimed `bge-small-en-v1.5` FP32 ONNX is
 //! ~130 MB. W18c Phase A confirmed at supply-chain-pin lift time:
-//! 133,093,490 bytes / 126.93 MB. This integration test asserts the
+//! 133,093,490 bytes / 126.93 MiB. This integration test asserts the
 //! claim against the *actual on-disk file* after `AtlasEmbedder::new`
 //! has run end-to-end (download + SHA-verify + cache), closing the
 //! "verify the assertion against the running system, not just the
@@ -70,8 +70,21 @@ fn fastembed_model_file_size_within_envelope() {
         return;
     }
 
-    let dir = tempfile::tempdir().expect("tempdir");
-    let model_cache = dir.path().to_path_buf();
+    // Resolve model cache dir: prefer ATLAS_MEM0G_MODEL_CACHE_DIR (set
+    // by `atlas-mem0g-smoke` to the path that `actions/cache@v4`
+    // restores) so CI hits the cache; fall back to per-test tempdir
+    // for local runs. PR #107 reviewer HIGH-1 — without this, every
+    // CI leg re-downloaded ~130 MB unnecessarily.
+    let _tmp = tempfile::tempdir().expect("tempdir");
+    let model_cache: std::path::PathBuf =
+        match std::env::var("ATLAS_MEM0G_MODEL_CACHE_DIR") {
+            Ok(p) if !p.is_empty() => {
+                let pb = std::path::PathBuf::from(p);
+                std::fs::create_dir_all(&pb).expect("create persistent model cache dir");
+                pb
+            }
+            _ => _tmp.path().to_path_buf(),
+        };
 
     // Trigger the full download + SHA-verify + cache path via
     // AtlasEmbedder::new. We don't need the embedder for this test;
@@ -88,8 +101,9 @@ fn fastembed_model_file_size_within_envelope() {
     let actual_size = metadata.len();
 
     // Print to stdout for CI artifact capture across the 3-OS matrix.
-    // `atlas-mem0g-smoke` workflow tees test output to `mem0g-bench.log`
-    // so this line is preserved as evidence per leg.
+    // `atlas-mem0g-smoke` workflow tees the V1-V4 step output to
+    // `target/mem0g-v1v4-${matrix.os}.log` so this line is preserved
+    // as evidence per leg.
     println!(
         "V4_MEASURE os={} model_file=bge-small-en-v1.5.onnx bytes={} mib={:.2}",
         std::env::consts::OS,

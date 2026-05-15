@@ -141,6 +141,20 @@ use crate::Mem0gResult;
 
 // ---------------------------------------------------------------------------
 // Compiled-in supply-chain pins (ADR §4 sub-decision #2)
+//
+// LOAD-BEARING INVARIANT (PR #107 security-reviewer LOW-1):
+// All Atlas supply-chain pin constants (HF_REVISION_SHA, ONNX_SHA256,
+// MODEL_URL, the four TOKENIZER_*_SHA256 + TOKENIZER_*_URL pairs)
+// MUST remain declared in THIS file (`crates/atlas-mem0g/src/embedder.rs`).
+// The `atlas-mem0g-smoke` GitHub Actions workflow's per-OS
+// `actions/cache@v4` cache-key is bound to `hashFiles('crates/atlas-mem0g/src/embedder.rs')`
+// — moving any pin constant to a sibling module (e.g. supply_chain.rs)
+// silently stops the cache-key from invalidating on that constant's
+// rotation, which means a pin rotation could land while the previous
+// model bytes stay cached on CI runners. If a future refactor moves
+// pins to another module, that workflow's cache-key MUST be updated
+// in the same commit (preferably to a glob covering all sources of
+// pin constants).
 // ---------------------------------------------------------------------------
 
 /// HuggingFace Git revision SHA of `BAAI/bge-small-en-v1.5` at the
@@ -152,7 +166,7 @@ use crate::Mem0gResult;
 pub const HF_REVISION_SHA: &str = "5c38ec7c405ec4b44b94cc5a9bb96e735b38267a";
 
 /// SHA-256 of `model.onnx` for `bge-small-en-v1.5` (FP32 / 133,093,490
-/// bytes / ~126.93 MB; matches spike §3.4 expected envelope).
+/// bytes / ~126.93 MiB; matches spike §3.4 expected envelope).
 ///
 /// Resolved 2026-05-15 via `tools/w18c-phase-a-resolve.sh` (W18c
 /// Phase A). The download-with-verification path fails closed on
