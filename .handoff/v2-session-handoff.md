@@ -214,7 +214,7 @@ Parent-led shipping operations executed post-merge per W19 plan-doc step 7-9:
 |---|---|
 | Signed tag `v2.0.0-beta.1` pushed | SHA `81d363e58eb9ec6b5234d1f4c4c091683e754a17`; `git verify-tag` Good Ed25519 (`nelson@ultranova.io`, fingerprint `SHA256:qq/VVJYpsgEdeQSLqU0QS/gKn6ohXJHio+VkzVX+4Zg`) |
 | GitHub Release created | https://github.com/ThePyth0nKid/atlas/releases/tag/v2.0.0-beta.1 (prerelease, notes from `docs/V2-BETA-1-RELEASE-NOTES.md`) |
-| wasm-publish.yml auto-triggered | All steps green: Publish to npm ✓ + Verify npm publish landed ✓ + Upload tarballs to GitHub Release backup channel ✓ |
+| wasm-publish.yml auto-triggered | All steps green: Publish to npm ✓ + Verify npm publish landed ✓ + Upload tarballs to GitHub Release backup channel ✓ (run-id `25919934805`) |
 | npm registry verification | `@atlas-trust/verify-wasm@2.0.0-beta.1` LIVE; dist-tags `latest = 2.0.0-beta.1`, `node = 2.0.0-beta.1` (W11 dual-publish race-fix validated 2nd time end-to-end) |
 | Sigstore Build L3 provenance | Attestations ✓ + signatures ✓; shasum `60d9160d43e3e4de89a236b40ee584522b020c56` |
 

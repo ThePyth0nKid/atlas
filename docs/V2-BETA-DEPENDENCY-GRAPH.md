@@ -62,7 +62,7 @@ graph TD
 
     W18b --> W18cA[W18c Phase A ✓ SHIPPED<br/>Mem0g supply-chain constants lifted<br/>9 compile-in pins BAAI/bge-small-en-v1.5 @ 5c38ec7c<br/>0 CRITICAL / 0 HIGH / 1 MEDIUM / 3-4 LOWs all in-commit<br/>embedder still fail-closed pending Phase B]
 
-    W18cA --> W19[W19: v2.0.0-beta.1 ship ✓ SHIPPED<br/>signed tag 81d363e Good Ed25519<br/>GitHub Release prerelease<br/>npm latest = 2.0.0-beta.1<br/>Sigstore Build L3 provenance attached<br/>W11 race-fix validated 2nd time end-to-end<br/>0 CRITICAL / 1 HIGH / 3 MEDIUM / 1 LOW PR #102 + 6/6 PASS PR #103]
+    W18cA --> W19[W19: v2.0.0-beta.1 ship ✓ SHIPPED<br/>signed tag 81d363e Good Ed25519<br/>GitHub Release prerelease<br/>npm latest = 2.0.0-beta.1<br/>Sigstore Build L3 provenance attached<br/>W11 race-fix validated 2nd time end-to-end; wasm-publish run-id 25919934805<br/>0 CRITICAL / 1 HIGH / 3 MEDIUM / 1 LOW PR #102 + 6/6 PASS PR #103]
 
     W18cA --> W18cB[W18c Phase B: fastembed wiring<br/>try_new_from_user_defined using 9 lifted pins<br/>activates Layer 3 operational mode<br/>~1 session agent-only<br/>POST-v2.0.0-beta.1-LIVE primary welle<br/>ADR-Atlas-013 reserved]
 

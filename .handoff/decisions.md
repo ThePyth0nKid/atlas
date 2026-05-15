@@ -447,7 +447,7 @@
   - Signed tag `v2.0.0-beta.1` SHA: `81d363e58eb9ec6b5234d1f4c4c091683e754a17`
   - `git verify-tag v2.0.0-beta.1`: **Good Ed25519** (`nelson@ultranova.io`, fingerprint `SHA256:qq/VVJYpsgEdeQSLqU0QS/gKn6ohXJHio+VkzVX+4Zg`)
   - GitHub Release URL: https://github.com/ThePyth0nKid/atlas/releases/tag/v2.0.0-beta.1 (prerelease flag)
-  - wasm-publish.yml run: all steps green (Publish to npm ✓ + Verify npm publish landed ✓ + Upload tarballs to GitHub Release backup channel ✓)
+  - wasm-publish.yml run: all steps green (Publish to npm ✓ + Verify npm publish landed ✓ + Upload tarballs to GitHub Release backup channel ✓) (run-id `25919934805`)
   - npm registry: `@atlas-trust/verify-wasm@2.0.0-beta.1` LIVE; dist-tags `latest = 2.0.0-beta.1`, `node = 2.0.0-beta.1`
   - Sigstore Build L3 provenance: attestations ✓ + signatures ✓; shasum `60d9160d43e3e4de89a236b40ee584522b020c56`
 - **Implementation posture:** Layer 1 verifier carries forward unchanged from V2-α-α.1 (byte-pin preserved). Layer 2 ArcadeDB OPERATIONAL (W17a trait + W17b driver + W17c CI/bench). Layer 3 Mem0g **SCAFFOLD-SHIPPED with W18c Phase A supply-chain pins lifted** (BAAI/bge-small-en-v1.5 @ `5c38ec7c…`, 9 compile-in pins); `AtlasEmbedder::new` still fails closed (`Mem0gError::Embedder("supply-chain gate: …")`) pending W18c Phase B `try_new_from_user_defined` wiring; `/api/atlas/semantic-search` Read-API returns 501 stub until Phase B activates real init. The fail-closed posture is HONESTLY documented in release notes — V2-β-1 LIVE does NOT promise Layer 3 operational mode.
