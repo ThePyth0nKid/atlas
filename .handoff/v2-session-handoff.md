@@ -49,7 +49,7 @@ bash tools/run-arcadedb-smoke-local.sh                    # → cross-backend + 
 npm view @atlas-trust/verify-wasm@2.0.0-beta.1 dist-tags   # → latest = 2.0.0-beta.1, node = 2.0.0-beta.1
 ```
 
-If any check fails, STOP and investigate before starting W18c Phase B work. Atlas Standing Protocol Lesson #2: *"When in doubt, RUN the code."*
+If any check fails, STOP and investigate before starting W18c Phase C or Phase D work. Atlas Standing Protocol Lesson #2: *"When in doubt, RUN the code."*
 
 ### W19 retrospective — v2.0.0-beta.1 LIVE end-to-end (SHIPPED 2026-05-15)
 
