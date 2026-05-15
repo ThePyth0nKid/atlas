@@ -1,6 +1,6 @@
 # V2-β Welle 18c — Plan-Doc (Mem0g operational activation — parallel-track to W19)
 
-> **Status:** DRAFT 2026-05-15. Awaiting parallel-track dispatch.
+> **Status:** Phase A SHIPPED 2026-05-15 (Nelson HF resolve `5c38ec7c…` via `tools/w18c-phase-a-resolve.sh` + agent constant-lift; 5 hash digests + 4 URLs = 9 compile-in pins; W18b gatekeeper test retired; embedder still fails-closed pending Phase B). Phase B-D pending dispatch.
 > **Welle:** W18c (V2-β parallel-track, NOT in numbered phase sequence). Pre-V2-β-1-ship-OPERATIONAL blocker; NOT W19 ship gate.
 > **Orchestration:** SEMI-MANUAL (Phase A = Nelson HuggingFace verification, ~30 min Nelson + ~10 min agent) + SERIAL subagent (Phase B-D = engineering, ~3-4 sessions).
 > **Driving decisions:** `DECISION-ARCH-W18b` (W18b shipped scaffold with `TODO_W18B_NELSON_VERIFY_*` placeholders + fail-closed `AtlasEmbedder::new`); ADR-Atlas-012 §4 sub-decision #2 (supply-chain controls — three Atlas-source-pinned `const` values); spike §12 verification gaps V1-V4 (LanceDB Windows behaviour + fastembed-rs cross-platform determinism + Lance v2.2 `_deletion_files` + model size).

@@ -17,7 +17,22 @@ The v1.0 public-API surface contract is documented in
 
 ## [Unreleased]
 
-**V2-β Phase 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 13.5 + 13.6 all landed on master 2026-05-13 → 2026-05-15 — `v2.0.0-beta.1` candidate.** Phase 13.6 pre-stages the **W19 v2.0.0-beta.1 ship convergence plan-doc** + the **W18c parallel-track plan-doc** as master-resident handoff artifacts (analog the W18 plan-doc pattern that enabled clean W18b dispatch). Next welle: W19 ship.
+**V2-β Phase 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 13.5 + 13.6 + W18c-A all landed on master 2026-05-13 → 2026-05-15 — `v2.0.0-beta.1` candidate.** W18c Phase A (supply-chain constant lift) clears the W18b `TODO_W18B_NELSON_VERIFY_*` placeholders against `BAAI/bge-small-en-v1.5` at HF revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`; the embedder still fails closed pending W18c Phase B `try_new_from_user_defined` wiring. Next welle: W18c Phase B OR W19 ship convergence (parallel-tracks; sequencing per parent).
+
+### Changed — V2-β Welle 18c Phase A (Mem0g supply-chain constants lifted, 2026-05-15)
+
+- **MODIFY `crates/atlas-mem0g/src/embedder.rs`** — replaced three W18b `TODO_W18B_NELSON_VERIFY_*` placeholders with real values resolved against HuggingFace `BAAI/bge-small-en-v1.5` at revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`:
+  - `HF_REVISION_SHA` — 40-char Git SHA-1 hex digest pinning the model-card version.
+  - `ONNX_SHA256` — 64-char SHA-256 of `model.onnx` (FP32, 133,093,490 bytes / 126.93 MB; matches spike §3.4 expected envelope as W18c V4 verification).
+  - `MODEL_URL` — full HuggingFace LFS URL embedding the revision SHA in path; TLS-pinned via Atlas's `https_only(true)` reqwest configuration.
+- **ADD three Phase-B-prep constants in same file** — `TOKENIZER_JSON_SHA256` / `CONFIG_JSON_SHA256` / `SPECIAL_TOKENS_MAP_SHA256` (64-char SHA-256 each, consumed by W18c Phase B `fastembed::TextEmbedding::try_new_from_user_defined` wiring) plus matching `TOKENIZER_JSON_URL` / `CONFIG_JSON_URL` / `SPECIAL_TOKENS_MAP_URL` (revision-pinned huggingface.co LFS URLs). Atomic lift across all 5 hash digests (1 × SHA-1 + 4 × SHA-256) + 4 URLs = 9 compile-in pins.
+- **`_STRUCTURAL_PIN_CHECK` const block extended** to assert non-emptiness of all nine compile-in pins.
+- **Test `pins_are_placeholder_until_nelson_verifies` retired** (W18b gatekeeper purpose served); **`pins_well_formed_after_lift` upgraded** to unconditional structural enforcement across all 5 hash digests + 4 URLs (length + lowercase-hex + `https://huggingface.co/` origin + revision-SHA-in-path invariants). The W18b `is_placeholder` early-return is removed; any future refactor that reintroduces placeholder strings trips the assertions at test time.
+- **`pins_are_non_empty` test extended** to cover all 9 pin constants.
+- **AtlasEmbedder::new docstring + error-message refresh** — replaced "Pre-merge resume guide (Nelson)" with "W18c Phase B resume guide (engineering)" pointing at `.handoff/v2-beta-welle-18c-plan.md` Phase B; the `Mem0gError::Embedder("supply-chain gate: …")` return text now references Phase A complete / Phase B pending posture. Fail-closed semantics unchanged — the embedder still refuses to construct until Phase B wiring lands.
+- **NEW `tools/w18c-phase-a-resolve.sh`** (~80 lines) — auditable helper script that resolved the six values: fetches HF API revision SHA, downloads + sha256sums the ONNX file, downloads + sha256sums the 3 tokenizer files, prints all values + ONNX file-size for V4 spike-§12 verification. Re-runnable for future revision rotations; deterministic-by-revision-SHA.
+- **Module-level docstring refresh** — `## TODO(W18b-NELSON-VERIFY)` section replaced with `## W18c Phase A — supply-chain constants lifted (2026-05-15)` documenting the resolution audit trail + spike §3.4 envelope match + W18c Phase B remaining-gate clarification.
+- **Atlas-web-playwright trigger:** this PR touches `.handoff/v2-beta-welle-18c-plan.md` (status-note for Phase A SHIPPED) to satisfy the path-filter required-check per Lesson #11.
 
 ### Added — V2-β Phase 13.6 (handoff-prep — W19 + W18c plan-docs master-resident, 2026-05-15)
 
