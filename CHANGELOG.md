@@ -17,7 +17,14 @@ The v1.0 public-API surface contract is documented in
 
 ## [Unreleased]
 
-**V2-β Phase 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 13.5 + 13.6 + W18c-A all landed on master 2026-05-13 → 2026-05-15 — `v2.0.0-beta.1` candidate.** W18c Phase A (supply-chain constant lift) clears the W18b `TODO_W18B_NELSON_VERIFY_*` placeholders against `BAAI/bge-small-en-v1.5` at HF revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`; the embedder still fails closed pending W18c Phase B `try_new_from_user_defined` wiring. Next welle: W18c Phase B OR W19 ship convergence (parallel-tracks; sequencing per parent).
+**V2-β Phase 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 13.5 + 13.6 + W18c-A + 14.5 all landed on master 2026-05-13 → 2026-05-15 — `v2.0.0-beta.1` candidate.** Phase 14.5 (THIS PR) consolidates the W18c Phase A ship into cross-doc state (handoff §0z6 + decisions `DECISION-ARCH-W18c-A` + master-plan §6 status flip). The embedder still fails closed pending W18c Phase B `try_new_from_user_defined` wiring; supply-chain pins are lifted but the wiring gate is the only remaining pre-operational barrier. Next welle: W19 v2.0.0-beta.1 ship convergence (recommended) OR W18c Phase B (engineering-pipeline choice).
+
+### Docs — V2-β Phase 14.5 (W18c Phase A consolidation, 2026-05-15)
+
+- **MODIFY `.handoff/v2-session-handoff.md`** — NEW §0z6 W18c Phase A SHIPPED narrative (analog §0z5 structure: what landed, reviewer-dispatch outcome aggregate, fix-commit on top of initial, what's next); §0-NEXT 5-min-snapshot bullet refresh ("V2-β Phase 0-14.5 all SHIPPED" + Layer 3 supply-chain pins status flip from "placeholder" to "lifted"); active-welle line refresh ("Next welle: W19 v2.0.0-beta.1 ship convergence OR W18c Phase B fastembed wiring").
+- **MODIFY `.handoff/decisions.md`** — NEW `DECISION-ARCH-W18c-A` entry (28th decision; documents the 9-pin atomic lift, reviewer-dispatch outcome 0 CRITICAL / 0 HIGH / 1 overlapping MEDIUM / 3-4 overlapping LOWs all in-commit-fixed, audit trail via `tools/w18c-phase-a-resolve.sh`, ADR-Atlas-013 still reserved for W18c Phase B/C/D design amendments).
+- **MODIFY `docs/V2-MASTER-PLAN.md`** — §6 Welle Decomposition status row updates: Phase 13.6 SHIPPED row (was: queued); Phase 14 W18c-A SHIPPED row (NEW; supply-chain pins lifted, embedder still fails-closed pending Phase B); Phase 14.5 SHIPPED row (THIS PR — consolidation); "Phase 14 next" → "Phase 14 partially complete (W18c-A SHIPPED)"; "Next welle" section refreshed: W19 ship convergence remains primary, W18c Phase B alternate engineering-pipeline path.
+- **Strategic rationale:** Phase 14.5 mirrors the Phase 12.5 / 13.5 / 13.6 pattern. Cross-doc state stays consistent so a fresh agent entering at any of `.handoff/v2-session-handoff.md` / `decisions.md` / `V2-MASTER-PLAN.md` sees the same current-state snapshot. Code touched: zero (this is administrative cross-doc consolidation; CI risk LOW; reversibility HIGH). Atlas-web-playwright triggered via `.handoff/**` doc-touch per Lesson #11.
 
 ### Changed — V2-β Welle 18c Phase A (Mem0g supply-chain constants lifted, 2026-05-15)
 

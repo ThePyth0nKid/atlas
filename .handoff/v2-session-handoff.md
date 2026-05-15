@@ -1,12 +1,12 @@
-# Atlas V2 — Session Handoff (V2-α SHIPPED + V2-β Phase 0–13.6 SHIPPED, v2.0.0-alpha.2 LIVE)
+# Atlas V2 — Session Handoff (V2-α SHIPPED + V2-β Phase 0–14.5 SHIPPED, v2.0.0-alpha.2 LIVE)
 
-> **🎯 FRESH-AGENT BOOTSTRAP DOC.** **READ §0-NEXT FIRST** (2026-05-14-after next-session entry — 5-min snapshot + **W19 v2.0.0-beta.1 ship convergence** framing + W18c parallel-track items + Nelson-only items). Then §0z5 (Phase 13 W18b Mem0g implementation SHIPPED narrative, 2026-05-14), §0z4 (Phase 12 W18 Phase A Mem0g design SHIPPED narrative, 2026-05-15), §0z3 (Phase 11 W17c SHIPPED narrative, 2026-05-14 late-day), §0z2 (Phase 10 W17b SHIPPED narrative, 2026-05-14), §0 "Fresh-Context Onboarding", §0z (V2-β Phase 0–9.5 SHIPPED, 2026-05-13), §0-NOW (HISTORICAL: 2026-05-14 Docker-restart breakpoint resume), §0a–§0d (Phase 1–4 strategic-iteration SHIPPED, historical). Then **`docs/V2-MASTER-PLAN.md`** + **`docs/V2-BETA-ORCHESTRATION-PLAN.md`** + **`docs/V2-BETA-DEPENDENCY-GRAPH.md`** + **`docs/V2-BETA-MEM0G-SPIKE.md`** + **`docs/ADR/ADR-Atlas-012-mem0g-layer3-design.md`**. Optional: **`.handoff/v2-master-vision-v1.md`** + **`.handoff/decisions.md`** (27 explicit decisions).
+> **🎯 FRESH-AGENT BOOTSTRAP DOC.** **READ §0-NEXT FIRST** (2026-05-15-after next-session entry — 5-min snapshot + **W19 v2.0.0-beta.1 ship OR W18c Phase B fastembed wiring** as primary/alternate paths post-Phase-A + Nelson-only items). Then §0z6 (Phase 14 W18c Phase A supply-chain constants lifted SHIPPED narrative, 2026-05-15), §0z5 (Phase 13 W18b Mem0g implementation SHIPPED narrative, 2026-05-14), §0z4 (Phase 12 W18 Phase A Mem0g design SHIPPED narrative, 2026-05-15), §0z3 (Phase 11 W17c SHIPPED narrative, 2026-05-14 late-day), §0z2 (Phase 10 W17b SHIPPED narrative, 2026-05-14), §0 "Fresh-Context Onboarding", §0z (V2-β Phase 0–9.5 SHIPPED, 2026-05-13), §0-NOW (HISTORICAL: 2026-05-14 Docker-restart breakpoint resume), §0a–§0d (Phase 1–4 strategic-iteration SHIPPED, historical). Then **`docs/V2-MASTER-PLAN.md`** + **`docs/V2-BETA-ORCHESTRATION-PLAN.md`** + **`docs/V2-BETA-DEPENDENCY-GRAPH.md`** + **`docs/V2-BETA-MEM0G-SPIKE.md`** + **`docs/ADR/ADR-Atlas-012-mem0g-layer3-design.md`**. Optional: **`.handoff/v2-master-vision-v1.md`** + **`.handoff/decisions.md`** (28 explicit decisions).
 
-**Erstellt:** 2026-05-12. **V2-α-α.1 SHIPPED:** 2026-05-13 (8 Welles). **V2-β Phase 0–9.5 SHIPPED:** 2026-05-13 (18 PRs merged: #67-#86). **V2-β Phase 10-counsel + 10-cleanup SHIPPED:** 2026-05-14 (PRs #87/#88). **Phase 10-breakpoint SHIPPED:** 2026-05-14 (PR #89). **Phase 10 (W17b) SHIPPED:** 2026-05-14 (PR #90 `d216844`). **Phase 10.5 SHIPPED:** 2026-05-14 (PR #91 `b02ef2a`). **Phase 11 (W17c) SHIPPED:** 2026-05-14 (PR #92 `61ef036`). **Phase 11.5 SHIPPED:** 2026-05-14 (PR #93 `8bbc729`). **Next-session handoff prep SHIPPED:** 2026-05-14 (PR #94 `c16199b`). **Phase 12 (W18 Phase A Mem0g design) SHIPPED:** 2026-05-15 (PR #95 `3f228be`). **Phase 12.5 SHIPPED:** 2026-05-15 (PR #96 `08b31dc`). **Phase 13 (W18b Mem0g implementation) SHIPPED:** 2026-05-14 (PR #97 `2f2238b`). **Phase 13.5 SHIPPED:** 2026-05-15 (PR #98 `578f17f`). **Phase 13.6 SHIPPED:** 2026-05-15 (THIS PR — handoff-prep with W19 + W18c plan-docs master-resident). **Status:** v2.0.0-alpha.2 LIVE on master + GitHub + npm. Master HEAD post-Phase-13.5 contains: W18b NEW workspace member crate `crates/atlas-mem0g/` (~2300 LOC, 8 ADR sub-decisions implemented as W17a-pattern Phase-A-scaffold with production-shape trait + 7-step secure-delete protocol + supply-chain verification + `embedding_erased` Layer-1 dispatch + state extension + Read-API endpoint + atlas-mem0g-smoke CI workflow + plan-doc) + this consolidation PR's CHANGELOG + master-plan §6 + decisions + orchestration + dep-graph + handoff updates. **Reviewer-dispatch:** parallel `code-reviewer` + `security-reviewer` per Lesson #8 → 0 CRITICAL + 4 unique HIGH + 6 MEDIUM, all applied in-commit (fix-commit `717922c` on top of initial `80f6957`). **Byte-pin reproduces:** `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` unchanged after W18b ship; 578 tests pass workspace-wide; clippy `-D warnings` zero warnings; all 7 CI checks green incl. NEW `atlas-mem0g-smoke`. **Scaffold posture:** LanceDB ANN/search body fill-in deferred to W18c follow-on welle (closes spike §12 V1-V4 verification gaps); supply-chain pins (`HF_REVISION_SHA` + `ONNX_SHA256` + `MODEL_URL`) ship as fail-closed `TODO_W18B_NELSON_VERIFY_*` placeholders pending Nelson pre-V2-β-1-ship lift. **Was als nächstes:** **W19 v2.0.0-beta.1 ship convergence milestone** (workspace version bump + signed tag + GitHub Release + npm publish — see §0-NEXT). **Parallel-track W18c** (pre-V2-β-1-ship blocker, Nelson-led + engineering-led): Nelson supply-chain constant lift + fastembed `try_new_from_user_defined` wiring + 3 tokenizer-file pins + close V1-V4 verification gaps + lift LanceDB body stubs. Counsel-Engagement-Kickoff also parallel-track Nelson-led (per `DECISION-COUNSEL-1`).
+**Erstellt:** 2026-05-12. **V2-α-α.1 SHIPPED:** 2026-05-13 (8 Welles). **V2-β Phase 0–9.5 SHIPPED:** 2026-05-13 (18 PRs merged: #67-#86). **V2-β Phase 10-counsel + 10-cleanup SHIPPED:** 2026-05-14 (PRs #87/#88). **Phase 10-breakpoint SHIPPED:** 2026-05-14 (PR #89). **Phase 10 (W17b) SHIPPED:** 2026-05-14 (PR #90 `d216844`). **Phase 10.5 SHIPPED:** 2026-05-14 (PR #91 `b02ef2a`). **Phase 11 (W17c) SHIPPED:** 2026-05-14 (PR #92 `61ef036`). **Phase 11.5 SHIPPED:** 2026-05-14 (PR #93 `8bbc729`). **Next-session handoff prep SHIPPED:** 2026-05-14 (PR #94 `c16199b`). **Phase 12 (W18 Phase A Mem0g design) SHIPPED:** 2026-05-15 (PR #95 `3f228be`). **Phase 12.5 SHIPPED:** 2026-05-15 (PR #96 `08b31dc`). **Phase 13 (W18b Mem0g implementation) SHIPPED:** 2026-05-14 (PR #97 `2f2238b`). **Phase 13.5 SHIPPED:** 2026-05-15 (PR #98 `578f17f`). **Phase 13.6 SHIPPED:** 2026-05-15 (PR #99 `11dcae8` — handoff-prep with W19 + W18c plan-docs master-resident). **Phase 14 (W18c Phase A — Mem0g supply-chain constants lifted) SHIPPED:** 2026-05-15 (PR #100 `28700ae`). **Phase 14.5 SHIPPED:** 2026-05-15 (THIS PR — Phase-14 consolidation: CHANGELOG + master-plan §6 + decisions `DECISION-ARCH-W18c-A` + handoff §0z6 + §0-NEXT refresh). **Status:** v2.0.0-alpha.2 LIVE on master + GitHub + npm. Master HEAD post-Phase-14.5 contains: W18b NEW workspace member crate `crates/atlas-mem0g/` (~2300 LOC, 8 ADR sub-decisions implemented as W17a-pattern Phase-A-scaffold with production-shape trait + 7-step secure-delete protocol + supply-chain verification + `embedding_erased` Layer-1 dispatch + state extension + Read-API endpoint + atlas-mem0g-smoke CI workflow + plan-doc) + **W18c Phase A supply-chain constants LIFTED** (9 compile-in pins — 5 hash digests + 4 URLs — against HuggingFace `BAAI/bge-small-en-v1.5` @ revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`; embedder still fails-closed pending W18c Phase B `try_new_from_user_defined` wiring) + this consolidation PR's CHANGELOG + master-plan §6 + decisions + handoff updates. **Reviewer-dispatch (W18b):** parallel `code-reviewer` + `security-reviewer` per Lesson #8 → 0 CRITICAL + 4 unique HIGH + 6 MEDIUM, all applied in-commit (fix-commit `717922c` on top of initial `80f6957`). **Reviewer-dispatch (W18c Phase A):** parallel reviewers → 0 CRITICAL + 0 HIGH + 1 overlapping MEDIUM (`python` → `python3` portability) + 3-4 overlapping LOWs, all applied in-commit (fix-commit `a66728e` on top of initial `5946a1b`). **Byte-pin reproduces:** `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` unchanged after W18b + W18c-A ships; 577 tests pass workspace-wide (delta -1 vs W18b 578: retired `pins_are_placeholder_until_nelson_verifies` gatekeeper); clippy `-D warnings` zero warnings; all triggered CI checks green incl. NEW `atlas-mem0g-smoke`. **Scaffold posture:** LanceDB ANN/search body fill-in still deferred to W18c Phase D follow-on welle (closes spike §12 V1-V4 verification gaps); supply-chain pins are now **lifted** but the fastembed `try_new_from_user_defined` wiring remains the only pre-operational gate (W18c Phase B). **Was als nächstes:** **W19 v2.0.0-beta.1 ship convergence milestone** (primary; workspace version bump + signed tag + GitHub Release + npm publish — see §0-NEXT) **OR W18c Phase B fastembed wiring** (alternate engineering-pipeline path; ~1 session agent-only — replaces `AtlasEmbedder::new` fail-closed gate with real init using the 9 Phase-A-lifted pins). W18c Phase C (V1-V4 cross-platform CI matrix) + Phase D (LanceDB body fill-in) follow Phase B. Counsel-Engagement-Kickoff continues parallel-track Nelson-led (per `DECISION-COUNSEL-1`).
 
 ---
 
-## 0-NEXT. 2026-05-15+-after next-session entry — W19 v2.0.0-beta.1 ship convergence + W18c parallel-track
+## 0-NEXT. 2026-05-15+-after-Phase-14.5 next-session entry — W19 v2.0.0-beta.1 ship OR W18c Phase B fastembed wiring
 
 > **Read this section first when resuming Atlas work after 2026-05-15.** Brings a fresh agent from cold context to actionable W19 ship work in <10 min. The W18c parallel-track items (Nelson supply-chain constant lift + LanceDB body fill-in) are pre-V2-β-1-ship-OPERATIONAL blockers but NOT W19-ship-gate.
 >
@@ -14,12 +14,12 @@
 
 ### 5-min snapshot
 
-- **Master HEAD:** post-Phase-13.5 (PR #97 W18b Mem0g implementation merged as `2f2238b`; THIS Phase 13.5 consolidation PR's merge-commit follows). Branch protections active; admin-merge pre-authorised in `.claude/settings.local.json`.
-- **V2 status:** v2.0.0-alpha.2 LIVE end-to-end. V2-β Phase 0–13.5 all SHIPPED. **Layer 2 ArcadeDB operational** (W17a trait + W17b driver + W17c CI/bench). **Layer 3 Mem0g implemented as W17a-pattern Phase-A-scaffold** (W18 Phase A design locked 8 binding ADR-012 sub-decisions; W18b implementation shipped production-shape trait + 7-step secure-delete protocol + supply-chain verification path + `embedding_erased` dispatch + state extension + Read-API endpoint + atlas-mem0g-smoke CI). 27 decisions logged in `.handoff/decisions.md`. 12 ADRs total; ADR-Atlas-012 SHIPPED, ADR-Atlas-013 reserved for W18c implementation amendments.
-- **CI required-checks for any new PR:** (1) `Verify trust-root-modifying commits` — SSH-Ed25519 enforced; (2) `atlas-web-playwright` — path-filter auto-triggers on `.handoff/**` + `.github/workflows/**` + `apps/atlas-web/**` + `crates/atlas-{signer,trust-core,verify-wasm}/**` + `packages/*/**`. **Crates-only PRs need a `.handoff/**` doc-touch to trigger playwright** (Atlas Lesson #11). `atlas-arcadedb-smoke` + `atlas-mem0g-smoke` workflows are NOT required-checks yet (promote when ≥3 unrelated PR runs stable). All 7 CI checks (4 always-on + 3 path-gated) GREEN on PR #97.
-- **Active welle:** **W19 v2.0.0-beta.1 ship convergence milestone.** Workspace version bump from `2.0.0-alpha.2` to `2.0.0-beta.1`; signed tag `v2.0.0-beta.1` + GitHub Release + npm publish `@atlas-trust/verify-wasm@2.0.0-beta.1`. Analog V2-α-α.2 ship pattern from W11 (PR #76).
-- **Parallel-track W18c (pre-V2-β-1-ship blocker, NOT engineering-pipeline-blocking):** (a) **Nelson supply-chain constant lift** — resolve real `HF_REVISION_SHA` + `ONNX_SHA256` + `MODEL_URL` from HuggingFace `BAAI/bge-small-en-v1.5`. Without this, `AtlasEmbedder::new` returns `Mem0gError::Embedder("supply-chain gate: ...")` unconditionally (fail-closed scaffold posture); (b) **fastembed `try_new_from_user_defined` wiring** — requires 3 additional tokenizer-file SHA-256 pins (tokenizer.json + config.json + special_tokens_map.json); (c) **close V1-V4 verification gaps** from spike §12 (LanceDB Windows behaviour + fastembed-rs cross-platform determinism CI matrix + Lance v2.2 `_deletion_files` semantics + model size measurement); (d) **lift LanceDB ANN/search body stubs** — currently `Mem0gError::Backend("not yet wired")`. ADR-Atlas-013 reserved.
-- **Blocked-on-Nelson (parallel, not engineering-pipeline-blocking):** Counsel-engagement firm selection + outreach (`.handoff/v2-counsel-engagement-scope.md` is RFP-ready; the `embedding_erased` audit-event payload is in counsel's review scope per ADR-Atlas-012 §5.4); `RULESET_VERIFY_TOKEN` PAT configuration per `docs/OPERATOR-RUNBOOK.md` §16 (cosmetic-only, does not block merges). **NEW: Supply-chain constant lift** for W18c (see parallel-track above).
+- **Master HEAD:** post-Phase-14.5 (PR #100 W18c Phase A merged as `28700ae`; THIS Phase 14.5 consolidation PR's merge-commit follows). Branch protections active; admin-merge pre-authorised in `.claude/settings.local.json`.
+- **V2 status:** v2.0.0-alpha.2 LIVE end-to-end. V2-β Phase 0–14.5 all SHIPPED. **Layer 2 ArcadeDB operational** (W17a trait + W17b driver + W17c CI/bench). **Layer 3 Mem0g implemented as W17a-pattern Phase-A-scaffold** + **supply-chain pins lifted via W18c Phase A** (9 compile-in pins against HuggingFace `BAAI/bge-small-en-v1.5` @ `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`; embedder still fails-closed pending W18c Phase B fastembed `try_new_from_user_defined` wiring). 28 decisions logged in `.handoff/decisions.md`. 12 ADRs total; ADR-Atlas-012 SHIPPED, ADR-Atlas-013 reserved for W18c Phase B-D implementation amendments.
+- **CI required-checks for any new PR:** (1) `Verify trust-root-modifying commits` — SSH-Ed25519 enforced; (2) `atlas-web-playwright` — path-filter auto-triggers on `.handoff/**` + `.github/workflows/**` + `apps/atlas-web/**` + `crates/atlas-{signer,trust-core,verify-wasm}/**` + `packages/*/**`. **Crates-only PRs need a `.handoff/**` doc-touch to trigger playwright** (Atlas Lesson #11). `atlas-arcadedb-smoke` + `atlas-mem0g-smoke` workflows are NOT required-checks yet (promote when ≥3 unrelated PR runs stable). All triggered CI checks GREEN on PR #100 (Phase A) — `mem0g-smoke` 1m11s, `atlas-web-playwright` 4m09s, `Verify trust-root` 6s.
+- **Active welle:** **W19 v2.0.0-beta.1 ship convergence milestone** (primary) OR **W18c Phase B fastembed wiring** (engineering-pipeline alternate). Both plan-docs master-resident + ready-to-dispatch. W19 is agent-only; W18c-B is also agent-only post-Phase-A. Sequencing decision parent-led.
+- **Phase A unblocked the W18c parallel-track (Nelson-led work complete):** 9 supply-chain pins resolved via `tools/w18c-phase-a-resolve.sh` (auditable helper, re-runnable for revision rotations). Remaining W18c Phase B-D items are ALL agent-only: (b) **fastembed `try_new_from_user_defined` wiring** — replaces `AtlasEmbedder::new` fail-closed gate with real init using the 9 Phase-A-lifted pins; (c) **close V1-V4 verification gaps** from spike §12 (cross-platform CI matrix Linux + Windows + macOS + Lance v2.2 `_deletion_files` + model size measurement); (d) **lift LanceDB ANN/search body stubs** — currently `Mem0gError::Backend("not yet wired")`. ADR-Atlas-013 still reserved.
+- **Blocked-on-Nelson (parallel, not engineering-pipeline-blocking):** Counsel-engagement firm selection + outreach (`.handoff/v2-counsel-engagement-scope.md` is RFP-ready; the `embedding_erased` audit-event payload is in counsel's review scope per ADR-Atlas-012 §5.4); `RULESET_VERIFY_TOKEN` PAT configuration per `docs/OPERATOR-RUNBOOK.md` §16 (cosmetic-only, does not block merges). **W18c Phase A supply-chain lift complete** (~30 min Nelson task done 2026-05-15) — no remaining Nelson-blocked engineering items in the immediate W18c pipeline.
 
 ### Pre-flight checklist (bash, run from repo root)
 
@@ -36,7 +36,7 @@ git log --oneline -6                                      # → top:
 #   8bbc729 docs(v2-beta/phase-11.5): consolidate W17c ... (#93)
 
 "/c/Program Files/GitHub CLI/gh.exe" pr list --state open --json number,title  # → only archive PRs #59/#61/#62
-/c/Users/nelso/.cargo/bin/cargo.exe test --workspace --quiet                   # → 578 tests green
+/c/Users/nelso/.cargo/bin/cargo.exe test --workspace --quiet                   # → 577 tests green (post-Phase-14.5; delta -1 vs W18b 578: retired pins_are_placeholder_until_nelson_verifies gatekeeper)
 /c/Users/nelso/.cargo/bin/cargo.exe clippy --workspace --no-deps -- -D warnings  # → 0 warnings
 git verify-tag v2.0.0-alpha.2                             # → Good ed25519 sig
 /c/Users/nelso/.cargo/bin/cargo.exe test -p atlas-projector --test backend_trait_conformance byte_pin --quiet  # → byte-pin reproduces
@@ -70,15 +70,16 @@ If any check fails, STOP and investigate before starting W19 work. Atlas Standin
 
 **W19 pre-conditions (all met as of Phase 13.5):**
 - W18b Mem0g scaffold operational ✓
+- W18c Phase A supply-chain constants lifted ✓ (NEW post-Phase-14.5; 9 compile-in pins)
 - Byte-pin reproducing through both backends ✓
 - All 7 CI checks green on master ✓
-- 578 tests pass workspace-wide ✓
+- 577 tests pass workspace-wide ✓ (post-Phase-14.5; delta -1 vs W18b 578: retired `pins_are_placeholder_until_nelson_verifies` gatekeeper)
 - Clippy `-D warnings` zero ✓
 
 **W19 does NOT need:**
-- W18c body fill-in (Layer 3 is scaffold-shipped; W18c is pre-V2-β-1-ship blocker on parallel track but doesn't change the ship event itself)
+- W18c Phase B/C/D body fill-in (Layer 3 is scaffold-shipped + supply-chain pins are now lifted; the remaining Phase B fastembed wiring is engineering-pipeline parallel-track to W19 but doesn't change the ship event itself)
 - Counsel sign-off (per `DECISION-COUNSEL-1` blocks **V2-β public materials**, not the `2.0.0-beta.1` tag itself — public materials defer to post-counsel-track)
-- Real supply-chain constants (fail-closed embedder posture is acceptable for beta tag; Layer 3 returns 501 stub until lifted, documented in Read-API)
+- W18c Phase B fastembed wiring (fail-closed embedder posture remains acceptable for beta tag even with supply-chain pins now lifted; Layer 3 still returns 501 stub until Phase B wires `try_new_from_user_defined`, documented in Read-API)
 
 ### W18c parallel-track framing (pre-V2-β-1-ship blocker, NOT W19 ship gate)
 
@@ -154,6 +155,74 @@ Numbered for cross-reference. Lessons #1-#9 from V2-β Phase 0-9.5. **Lessons #1
 - **W18c-R2 — LanceDB `cleanup_old_versions` Windows behaviour (MEDIUM).** **Verification gap V1**. Mitigation: 50-line Rust integration test on Windows CI runner before lifting body stubs.
 - **W18c-R3 — Real supply-chain constants drift over time (LOW with mitigation).** HuggingFace `BAAI/bge-small-en-v1.5` repo may receive new revisions; the pinned SHA may go stale. Mitigation: operator-runbook documents model rotation process; HIGH-3-fix gatekeeper test (`pins_are_placeholder_until_nelson_verifies`) + post-lift well-formedness companion test catch any partial-lift or accidental constant regression.
 - **W18c-R4 — fastembed `try_new_from_user_defined` API drift (LOW).** Atlas pins `fastembed = "=5.13.4"` exact-version; any minor/patch upgrade requires re-verification of `UserDefinedEmbeddingModel` constructor signature. Mitigation: exact-version pin makes drift explicit at every dep-lock change.
+
+---
+
+## 0z6. V2-β Phase 14 (W18c Phase A Mem0g supply-chain constants lifted) SHIPPED — 2026-05-15
+
+> **W18c Phase A SHIPPED narrative.** §0-NEXT above is the actionable next-session entry point (now W19-focused OR W18c-Phase-B-focused depending on engineering-pipeline choice); read this section if you need the W18c-Phase-A historical detail (what landed, parent-direct constant-lift posture, reviewer-dispatch outcome, fix-commit `a66728e`, demo-sketches doc kept separate scope). Phase 14 W18c-A closes the W18b deferred supply-chain-constant work; W18c Phase B-D remain queued as engineering-pipeline parallel-track to W19.
+
+### What landed in PR #100 (`28700ae`)
+
+Two commits squash-merged: initial `5946a1b` + reviewer fix-commit `a66728e`. ~345 net-additions across 4 files.
+
+| File | Status | LOC | Brief |
+|---|---|---|---|
+| `crates/atlas-mem0g/src/embedder.rs` | MODIFY | ~360 lines | Three W18b `TODO_W18B_NELSON_VERIFY_*` placeholders lifted to real values pinned to HuggingFace `BAAI/bge-small-en-v1.5` revision `5c38ec7c405ec4b44b94cc5a9bb96e735b38267a`. Three NEW Phase-B-prep tokenizer-file SHA-256 constants (`TOKENIZER_JSON_SHA256` + `CONFIG_JSON_SHA256` + `SPECIAL_TOKENS_MAP_SHA256`) + three NEW tokenizer URL constants (revision-pinned). `_STRUCTURAL_PIN_CHECK` extended to assert non-emptiness of all 9 compile-in pins (5 hash digests + 4 URLs). Test surface: `pins_are_placeholder_until_nelson_verifies` RETIRED (W18b gatekeeper purpose served); `pins_well_formed_after_lift` UPGRADED to unconditional enforcement (W18b `is_placeholder` early-return removed); `pins_are_non_empty` extended. `AtlasEmbedder::new` body UNCHANGED — still fail-closed pending Phase B `try_new_from_user_defined` wiring; error message + docstring refreshed to point at Phase B resume guide. |
+| `tools/w18c-phase-a-resolve.sh` | NEW | ~110 lines | Auditable helper script that resolved the 5 hash digest values (1 × SHA-1 + 4 × SHA-256) + ONNX file-size envelope check. Re-runnable for future revision rotations; deterministic-by-revision-SHA. Resolves `python3` first (falls back to `python`); validates every sha256sum output via inline `validate_sha256_hex` helper; uses `WORK_DIR` (not `TMPDIR`) per security-reviewer LOW-2; `d.get('sha', '')` hardening against HuggingFace API schema drift. |
+| `CHANGELOG.md` | MODIFY | +17 | `[Unreleased]` "Changed — V2-β Welle 18c Phase A" entry with full pin enumeration + ONNX file-size envelope match + test surface changes + fail-closed posture preservation. |
+| `.handoff/v2-beta-welle-18c-plan.md` | MODIFY | 2 | Status line flipped Phase A SHIPPED (9 compile-in pins; embedder still fails-closed pending Phase B). |
+
+### W18c Phase A reviewer-dispatch outcome
+
+Parallel `code-reviewer` + `security-reviewer` per Atlas Standing Protocol Lesson #8 (single message, 2 Agent calls). Both reviewers: **APPROVE** — 0 CRITICAL / 0 HIGH. Overlapping findings all fixed in-commit per Lesson #3 (fix-commit `a66728e` on top of initial `5946a1b`):
+
+| Severity | Code | Security | Unique | Disposition |
+|---|---|---|---|---|
+| CRITICAL | 0 | 0 | **0** | — |
+| HIGH | 0 | 0 | **0** | — |
+| MEDIUM | 1 | 1 | **1** (overlap on `python` → `python3` portability) | Applied in-commit |
+| LOW | 3 | 4 | several | Most applied in-commit; 2 LOWs deferred to W18c Phase B with rationale |
+
+**MEDIUM fix:** `tools/w18c-phase-a-resolve.sh` now resolves `python3` first, falls back to `python` if present, errors clearly if neither found. Honours `PYTHON_BIN` env override.
+
+**LOWs applied in-commit:**
+1. SHA-count off-by-one ("six SHAs" → actual "5 hash digests = 1 × SHA-1 + 4 × SHA-256") fixed in 4 doc locations (embedder.rs module docstring + Phase B header comment + `_STRUCTURAL_PIN_CHECK` doc-comment + CHANGELOG + welle-18c plan-doc Status line + PR description).
+2. `TMPDIR` env-var shadowing renamed to `WORK_DIR` throughout helper script.
+3. Missing sha256-output format validation in helper script — added `validate_sha256_hex` helper invoked after every `sha256sum | cut` capture.
+4. Stale "## Three compiled-in constants" module section header replaced with "## Compiled-in supply-chain pins (9 total: 5 hash digests + 4 URLs)" + extended enumerated bullet list.
+5. HuggingFace API `'sha'` field hardening via `d.get('sha', '')` plus enhanced error message naming schema-change as the likely cause.
+
+**LOWs deferred to W18c Phase B (engineering-pipeline-tracked):**
+- `AtlasEmbedder::new` pre-gate model download (currently triggers a 130 MB download then fails closed — inefficient but functionally correct; Phase B replaces the fail-closed return with `try_new_from_user_defined` so the download succeeds end-to-end).
+- ONNX file size compile-time assertion (currently documented as 133,093,490 bytes in docstring but not asserted in code — defensible as content-addressed SHA-256 is the real gate; Phase B could add an `ONNX_FILE_SIZE_BYTES` const + test assertion for defence-in-depth).
+
+### CI results post-merge
+
+All 3 triggered checks GREEN on master HEAD `28700ae`:
+- ✓ `Verify trust-root-modifying commits` (required, SSH-Ed25519, 6 s)
+- ✓ `atlas-web-playwright` (required, 4 min 9 s)
+- ✓ `mem0g-smoke` (NEW W18b CI workflow; not-yet-required-check, 1 min 11 s) — first live-infra validation of post-Phase-A Layer-3 code paths
+
+`atlas-arcadedb-smoke` + HSM workflows not triggered (path-filter scope). 577 tests pass workspace-wide (delta -1 vs handoff 578: retired `pins_are_placeholder_until_nelson_verifies`); clippy `-D warnings` zero warnings; byte-pin `8962c168…e013ac4` reproduces unchanged through both InMemoryBackend AND ArcadeDbBackend.
+
+### W18c Phase A posture preserved
+
+- **Trust property unchanged:** Layer 3 NEVER trust-authoritative; `AtlasEmbedder::new` body UNCHANGED at runtime level (still fails closed pending Phase B). No bypass path introduced.
+- **TLS pinning intact:** `reqwest::blocking::Client::builder().https_only(true)` semantics preserved; all 4 URLs are `https://huggingface.co/...` revision-pinned.
+- **Atomic-lift invariant intact:** `pins_well_formed_after_lift` enforces length + lowercase-hex + huggingface.co-origin + revision-SHA-in-path across all 9 pins; any single constant reverted to a placeholder fails the length or hex check.
+- **Compile-time backstop:** `_STRUCTURAL_PIN_CHECK` const-eval block prevents accidental blanking via refactor.
+
+### Demo-sketches doc kept separate scope (not in this PR)
+
+`.handoff/v2-demo-sketches.md` (~1283 lines, V2 marketing/strategy draft v0 covering 5 demo storyboards + landing-page hero selection + production requirements + 15 open Phase-2 critique questions) remains Untracked on master. Conceptually separate from supply-chain work; will land as its own doc-only PR if/when the strategy track is formally resumed.
+
+### What's next (Phase 14 + W18c Phase B-D)
+
+1. **W19 v2.0.0-beta.1 ship convergence milestone** — workspace version bump + signed tag + GitHub Release + npm publish (per §0-NEXT W19 framing). Plan-doc `.handoff/v2-beta-welle-19-plan.md` master-resident + ready-to-dispatch. Phase A completion makes the release-notes scaffold-posture disclosure stronger ("supply-chain pins verified, embedder wiring pending" vs "all placeholders").
+2. **W18c Phase B (fastembed wiring)** — engineering-pipeline parallel-track. Replaces `AtlasEmbedder::new` fail-closed gate with `fastembed::TextEmbedding::try_new_from_user_defined` using the 9 Phase-A-lifted pins. Plan-doc `.handoff/v2-beta-welle-18c-plan.md` Phase B section. ~1 session.
+3. **W18c Phase C (V1-V4 verification gap closure)** — cross-platform CI matrix Linux + Windows + macOS for fastembed-rs determinism, Lance v2.2 `_deletion_files` semantics, LanceDB Windows `cleanup_old_versions` behaviour. ~1 session.
+4. **W18c Phase D (LanceDB ANN/search body fill-in)** — replaces `Mem0gError::Backend("not yet wired")` placeholders with `tokio::task::spawn_blocking`-wrapped LanceDB calls per spike §7. ~1-2 sessions.
 
 ---
 
