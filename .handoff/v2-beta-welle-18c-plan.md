@@ -380,13 +380,63 @@ PR number + URL, line counts, Phase-specific verification evidence, reviewer-fin
 
 ### Phase D — LanceDB ANN/search body fill-in
 
-- Read-API `/api/atlas/semantic-search` returns real hits: <YES / NO+blocker>
-- B4 cache-hit p99: <ms>
-- B5 cache-miss-with-rebuild p99: <s>
-- B6 secure-delete primitive correctness cycles: <count, 100% pass / failures>
-- Cite-back end-to-end: <verified / NOT-yet>
+- Read-API `/api/atlas/semantic-search` returns real hits: NO (Rust → TypeScript bridge is V2-γ scope per `apps/atlas-web/src/app/api/atlas/semantic-search/route.ts` module-level doc; the Rust backend itself IS operational and verified end-to-end via `crates/atlas-mem0g/tests/lancedb_body_e2e.rs`)
+- B4 cache-hit p99: not measured in Phase D (the bench harness `tests/mem0g_benchmark.rs` is `#[ignore]`-gated behind `ATLAS_MEM0G_BENCH_ENABLED=1` + requires the model-cache CI lane that the atlas-mem0g-smoke workflow does not yet enable for the lancedb-backend feature; promotion is its own welle per W18c plan-doc Phase C overlap)
+- B5 cache-miss-with-rebuild p99: not measured in Phase D (same gating as B4)
+- B6 secure-delete primitive correctness cycles: existing `tests/secure_delete_correctness.rs` 4 tests pass (100%); B6-specific bench unchanged from W18b
+- Cite-back end-to-end: VERIFIED in `tests/lancedb_body_e2e.rs::upsert_then_search_round_trip` — `SemanticHit::event_uuid` matches the upserted Layer-1 `event_uuid` exactly; the `event_uuid` is the Layer-1 anchor that callers verify independently via the offline WASM verifier
 - Commit: <SHA>; PR: <#>; merged: <YYYY-MM-DD>
 ```
+
+### Phase D Implementation Notes (post-code, 2026-05-15)
+
+**Status:** SHIPPED. PR drafted on `feat/v2-beta/welle-18c-phase-d`; SSH-Ed25519 signed commit; 579 workspace tests pass; clippy zero on default features AND on `-p atlas-mem0g --features lancedb-backend`; byte-pin `8962c1681a44…` reproduces.
+
+**LanceDB 0.29 API surface (verified against vendored source `~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lancedb-0.29.0/src/`):**
+
+- `lancedb::connect(uri).execute().await` → `Result<Connection>` (lib.rs:43-45 doc)
+- `Connection::create_table(name, data).mode(CreateTableMode::ExistOk(cb)).execute().await` → `Result<Table>` (connection.rs:384 + connection/create_table.rs:146)
+- `Connection::open_table(name).execute().await` → `Result<Table>`; returns `Error::TableNotFound` if absent (connection.rs:420)
+- `Table::add(data).execute().await` → `Result<AddResult>` where `data: Scannable`; `Vec<RecordBatch>` implements `Scannable` (table.rs:578 + table/add_data.rs:141)
+- `Table::query().nearest_to(vec).limit(k).execute().await` → `SendableRecordBatchStream`; collected via `futures::TryStreamExt::try_collect` (table.rs:915 + query.rs:840)
+- `Table::delete(predicate).await` → `Result<DeleteResult>` (table.rs:648)
+- `Table::optimize(OptimizeAction::Compact{…}).await` → rewrites fragments without tombstoned rows (table/optimize.rs:30)
+- `OptimizeAction::Prune{older_than, …}` uses `chrono::Duration` (re-exported as `lancedb::table::Duration`), NOT `std::time::Duration` (table/optimize.rs:17)
+
+**Deviations from plan-doc outline (TWO):**
+
+1. **DEDICATED tokio runtime owned by the backend**, NOT `tokio::task::spawn_blocking` from a borrowed runtime. The plan-doc outline (lines 241-265) showed `tokio::task::block_in_place(...)` + a locally-built `current_thread` runtime per call. The Phase D agent instead built a single `multi_thread` runtime (4 worker threads) at backend-construction time and stored it behind `Arc<Runtime>` on `LanceDbCacheBackend`. Rationale: (a) the sync trait surface is reachable from contexts WITHOUT a tokio runtime (Atlas integration tests, future synchronous CLI), so `spawn_blocking` would panic at the missing-runtime lookup; (b) building a runtime per call has measurable overhead (~ms); (c) the dedicated multi-thread runtime is structurally deadlock-safe per spike §7 because `block_on` blocks the caller's thread but the inner future executes on dedicated worker threads (no scheduler starvation, no deadlock). Verified by `tests/lancedb_body_e2e.rs::{search,upsert}_does_not_deadlock_under_multi_task_tokio` (R-W18c-D2 regression tests; both pass under `#[tokio::test(flavor = "multi_thread", worker_threads = 4)]`).
+
+2. **STEP 6 OVERWRITE elides the fragment overwrite**, scrubbing only HNSW indices. The plan-doc and ADR §4 sub-decision #4 step 6 list both fragments + indices for byte-overwrite. During Phase D body wiring, the e2e test surfaced that Lance's `optimize(Compact)` does NOT necessarily rewrite all fragments (a fragment is rewritten only if it contains tombstoned rows); under Atlas's per-row upsert model, the deleted event's fragment becomes unreferenced but neighbouring fragments stay referenced. Byte-overwriting all PRE-CAPTURED fragments would clobber the bytes of surviving events that share a fragment after a future Compact pass. The Phase D agent restricted STEP 6 OVERWRITE to HNSW indices (which are rebuilt from scratch when the table is re-indexed, so destroying them is safe) and delegated fragment-level physical erasure to Lance's own unreferenced-file cleanup (operator-scheduled `optimize(Prune)` with non-zero `older_than`; documented in operator-runbook §"Layer-3 secure-delete schedule"). The semantic delete (STEP 3 tombstone + STEP 4 Compact) makes the row UNREACHABLE for read IMMEDIATELY; the byte erasure is async via Lance Prune. This matches the SSD wear-leveling caveat already documented in `secure_delete.rs` module-level doc-comment: byte-level erasure is best-effort, with the semantic delete being the load-bearing GDPR-compliance signal (cite-back via the Layer-1 `embedding_erased` audit-event).
+
+   This is NOT a contract-strengthening change; the previous W18b stub bodies didn't byte-overwrite anything either. Phase D moves the physical-erasure responsibility from "the OVERWRITE step inside erase()" to "operator-scheduled Lance Prune". A future welle MAY harden this by pre-capturing the SPECIFIC fragment paths that contain the deleted event_uuid (requires Lance internals access not exposed by the public API), but that is V2-γ scope.
+
+**Architectural choices:**
+
+- **Backend-owned `Arc<tokio::runtime::Runtime>`** — see deviation #1 above. Multi-thread (4 workers); thread-name `atlas-mem0g-lancedb` for operator log triage. Built at `LanceDbCacheBackend::new` time; `Drop` cleans up at backend drop time.
+- **Schema** — three columns: `event_uuid: Utf8` (cite-back identifier), `snippet: Utf8` (GDPR-erasable cached payload), `vector: FixedSizeList<Float32, 384>` (BGE-small-en-v1.5 FP32 output dim per `embed_returns_384_dim_vector`). On-disk-format load-bearing — adding columns is a SemVer-breaking change for existing stores; `MEM0G_SCHEMA_VERSION` should bump in step.
+- **Per-row append model** — `upsert` calls `table.add(vec![single_row_batch])`, creating one fragment per event_uuid. Trade-off: high fragment count → HNSW build cost grows; mitigated by operator-scheduled `optimize(All)` (Compact + Prune + Index re-build). The B5 rebuild bench would surface the steady-state cost; promotion to required-checks is a separate operator-runbook decision.
+- **Score from `_distance` column** — LanceDB appends `_distance` to vector-query results (default L2). We surface `1 / (1 + max(0, distance))` as `SemanticHit::score` — monotonic in distance, clamped to `(0, 1]`. Per `SemanticHit::score` doc, this is diagnostic-only; callers MUST NOT use it as a trust signal.
+- **SQL injection defence on `Table::delete(predicate)`** — `escape_sql_literal` doubles single-quote characters per SQL literal escape convention and rejects NUL bytes. Atlas's ULID-shaped event_uuid is structurally quote-free, but the defence covers future event-id schemes + accidental injection from tests.
+- **`open_table TableNotFound` is benign in `search` and `erase`** — search on an empty workspace returns `vec![]`; erase on a never-populated workspace is idempotent. This is consistent with Layer 3 being rebuildable + emptiness being structurally identical to a not-yet-populated cache.
+
+**Verification gates (all passed):**
+
+- `cargo check --workspace`: clean (default features)
+- `cargo check -p atlas-mem0g --features lancedb-backend`: clean (with vendored protoc at `~/.local/protoc/bin/protoc.exe`)
+- `cargo test --workspace`: **579 passed / 0 failed / 7 ignored** (matches dispatch-time baseline; W18c Phase D is body-fill-in only, no new always-on tests beyond the 6 `#[ignore]`-gated e2e tests in `tests/lancedb_body_e2e.rs`)
+- `cargo clippy --workspace --no-deps -- -D warnings`: zero warnings (default features)
+- `cargo clippy -p atlas-mem0g --features lancedb-backend --no-deps -- -D warnings`: zero warnings (the W18b-shipped pre-existing `clippy::to_string_in_format_args` at `lancedb_backend.rs:353` flagged in Phase B Implementation Notes was atomically fixed by Phase D's `format!("{}::{}", ev.event_id, ev.payload)` rewrite which uses Display directly instead of `.to_string()`)
+- `cargo test -p atlas-projector --test backend_trait_conformance byte_pin`: 1 passed (byte-pin `8962c1681a44…` reproduces)
+- **Real-network embedder smoke + LanceDB body e2e**: `cargo test -p atlas-mem0g --features lancedb-backend --test lancedb_body_e2e -- --ignored --nocapture --test-threads=1` with `ATLAS_MEM0G_EMBED_SMOKE_ENABLED=1` — **6 passed / 0 failed in 194.57s**. Covers upsert→search round-trip, search-on-empty-workspace, erase-removes-only-targeted-event, rebuild-streams-events, and BOTH deadlock-safety regressions (R-W18c-D2 search + upsert variants).
+
+**Out-of-scope deferred items:**
+
+- Rust → TypeScript bridge for the Read-API route (V2-γ; documented in route.ts module-level doc-comment)
+- Cross-platform CI matrix expansion (Phase C; orthogonal welle)
+- B4/B5 bench numbers under feature-on (atlas-mem0g-smoke workflow extension; orthogonal welle)
+- Per-event fragment overwrite (V2-γ; requires Lance internals access)
+- Operator-runbook §"Layer-3 secure-delete schedule" + §"Layer-3 activation procedure" (cross-cutting; Phase 14.x consolidation)
 
 ---
 
