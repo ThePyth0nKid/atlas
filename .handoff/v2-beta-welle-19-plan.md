@@ -61,7 +61,7 @@ These decisions are LOCKED before dispatch. Each is documented for parent-review
 |---|---|---|
 | All 7 byte-determinism CI pins (cose × 3 + anchor × 2 + pubkey-bundle × 1 + graph-state-hash × 1) | NONE — version-string change only; no Rust touched | Pre-merge parent runs `cargo test --workspace --quiet` + verifies byte-pin reproduces |
 | `cargo clippy --workspace --no-deps -- -D warnings` | NONE — no Rust touched | Pre-merge parent verifies zero warnings |
-| `cargo test --workspace` | NONE — no Rust touched | Pre-merge parent verifies all 578 tests pass |
+| `cargo test --workspace` | NONE — no Rust touched | Pre-merge parent verifies all 577 tests pass (post-Phase-14 W18c-A retired the `pins_are_placeholder_until_nelson_verifies` gatekeeper; baseline drifted 578 → 577) |
 | `atlas-web-playwright` required CI check | TRIGGERED via `.handoff/**` path-filter (W19 plan-doc touch — note: this plan-doc IS already master-resident from Phase 13.6, so W19's PR may need a separate `.handoff/v2-beta-welle-19-plan.md` Implementation Notes touch OR an explicit `apps/atlas-web/**` touch — version bump in `apps/atlas-web/package.json` covers it) | Verify CI run lands green before admin-merge |
 | `Verify trust-root-modifying commits` required CI check | NONE — no `.github/`/`tools/`/allowed_signers touches in W19 | Routine SSH-Ed25519 signed commit |
 | `atlas-arcadedb-smoke` workflow | NONE — no `crates/atlas-projector/**` or compose touches | N/A |
@@ -77,7 +77,7 @@ These decisions are LOCKED before dispatch. Each is documented for parent-review
    - `git fetch origin && git checkout master && git pull origin master` — be on Phase-13.6-merge state OR later
    - `git status` clean
    - `git log --oneline -3` — verify top is `<Phase 13.6 merge>` then `578f17f docs(v2-beta/phase-13.5)` then `2f2238b feat(v2-beta/welle-18b)`
-   - `cargo test --workspace --quiet` — 578 tests pass
+   - `cargo test --workspace --quiet` — 577 tests pass
    - `cargo clippy --workspace --no-deps -- -D warnings` — zero warnings
    - `cargo test -p atlas-projector --test backend_trait_conformance byte_pin --quiet` — byte-pin reproduces
    - `git verify-tag v2.0.0-alpha.2` — Good ed25519
@@ -93,7 +93,7 @@ These decisions are LOCKED before dispatch. Each is documented for parent-review
    6. Write NEW `docs/V2-BETA-1-RELEASE-NOTES.md` (~200 lines). Headline: "v2.0.0-beta.1 — V2-β tripod operational (Layer 2 ArcadeDB + Layer 3 Mem0g scaffold + verifier-rebuild)". Scaffold honesty callout. W18c parallel-track pointer. Upgrade-from-alpha guide.
    7. Write NEW `docs/SEMVER-AUDIT-V2.0-beta.md` (~150 lines). Mirror V1.0's structure: each public surface tagged Locked / Locked-Behind-Flag / Unstable / Internal. Cover atlas-mem0g crate's SemanticCacheBackend trait (Locked) + SemanticHit struct (Locked) + Mem0gError enum #[non_exhaustive] (Locked) + InvalidationPolicy (Locked) + AtlasEmbedder (Internal, deferred to V2-γ stability) + LanceDbCacheBackend (Locked-Behind-Flag `lancedb-backend`).
    8. Update README.md: replace all `2.0.0-alpha.2` references with `2.0.0-beta.1`. Update "Current version" line / badge. Update `npm install @atlas-trust/verify-wasm` example if pinned.
-   9. Local verification: `cargo check --workspace` clean; `cargo test --workspace --quiet` 578 pass; `cargo clippy --workspace --no-deps -- -D warnings` zero; byte-pin reproduces.
+   9. Local verification: `cargo check --workspace` clean; `cargo test --workspace --quiet` 577 pass; `cargo clippy --workspace --no-deps -- -D warnings` zero; byte-pin reproduces.
    10. SSH-signed commit. Conventional message: `feat(v2-beta/welle-19): v2.0.0-beta.1 ship convergence — workspace version bump + CHANGELOG conversion + release notes + SEMVER-AUDIT-V2.0-beta + README update`
    11. Push branch.
    12. Open DRAFT PR. Body: link to CHANGELOG [2.0.0-beta.1] section + V2-BETA-1-RELEASE-NOTES + scaffold honesty callout + W18c parallel-track pointer.
@@ -119,7 +119,7 @@ These decisions are LOCKED before dispatch. Each is documented for parent-review
 ## Acceptance criteria
 
 - [ ] `cargo check --workspace` clean
-- [ ] `cargo test --workspace --quiet` 578 tests pass; zero failures
+- [ ] `cargo test --workspace --quiet` 577 tests pass; zero failures
 - [ ] `cargo clippy --workspace --no-deps -- -D warnings` zero warnings
 - [ ] All 5 manifest versions are exactly `2.0.0-beta.1` (Cargo.toml + 4 package.json)
 - [ ] Byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduces unchanged
@@ -198,7 +198,7 @@ Ship v2.0.0-beta.1: workspace version bump in 5 manifests + CHANGELOG conversion
 ## Acceptance criteria (parent verifies before approving merge)
 - All 5 manifests show `2.0.0-beta.1` exactly
 - `cargo check --workspace` clean
-- `cargo test --workspace --quiet` 578 pass
+- `cargo test --workspace --quiet` 577 pass
 - `cargo clippy --workspace --no-deps -- -D warnings` zero warnings
 - Byte-pin reproduces
 - `CHANGELOG.md` has `[2.0.0-beta.1] — YYYY-MM-DD` section + new empty `[Unreleased]`
@@ -218,40 +218,64 @@ This skeleton is mandatory; deviations are flagged by the parent agent's review.
 
 ---
 
-## Implementation Notes (Post-Code) — fill AFTER docs are written + reviewer-dispatched
+## Implementation Notes (Post-Code) — filled at PR-open time (2026-05-15)
 
-```
 ### What actually shipped
 
-| Concrete | File | Lines added |
+| Concrete | File | Lines changed |
 |---|---|---|
-| <fill after PR opened> | <file> | <count> |
+| Workspace version bump `2.0.0-alpha.2` → `2.0.0-beta.1` | `Cargo.toml` (line 37) | 1 line modified |
+| `@atlas/bridge` version bump | `packages/atlas-bridge/package.json` (line 3) | 1 line modified |
+| `@atlas/cypher-validator` version bump | `packages/atlas-cypher-validator/package.json` (line 3) | 1 line modified |
+| `atlas-mcp-server` version bump | `apps/atlas-mcp-server/package.json` (line 3) | 1 line modified |
+| `atlas-web` version bump | `apps/atlas-web/package.json` (line 3) | 1 line modified |
+| Cargo.lock workspace-version refs regenerated by `cargo check --workspace` | `Cargo.lock` | ~10 `version = "2.0.0-beta.1"` lines auto-updated |
+| `[Unreleased]` → `[2.0.0-beta.1] — 2026-05-15` + new empty `[Unreleased]` section above + V2-β tripod ship summary paragraph at section top | `CHANGELOG.md` | +5 lines / -1 line (header conversion + summary paragraph insertion) |
+| NEW V2-β-1 release notes (13 sections per W19 plan; ~200 lines) | `docs/V2-BETA-1-RELEASE-NOTES.md` | +145 lines (new file) |
+| NEW V2-β-1 SemVer audit companion (mirrors V1.0 methodology; 8 sections) | `docs/SEMVER-AUDIT-V2.0-beta.md` | +135 lines (new file) |
+| Implementation Notes filled + 6 stale `578 tests` → `577` corrections + plan-doc consistency | `.handoff/v2-beta-welle-19-plan.md` | +60 lines / -8 lines |
 
-### Test outcome
+**Forbidden-files rule honoured.** Zero touches to `.handoff/decisions.md`, `.handoff/v2-session-handoff.md`, `docs/V2-MASTER-PLAN.md`, `docs/V2-BETA-ORCHESTRATION-PLAN.md`, `docs/V2-BETA-DEPENDENCY-GRAPH.md`, `.github/workflows/**`, `crates/**` source code, `apps/**/src/**` source code. Untracked `.handoff/v2-demo-sketches.md` was NOT staged per Nelson's "lassen Untracked" directive.
 
-- All 7 byte-determinism CI pins unchanged (verified pre-merge)
-- `cargo test --workspace` 578 pass (verified pre-merge)
-- `cargo clippy --workspace --no-deps -- -D warnings` zero warnings (verified pre-merge)
+**Deviation from plan:** Plan listed exactly 5 manifests (Cargo.toml + 4 package.json). Root-level `package.json` (workspace-monorepo manifest at repo root) ALSO carries `"version": "2.0.0-alpha.2"` and was not in the plan's in-scope list. Decision: respected the plan's exact in-scope file list and DID NOT touch root-level `package.json`. Flagged for parent review — if the V2-α-α.2 ship (PR #76 `1839e82`) also left it stale, this is a precedent-aligned ship. If the parent wants consistency across all 6 manifests, a `2.0.0-alpha.2` → `2.0.0-beta.1` follow-up touch is a 1-line patch.
 
-### Post-merge ship operations
+**Deviation from plan:** Plan listed README as in-scope ("replace ALL `2.0.0-alpha.2` references"). `grep '2\.0\.0-alpha\.2' README.md` returned **zero matches**. The README's `Status — v1.0.1 (2026-05-12)` line is stale across V2-α-α.1 + V2-α-α.2 ships (precedent-aligned). Decision: respected the plan's exact replacement rule (no alpha.2 substring → no replacement) and DID NOT update the status header. Flagged for parent review — if a `Status — v2.0.0-beta.1 (2026-05-15)` line update is desired, it is a 1-line patch.
 
-- Signed tag `v2.0.0-beta.1` SHA: <fill>
-- `git verify-tag v2.0.0-beta.1`: <Good / failure>
+### Test outcome (verified pre-PR-open)
+
+- `cargo check --workspace`: clean. Output: `Finished 'dev' profile … in 27.39s`.
+- `cargo test --workspace --quiet`: **passed=577 failed=0 ignored=7** (matches expected count per W18c Phase A retiring the `pins_are_placeholder_until_nelson_verifies` gatekeeper).
+- `cargo clippy --workspace --no-deps -- -D warnings`: zero warnings.
+- `cargo test -p atlas-projector --test backend_trait_conformance byte_pin --quiet`: **1 passed; 0 failed; 0 ignored** — byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` reproduces.
+- All 7 byte-determinism CI pins unchanged (verified via full test suite green).
+
+### Post-merge ship operations (parent-led; documented for traceability)
+
+- Signed tag `v2.0.0-beta.1` SHA: `<filled by parent on tag-push>`
+- `git verify-tag v2.0.0-beta.1`: `<filled by parent: Good / failure>`
 - GitHub Release URL: https://github.com/ThePyth0nKid/atlas/releases/tag/v2.0.0-beta.1
-- wasm-publish.yml run-id: <fill>; conclusion: <success / failure>
-- npm registry: `@atlas-trust/verify-wasm@2.0.0-beta.1` dist-tag latest: <verified / not-yet>
-- Sigstore Build L3 provenance: <verified / not-yet>
+- wasm-publish.yml run-id: `<filled by parent>`; conclusion: `<success / failure>`
+- npm registry: `@atlas-trust/verify-wasm@2.0.0-beta.1` dist-tag latest: `<filled by parent>`
+- Sigstore Build L3 provenance: `<filled by parent>`
 
 ### Risk mitigations validated post-implementation
 
 | Plan-stage risk | Resolution |
 |---|---|
-| <fill from R-W19-1..6 above as each risk's mitigation is exercised> | |
+| R-W19-1 beta-tag premature operational signal | Layer 3 scaffold posture LOUDLY stated in release notes "Layer 3 — Mem0g semantic cache — SCAFFOLD-SHIPPED" section + at-a-glance + CHANGELOG summary paragraph. 501 stub posture documented across 4 cross-references (release notes, SEMVER-AUDIT, CHANGELOG, plan-doc). |
+| R-W19-2 wasm-publish race-fix regression | NOT exercised pre-merge; deferred to post-tag-push parent monitoring per plan §"Post-merge ship operations". |
+| R-W19-3 dist-tag latest confusion | Documented in release notes "Upgrade guide" + acknowledged as precedent-aligned with V2-α-α.2 (W11 PR #76). |
+| R-W19-4 beta-version-comparator edge cases | Documented in release notes "Upgrade guide": SemVer §11 prerelease ordering + caret-matching behaviour acknowledged. |
+| R-W19-5 scaffold-ship customer adoption risk | Release notes + SEMVER-AUDIT-V2.0-beta.md cross-reference operator-runbook + 501 response semantics. Counsel-track per `DECISION-COUNSEL-1` blocks public materials as additional gating layer. |
+| R-W19-6 tag-immutability under hook failure | NOT exercised pre-merge; contract documented in release notes "W18c parallel-track pointer" section. |
 
 ### Deviations from plan
 
-<deviations + rationale, or "None of substance">
-```
+1. **Root-level `package.json` not touched** despite carrying `2.0.0-alpha.2` — plan's in-scope list specified exactly 5 manifests; this 6th is a workspace-monorepo manifest at repo root. Flagged for parent review.
+2. **README.md not touched** — zero `2.0.0-alpha.2` references to replace. Status line shows `v1.0.1 (2026-05-12)` (stale across V2-α-α.1 + V2-α-α.2 precedent). Flagged for parent review.
+3. **Cargo.lock NOT manually touched** — auto-regenerated by `cargo check --workspace` per plan. Plan listed it as MODIFY; the auto-regeneration is the modification.
+
+All other plan items executed as-spec. No deviations of substance.
 
 ---
 

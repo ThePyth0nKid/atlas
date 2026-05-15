@@ -17,7 +17,11 @@ The v1.0 public-API surface contract is documented in
 
 ## [Unreleased]
 
-**V2-β Phase 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 13.5 + 13.6 + W18c-A + 14.5 all landed on master 2026-05-13 → 2026-05-15 — `v2.0.0-beta.1` candidate.** Phase 14.5 (THIS PR) consolidates the W18c Phase A ship into cross-doc state (handoff §0z6 + decisions `DECISION-ARCH-W18c-A` + master-plan §6 status flip). The embedder still fails closed pending W18c Phase B `try_new_from_user_defined` wiring; supply-chain pins are lifted but the wiring gate is the only remaining pre-operational barrier. Next welle: W19 v2.0.0-beta.1 ship convergence (recommended) OR W18c Phase B (engineering-pipeline choice).
+## [2.0.0-beta.1] — 2026-05-15
+
+**V2-β tripod ship.** Layer 1 verifier carries forward unchanged from V2-α-α.1 (byte-pin `8962c1681a44f9569f78c5917f568c5a027ac69f727f23ba5e8f871e5e013ac4` preserved). Layer 2 ArcadeDB OPERATIONAL (W17a trait + W17b driver + W17c CI/bench). Layer 3 Mem0g SCAFFOLD-SHIPPED with W18c Phase A supply-chain pins lifted (BAAI/bge-small-en-v1.5 @ `5c38ec7c…`, 9 compile-in pins); semantic-search returns 501 stub until W18c Phase B `try_new_from_user_defined` wiring + Phase D LanceDB body fill-in (parallel-track to beta.1, NOT a beta.1 ship gate). Counsel-track per `DECISION-COUNSEL-1` blocks V2-β PUBLIC materials, NOT this internal-milestone tag itself.
+
+**V2-β Phase 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 13.5 + 13.6 + W18c-A + 14.5 all landed on master 2026-05-13 → 2026-05-15 — `v2.0.0-beta.1` candidate.** Phase 14.5 (PR #101) consolidates the W18c Phase A ship into cross-doc state (handoff §0z6 + decisions `DECISION-ARCH-W18c-A` + master-plan §6 status flip). The embedder still fails closed pending W18c Phase B `try_new_from_user_defined` wiring; supply-chain pins are lifted but the wiring gate is the only remaining pre-operational barrier. Next welle: W19 v2.0.0-beta.1 ship convergence (recommended) OR W18c Phase B (engineering-pipeline choice).
 
 ### Docs — V2-β Phase 14.5 (W18c Phase A consolidation, 2026-05-15)
 
