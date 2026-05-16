@@ -71,6 +71,82 @@ export interface WorkspaceContextValue {
   loading: boolean;
   /** Error string from the workspaces fetch (null on success). */
   error: string | null;
+  /**
+   * W20b-2 — Create a new workspace on the server, add it to the
+   * workspaces list, and auto-select it. The id is validated against
+   * `WORKSPACE_ID_RE` BEFORE the fetch — invalid ids return
+   * `{ ok: false }` without touching the network.
+   *
+   * Returns a discriminated-union result so callers can branch on
+   * success/failure without throwing — the wizard renders the error
+   * inline rather than via a global error boundary.
+   */
+  createWorkspace: (
+    id: string,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+}
+
+/**
+ * W20b-2 — pure helper for the POST /api/atlas/workspaces call.
+ *
+ * Extracted from `WorkspaceProvider.createWorkspace` so it can be
+ * unit-tested without a React render harness (vitest runs in `node`
+ * env; no DOM is available). The provider wraps this with state
+ * updates; the helper itself is side-effect-free except for `fetchFn`.
+ *
+ * @param id        Caller-supplied workspace id. Validated client-side
+ *                  with `WORKSPACE_ID_RE` before any network call so a
+ *                  regex-failing id returns synchronously without
+ *                  burning a roundtrip.
+ * @param fetchFn   Injected for testability. Defaults to global
+ *                  `fetch` in browser contexts.
+ */
+export interface CreateWorkspaceServerResponse {
+  ok: boolean;
+  workspace_id?: string;
+  kid?: string;
+  pubkey_b64url?: string;
+  error?: string;
+}
+
+export async function requestCreateWorkspace(
+  id: string,
+  fetchFn: typeof fetch,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!WORKSPACE_ID_RE.test(id)) {
+    return {
+      ok: false,
+      error: `invalid workspace id: ${id} — must match [a-zA-Z0-9_-]{1,128}`,
+    };
+  }
+  let res: Response;
+  try {
+    res = await fetchFn("/api/atlas/workspaces", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace_id: id }),
+    });
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+  let body: CreateWorkspaceServerResponse;
+  try {
+    body = (await res.json()) as CreateWorkspaceServerResponse;
+  } catch {
+    // Malformed response — surface a generic message rather than the
+    // raw parse error (the proxy may have returned HTML).
+    return { ok: false, error: `create failed: HTTP ${res.status}` };
+  }
+  if (!res.ok || body.ok !== true) {
+    return {
+      ok: false,
+      error:
+        typeof body.error === "string" && body.error.length > 0
+          ? body.error
+          : "create failed",
+    };
+  }
+  return { ok: true };
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
@@ -207,9 +283,47 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
     }
   }, []);
 
+  /**
+   * W20b-2 — create a workspace via POST and, on success, splice it
+   * into the workspaces list + auto-select it. Failures DO NOT touch
+   * the workspaces list or active selection — the wizard renders the
+   * error inline and lets the user retry without losing the previous
+   * selection.
+   */
+  const createWorkspace = useCallback(
+    async (
+      id: string,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const result = await requestCreateWorkspace(id, fetch);
+      if (!result.ok) return result;
+      // Success: immutable splice (toSorted on a fresh array) +
+      // delegate to `setWorkspaceState` for the localStorage write.
+      setError(null);
+      setWorkspaces((prev) =>
+        prev.includes(id) ? prev : [...prev, id].toSorted(),
+      );
+      setWorkspaceState(id);
+      try {
+        window.localStorage.setItem(LOCAL_STORAGE_KEY, id);
+      } catch {
+        // localStorage may throw in private-browsing / blocked-storage
+        // contexts — soft failure, matches the read-side pattern.
+      }
+      return { ok: true };
+    },
+    [],
+  );
+
   const value = useMemo<WorkspaceContextValue>(
-    () => ({ workspace, setWorkspace, workspaces, loading, error }),
-    [workspace, setWorkspace, workspaces, loading, error],
+    () => ({
+      workspace,
+      setWorkspace,
+      workspaces,
+      loading,
+      error,
+      createWorkspace,
+    }),
+    [workspace, setWorkspace, workspaces, loading, error, createWorkspace],
   );
 
   return (

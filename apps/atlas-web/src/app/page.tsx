@@ -1,14 +1,16 @@
 /**
- * W20b-1 — home page (Audit Readiness).
+ * W20b-2 — home page (Audit Readiness).
  *
- * The page now renders real workspace state via
- * `<DashboardMetricsSection>`, replacing the hard-coded marketing
- * KPIs that lived inline in W20a. The page header copy is updated
- * accordingly — the "illustrative values" disclaimer has been
- * removed because every number on the page below is computed from
- * the active workspace's signed events.
+ * The page now branches between two top-level UIs based on whether
+ * the user has at least one workspace:
+ *   - No workspaces → `<FirstRunWizard>` (full-page empty state)
+ *   - At least one  → existing dashboard tree (W20b-1)
  *
- * Structure:
+ * The branch lives in `<HomeContent>` (client component) so the page
+ * itself can stay structurally a server component. Header + heading
+ * copy remain on the server.
+ *
+ * Structure when workspaces > 0:
  *   - heading + accurate sub-copy
  *   - <DashboardMetricsSection>   (3-tier metrics: empty / early / full)
  *   - <LiveVerifierPanel>         (unchanged from W20a — frozen contract)
@@ -19,10 +21,7 @@
  *   - <StatusDisclosureFooter>    (W20b-1 — roadmap status)
  */
 
-import Link from "next/link";
-import { DashboardMetricsSection } from "@/components/DashboardMetricsSection";
-import { LiveVerifierPanel } from "@/components/LiveVerifierPanel";
-import { StatusDisclosureFooter } from "@/components/StatusDisclosureFooter";
+import { HomeContent } from "@/components/HomeContent";
 
 export default function Page() {
   return (
@@ -37,29 +36,7 @@ export default function Page() {
         </p>
       </section>
 
-      <DashboardMetricsSection />
-
-      <LiveVerifierPanel />
-
-      <section className="border border-[var(--border)] rounded-lg p-5">
-        <div className="flex items-start justify-between gap-6">
-          <div>
-            <h2 className="font-medium">Need to answer a regulator?</h2>
-            <p className="text-[var(--foreground-muted)] mt-1 max-w-2xl">
-              Filter by period and system, click <em>Export</em>, get a signed PDF/A bundle and
-              a standalone HTML verifier the auditor can run offline — without our server.
-            </p>
-          </div>
-          <Link
-            href="/audit-export"
-            className="text-[13px] font-medium border border-[var(--border)] rounded-md px-3 py-1.5 hover:bg-[var(--bg-subtle)]"
-          >
-            Open Audit Export →
-          </Link>
-        </div>
-      </section>
-
-      <StatusDisclosureFooter />
+      <HomeContent />
     </div>
   );
 }
