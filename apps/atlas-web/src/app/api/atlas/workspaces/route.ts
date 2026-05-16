@@ -1,4 +1,19 @@
 /**
+ * W20c CHANGES (this commit):
+ *   * POST: signer-failure path now atomically rolls back the
+ *     freshly-mkdir'd workspace directory before returning 500.
+ *     Eliminates the orphan "unconfigured" workspace UX that landed
+ *     in ba4e27f (W20b-2) and was flagged by security-reviewer in
+ *     PR #113. If the rollback itself fails (e.g. concurrent process
+ *     held a handle), the response carries a `partial_rollback:`
+ *     prefix so operators can clean up by hand.
+ *   * PATCH: rename a workspace via `fs.rename` (atomic on same
+ *     volume). Validates both old and new ids against
+ *     `WORKSPACE_ID_RE`. EXDEV (cross-mount) surfaces as 500.
+ *   * DELETE: tear down a workspace via `fs.rm`. Refuses to delete
+ *     the last user-facing workspace (returns 409) so the UI cannot
+ *     flip back to FirstRunWizard mid-session.
+ *
  * W20a — GET /api/atlas/workspaces
  *
  * List user-facing workspaces under the atlas-web data root. The
@@ -136,6 +151,85 @@ const CreateWorkspaceSchema = z
   })
   .strict();
 
+/**
+ * W20c — schemas for PATCH (rename) and DELETE.
+ * Both `.strict()` for the same reason as the create schema: log-
+ * pipeline safety on the unrecognized-keys path.
+ */
+const RenameWorkspaceSchema = z
+  .object({
+    workspace_id: z
+      .string()
+      .regex(
+        WORKSPACE_ID_RE,
+        "workspace_id: only [a-zA-Z0-9_-], 1–128 chars",
+      ),
+    new_workspace_id: z
+      .string()
+      .regex(
+        WORKSPACE_ID_RE,
+        "new_workspace_id: only [a-zA-Z0-9_-], 1–128 chars",
+      ),
+  })
+  .strict();
+
+const DeleteWorkspaceSchema = z
+  .object({
+    workspace_id: z
+      .string()
+      .regex(
+        WORKSPACE_ID_RE,
+        "workspace_id: only [a-zA-Z0-9_-], 1–128 chars",
+      ),
+  })
+  .strict();
+
+/**
+ * W20c — `.strict()` Zod failures may embed attacker-controlled
+ * unrecognized key names verbatim. Collapse those into a static
+ * message before they reach the JSON envelope. Mirrors the existing
+ * POST-path branch (W20b-2 security-reviewer finding #9). Other Zod
+ * failures carry the original error message because it includes the
+ * helpful regex description that the client can surface.
+ */
+function safeZodErrorMessage(err: z.ZodError): string {
+  const hasUnrecognizedKeys = err.issues.some(
+    (issue) => issue.code === "unrecognized_keys",
+  );
+  if (hasUnrecognizedKeys) {
+    return "invalid input: body contains unexpected keys";
+  }
+  return `invalid input: ${err.message}`;
+}
+
+/**
+ * W20c — count user-facing workspaces on disk. Mirrors the GET-time
+ * filter but is a lighter helper (we only need the count, not the
+ * list). Used by DELETE to refuse to remove the last workspace
+ * (DA-6).
+ *
+ * `CI_ARTIFACT_PATTERN` is intentionally excluded from the count so
+ * a Playwright cleanup run that's deleting the last pw-* workspace
+ * does not flip the UI into wizard mode. The count we care about
+ * for the 409 gate is "user-visible workspaces after the delete".
+ */
+async function countUserFacingWorkspaces(): Promise<number> {
+  const root = dataDir();
+  let entries: { name: string; isDirectory: () => boolean }[];
+  try {
+    entries = await fs.readdir(root, { withFileTypes: true });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw e;
+  }
+  return entries.filter(
+    (e) =>
+      e.isDirectory() &&
+      isValidWorkspaceId(e.name) &&
+      !CI_ARTIFACT_PATTERN.test(e.name),
+  ).length;
+}
+
 export async function GET(): Promise<NextResponse> {
   const root = dataDir();
   let entries: { name: string; isDirectory: () => boolean }[];
@@ -201,24 +295,9 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   const parsed = CreateWorkspaceSchema.safeParse(body);
   if (!parsed.success) {
-    // W20b-2 fix-commit (security-reviewer MEDIUM): distinguish the
-    // `.strict()` unrecognized-keys path from other Zod failures. The
-    // unrecognized-keys message embeds attacker-controlled key names
-    // verbatim (e.g. `"Unrecognized key(s) in object: '<script>'"`),
-    // which is JSON-encoded in the response (XSS-safe) but can still
-    // cause log-pipeline rendering issues if an unattended log
-    // ingestor tries to highlight or display the error string. A
-    // static message for this case removes that risk entirely. Other
-    // failures (regex mismatch, missing key) carry the original
-    // `parsed.error.message` because it includes the helpful
-    // `WORKSPACE_ID_RE` description that the client can surface.
-    const hasUnrecognizedKeys = parsed.error.issues.some(
-      (issue) => issue.code === "unrecognized_keys",
-    );
-    if (hasUnrecognizedKeys) {
-      return jsonError(400, "invalid input: body contains unexpected keys");
-    }
-    return jsonError(400, `invalid input: ${parsed.error.message}`);
+    // W20c — delegated to `safeZodErrorMessage` so PATCH + DELETE share
+    // the same unrecognized-keys discipline as POST (W20b-2 finding #9).
+    return jsonError(400, safeZodErrorMessage(parsed.error));
   }
   const workspaceId = parsed.data.workspace_id;
 
@@ -249,8 +328,17 @@ export async function POST(req: Request): Promise<NextResponse> {
     // ENOENT is the happy path — workspace does not yet exist.
   }
 
+  // W20c (DA-1): track whether the workspace directory was created in
+  // THIS request. If signer derivation fails AFTER mkdir, we must
+  // atomically remove the empty dir so the user does not end up with
+  // an orphan "unconfigured" workspace under `dataDir()`. The mkdir
+  // step itself comes before signer derivation; ensureWorkspaceDir
+  // failures (StorageError, WorkspacePathError) leave nothing behind
+  // and skip the rollback.
+  let dirCreated = false;
   try {
     await ensureWorkspaceDir(workspaceId);
+    dirCreated = true;
     const derived = await derivePubkeyViaSigner(workspaceId);
     return NextResponse.json({
       ok: true as const,
@@ -259,6 +347,24 @@ export async function POST(req: Request): Promise<NextResponse> {
       pubkey_b64url: derived.pubkey_b64url,
     });
   } catch (e) {
+    // W20c (DA-1): SignerError after mkdir is the orphan-workspace
+    // path. Roll back the directory before surfacing the 500. The
+    // rollback uses `force: false` so a vanished dir (concurrent
+    // delete) does not mask the original signer error; if rm itself
+    // fails, surface the partial-rollback so operators can clean up.
+    if (e instanceof SignerError && dirCreated) {
+      try {
+        await fs.rm(workspaceDir(workspaceId), { recursive: true, force: false });
+        return jsonError(500, `signer: ${redactPaths(e.message)}`);
+      } catch (rmErr) {
+        const rmMsg =
+          rmErr instanceof Error ? rmErr.message : String(rmErr);
+        return jsonError(
+          500,
+          `partial_rollback: signer failed and workspace directory could not be removed: ${redactPaths(rmMsg)}`,
+        );
+      }
+    }
     // W20b-2 fix-commit (security-reviewer MEDIUM, defence-in-depth):
     // route every error message through `redactPaths`, matching
     // `_lib/http.ts:handleStoreError`. None of these messages contain
@@ -269,6 +375,8 @@ export async function POST(req: Request): Promise<NextResponse> {
       return jsonError(400, redactPaths(e.message));
     }
     if (e instanceof SignerError) {
+      // Signer failure before mkdir (e.g. binary missing) — no
+      // rollback needed.
       return jsonError(500, `signer: ${redactPaths(e.message)}`);
     }
     if (e instanceof StorageError) {
@@ -276,5 +384,206 @@ export async function POST(req: Request): Promise<NextResponse> {
     }
     const msg = e instanceof Error ? e.message : String(e);
     return jsonError(500, `unexpected: ${redactPaths(msg)}`);
+  }
+}
+
+// ──────────────── PATCH /api/atlas/workspaces (rename, W20c) ────────────────
+
+export async function PATCH(req: Request): Promise<NextResponse> {
+  // Byte-layer cap BEFORE reading the body — mirrors POST.
+  const contentLength = req.headers.get("content-length");
+  if (contentLength !== null) {
+    const len = Number(contentLength);
+    if (Number.isFinite(len) && len > REQUEST_BODY_MAX_BYTES) {
+      return jsonError(
+        413,
+        `request body exceeds ${REQUEST_BODY_MAX_BYTES} bytes`,
+      );
+    }
+  }
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch (e) {
+    return jsonError(
+      400,
+      `request body is not valid JSON: ${(e as Error).message}`,
+    );
+  }
+
+  const parsed = RenameWorkspaceSchema.safeParse(body);
+  if (!parsed.success) {
+    return jsonError(400, safeZodErrorMessage(parsed.error));
+  }
+  const { workspace_id: oldId, new_workspace_id: newId } = parsed.data;
+
+  if (oldId === newId) {
+    return jsonError(400, "invalid input: new_workspace_id must differ from workspace_id");
+  }
+
+  // Validate source exists.
+  let oldDirPath: string;
+  let newDirPath: string;
+  try {
+    oldDirPath = workspaceDir(oldId);
+    newDirPath = workspaceDir(newId);
+  } catch (e) {
+    if (e instanceof WorkspacePathError) {
+      return jsonError(400, redactPaths(e.message));
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    return jsonError(500, `unexpected: ${redactPaths(msg)}`);
+  }
+
+  try {
+    const stat = await fs.stat(oldDirPath);
+    if (!stat.isDirectory()) {
+      return jsonError(404, "workspace not found");
+    }
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return jsonError(404, "workspace not found");
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    return jsonError(500, `stat: ${redactPaths(msg)}`);
+  }
+
+  // Refuse if the target dir already exists — never silently overwrite.
+  try {
+    await fs.stat(newDirPath);
+    return jsonError(409, "workspace already exists");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      const msg = e instanceof Error ? e.message : String(e);
+      return jsonError(500, `stat: ${redactPaths(msg)}`);
+    }
+    // ENOENT is the happy path — target does not exist.
+  }
+
+  try {
+    await fs.rename(oldDirPath, newDirPath);
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EXDEV") {
+      return jsonError(
+        500,
+        "cross_mount_rename_unsupported: source and target on different volumes",
+      );
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    return jsonError(500, `rename: ${redactPaths(msg)}`);
+  }
+
+  // Re-derive pubkey under the new id. Signer failure here is a
+  // surprise (the rename succeeded so the workspace is still on
+  // disk under the new id); surface as 500 but do NOT roll back the
+  // rename — the rename itself is durable and the user can retry
+  // pubkey derivation by reloading.
+  try {
+    const derived = await derivePubkeyViaSigner(newId);
+    return NextResponse.json({
+      ok: true as const,
+      workspace_id: newId,
+      kid: perTenantKidFor(newId),
+      pubkey_b64url: derived.pubkey_b64url,
+    });
+  } catch (e) {
+    if (e instanceof SignerError) {
+      return jsonError(500, `signer: ${redactPaths(e.message)}`);
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    return jsonError(500, `unexpected: ${redactPaths(msg)}`);
+  }
+}
+
+// ──────────────── DELETE /api/atlas/workspaces (W20c) ────────────────
+
+export async function DELETE(req: Request): Promise<NextResponse> {
+  // Byte-layer cap.
+  const contentLength = req.headers.get("content-length");
+  if (contentLength !== null) {
+    const len = Number(contentLength);
+    if (Number.isFinite(len) && len > REQUEST_BODY_MAX_BYTES) {
+      return jsonError(
+        413,
+        `request body exceeds ${REQUEST_BODY_MAX_BYTES} bytes`,
+      );
+    }
+  }
+
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch (e) {
+    return jsonError(
+      400,
+      `request body is not valid JSON: ${(e as Error).message}`,
+    );
+  }
+
+  const parsed = DeleteWorkspaceSchema.safeParse(body);
+  if (!parsed.success) {
+    return jsonError(400, safeZodErrorMessage(parsed.error));
+  }
+  const { workspace_id: targetId } = parsed.data;
+
+  let targetDirPath: string;
+  try {
+    targetDirPath = workspaceDir(targetId);
+  } catch (e) {
+    if (e instanceof WorkspacePathError) {
+      return jsonError(400, redactPaths(e.message));
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    return jsonError(500, `unexpected: ${redactPaths(msg)}`);
+  }
+
+  // Existence check BEFORE the last-workspace gate — a 404 on a
+  // non-existent id is friendlier than a 409 the client cannot resolve.
+  try {
+    const stat = await fs.stat(targetDirPath);
+    if (!stat.isDirectory()) {
+      return jsonError(404, "workspace not found");
+    }
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      return jsonError(404, "workspace not found");
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    return jsonError(500, `stat: ${redactPaths(msg)}`);
+  }
+
+  // DA-6: refuse to delete the last user-facing workspace. Counts the
+  // post-delete user-facing total — if it's exactly 1 right now AND
+  // the target itself is user-facing, the delete would leave the data
+  // root empty and flip the UI into FirstRunWizard mode mid-session.
+  let totalUserFacing: number;
+  try {
+    totalUserFacing = await countUserFacingWorkspaces();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return jsonError(500, `list: ${redactPaths(msg)}`);
+  }
+  const targetIsUserFacing =
+    isValidWorkspaceId(targetId) && !CI_ARTIFACT_PATTERN.test(targetId);
+  if (targetIsUserFacing && totalUserFacing <= 1) {
+    return jsonError(409, "cannot delete last workspace");
+  }
+
+  try {
+    // `force: false` so a vanished dir (concurrent delete) surfaces
+    // the real error rather than masquerading as a successful delete.
+    await fs.rm(targetDirPath, { recursive: true, force: false });
+    return NextResponse.json({
+      ok: true as const,
+      workspace_id: targetId,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return jsonError(500, `delete: ${redactPaths(msg)}`);
   }
 }

@@ -91,3 +91,73 @@ export async function provisionAndSelect(
     window.localStorage.setItem("atlas:active-workspace", ws);
   }, workspace);
 }
+
+/**
+ * W20c — Provision `count` workspaces and pin the first one as active.
+ *
+ * Used by /settings tests that need ≥2 workspaces (so the delete
+ * button is not disabled by the "last workspace" gate). Each
+ * workspace gets one Genesis event so the trace endpoint serves a
+ * valid `events: []` shape.
+ *
+ * IMPORTANT: the workspace ids generated here do NOT use the `pw-w*-`
+ * CI-artifact prefix that the GET handler filters out. We need every
+ * provisioned workspace to be visible in the workspace list so the
+ * /settings UI can render rows for them; the CI-artifact filter
+ * would otherwise hide all but the active one (which is spliced in
+ * via localStorage). The trade-off: these workspaces accumulate on
+ * disk across test runs. Periodic `rm -rf apps/atlas-web/data/wsp-*`
+ * is the cleanup recipe.
+ *
+ * Returns the array of created workspace ids — caller uses
+ * `ws[0]` as the active one.
+ */
+export async function provisionAndSelectMany(
+  page: Page,
+  baseId: string,
+  count: number,
+): Promise<string[]> {
+  // Re-prefix to "wsp-" so the GET CI-artifact filter does NOT strip
+  // these from the list. The base id is kept as a suffix to preserve
+  // per-test uniqueness.
+  const safeBase = `wsp-${baseId.replace(/^pw-/, "")}`;
+  const ids: string[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const id = `${safeBase}-${i}`;
+    const res = await page.request.post("/api/atlas/write-node", {
+      data: {
+        workspace_id: id,
+        kind: "dataset",
+        id: `seed-${i}`,
+        attributes: {},
+      },
+    });
+    expect(res.ok()).toBe(true);
+    ids.push(id);
+  }
+  await page.addInitScript((ws: string) => {
+    window.localStorage.setItem("atlas:active-workspace", ws);
+  }, ids[0]);
+  return ids;
+}
+
+/**
+ * W20c — Force the signer probe to report 'unconfigured' for the
+ * NEXT navigation. Implemented as a request route-handler that
+ * injects the `x-atlas-test-force-signer: unconfigured` header on
+ * `/api/atlas/system/health` requests.
+ *
+ * The server only honors the header when `ATLAS_E2E_TEST_HOOKS=1`
+ * is set in the Next.js process env — `playwright.config.ts` sets
+ * that env var for the spawned dev server.
+ */
+export async function forceSignerUnconfigured(page: Page): Promise<void> {
+  await page.route("**/api/atlas/system/health", async (route) => {
+    const req = route.request();
+    const headers = {
+      ...req.headers(),
+      "x-atlas-test-force-signer": "unconfigured",
+    };
+    await route.continue({ headers });
+  });
+}

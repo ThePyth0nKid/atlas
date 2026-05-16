@@ -3234,3 +3234,102 @@ deployment topology.
 | Two events in the same workspace produced concurrently both have `parent_hashes: []` (forked the DAG at genesis) | Concurrent atlas-web AND atlas-mcp-server writers against the same workspace | One writer per workspace until V2 ships the cross-process lock. The verifier still accepts the trace; the issue is operational, not trust-breaking. |
 | `e2e:write` script fails at the verifier step but POSTs succeed | Stale `target/release/atlas-verify-cli` from before a verifier-format change | `cargo build --release -p atlas-verify-cli` and re-run. |
 
+
+---
+
+## 18. Signer health probe + L3 status surface (W20c)
+
+W20c ships two new internal surfaces for understanding what layer 3
+(signer / embedder / backend) is actually doing in a running atlas-web
+deploy:
+
+* `GET /api/atlas/system/health` — env-only probe, 60-second TTL cache
+* `<LayerStatusPanel>` on `/` and `<SignerStatusPanel>` on `/settings`
+
+This section documents how to interpret the status values, how the
+probes are wired, and how to recover from each unhealthy state.
+
+### Status values
+
+The route returns a JSON envelope with three string-literal-union
+fields:
+
+```
+{ "ok": true,
+  "embedder": "operational" | "model_missing" | "unsupported",
+  "backend":  "operational" | "stub_501"      | "fault",
+  "signer":   "operational" | "unconfigured" }
+```
+
+`signer`:
+
+* `operational` — `ATLAS_DEV_MASTER_SEED` is set AND
+  `resolveSignerBinary()` finds a compiled `atlas-signer` binary.
+  New events can be signed.
+* `unconfigured` — either the seed env var is missing/empty or the
+  binary is not on disk. New events CANNOT be signed; existing
+  events stay verifiable. Recover by setting the env var (dev/CI)
+  or wiring the wave-3 HSM trio (§3), then waiting ≤60 s for the
+  cache to expire.
+
+`embedder`:
+
+* `operational` — fastembed is wired AND the bge-small-en-v1.5
+  artifact is present. V2-γ work.
+* `model_missing` — `ATLAS_EMBEDDER=fastembed` is set but the
+  artifact is not yet wired through the JS bridge (V2-β-1 stub).
+* `unsupported` — `ATLAS_EMBEDDER` is unset or `disabled`. Default.
+
+`backend`:
+
+* `operational` — `ATLAS_BACKEND_MODE=operational`. V2-γ work.
+* `stub_501` — semantic-search returns 501. Default (`unset` or
+  `stub`). Trace + write paths are operational regardless.
+* `fault` — `ATLAS_BACKEND_MODE=fault`. Operator-set explicit
+  marker.
+
+### Dashboard 3-tier degradation (DA-4)
+
+`<DashboardMetricsSection>` consumes the same probe via
+`<HomeContent>` and degrades any tier (Empty / Early / Full) to
+`<EmptyTier>` whenever `signer !== 'operational'`. The degraded
+state surfaces a yellow `data-testid="dashboard-layer-not-ready"`
+banner pointing to `/settings`. Rationale: a dashboard claiming
+"all systems operational" while the route returns 500 is a lie —
+the user-facing tier is the minimum of event-count tier and layer-
+readiness tier.
+
+### Cache TTL + env-var rotation
+
+The probes are cached for 60 seconds in-process. Operator workflow
+for env-var changes:
+
+1. Set the env var on the Next.js process (e.g. via
+   `systemd`, `docker run -e …`, or `vercel env`).
+2. Restart the Next.js process. The cache is in-memory so it
+   evicts on restart — no need to wait the TTL.
+3. Reload the dashboard. The probe re-runs on first request after
+   restart.
+
+If you cannot restart (e.g. live deploy), wait ≤60 s after the env
+change; the next page-load triggers a cache miss and re-probes.
+
+### Test-hook header — production safety
+
+Playwright specs force a specific status via the headers
+`x-atlas-test-force-signer`, `x-atlas-test-force-embedder`,
+`x-atlas-test-force-backend`. **These headers are honored only when
+`ATLAS_E2E_TEST_HOOKS=1` is set in the SERVER process env.**
+Production deployments do NOT set this var, so attacker-controlled
+headers are ignored by construction. The env var is set by
+`playwright.config.ts` for the spawned test server only.
+
+### Failure modes
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `signer: unconfigured` despite a valid env var | The cache TTL hasn't elapsed | Restart the Next.js process OR wait ≤60 s |
+| `POST /api/atlas/workspaces` returns 500 with `signer:` prefix; the workspace dir does NOT exist on disk | W20c rollback succeeded after signer failure | Configure the signer (§1) and retry |
+| `POST /api/atlas/workspaces` returns 500 with `partial_rollback:` prefix | Signer failed AND `fs.rm` failed (rare; concurrent process held a handle on Windows) | Manually remove the orphan dir under `dataDir()`; then configure the signer and retry |
+| `PATCH /api/atlas/workspaces` returns `500 cross_mount_rename_unsupported` | Source and target workspace directories straddle a Windows volume boundary | Move both onto the same volume (the data root); atomic rename is required for the operation to be safe |
+| `DELETE /api/atlas/workspaces` returns `409 cannot delete last workspace` | DA-6 enforcement: deleting would empty the data root and flip the UI into wizard mode | Create a new workspace first, then delete the unwanted one |

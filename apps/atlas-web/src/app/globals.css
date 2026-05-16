@@ -23,6 +23,13 @@
   --accent-trust: #166534;        /* green-800 */
   --accent-trust-brand: #3fbc78;  /* sigstore-green; for non-text branding only */
   --accent-warn: #b45309;         /* amber-700 — AA on bg-muted (was amber-500 #f59e0b → fail) */
+  /* W20c: darker amber for pills with a 15%-mix-on-white background
+   * (`color-mix(in srgb, var(--accent-warn) 15%, transparent)`). The
+   * computed pill bg is approximately #f4e5da, on which amber-700
+   * renders at 4.08:1 — below AA. amber-900 (#78350f) hits ~7.2:1
+   * on that mix, giving cross-browser AA buffer like --accent-trust
+   * does. Used by LayerStatusPanel / SignerStatusPanel / DA-4 banner. */
+  --accent-warn-on-mix: #78350f;  /* amber-900 */
   /* V1.19 Welle 11: WCAG 2.1 AA contrast.
    * Previous red-500 (#ef4444) on bg-muted → ~3.4:1, below AA.
    * red-700 (#b91c1c) on bg-muted → ~6.5:1, AA-compliant. */

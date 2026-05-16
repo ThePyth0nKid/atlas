@@ -61,6 +61,13 @@ test.describe("Dashboard — 3-tier metrics", () => {
       "href",
       "/write",
     );
+    // W20c Lesson #26 — structural anchor: LayerStatusPanel is mounted
+    // on the dashboard tree (above DashboardMetricsSection per
+    // HomeContent change in this commit). Verifying it here prevents
+    // a future DOM shift from silently invalidating dashboard layout.
+    await expect(page.getByTestId("layer-status-panel")).toBeVisible({
+      timeout: 15_000,
+    });
     // FullTier-only artefact must not be present.
     await expect(page.getByTestId("dashboard-tier-full")).toHaveCount(0);
   });

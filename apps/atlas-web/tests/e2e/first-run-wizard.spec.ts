@@ -64,6 +64,10 @@ test.describe("First-run wizard — empty workspaces", () => {
     await expect(page.getByTestId("dashboard-tier-empty")).toHaveCount(0);
     await expect(page.getByTestId("dashboard-tier-early")).toHaveCount(0);
     await expect(page.getByTestId("dashboard-tier-full")).toHaveCount(0);
+    // W20c Lesson #26 regression assertion: LayerStatusPanel lives on
+    // the dashboard tree, not the wizard tree. A future refactor that
+    // accidentally hoists it would surface here.
+    await expect(page.getByTestId("layer-status-panel")).toHaveCount(0);
   });
 
   test("first-run wizard creates workspace and redirects to /write", async ({

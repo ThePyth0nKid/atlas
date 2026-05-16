@@ -20,6 +20,13 @@
 
 import { defineConfig, devices } from "@playwright/test";
 
+// W20c — port override via env so worktrees on Windows hosts (where
+// the default 3001 may be claimed by another service per known issue
+// #114) can run the suite against a free port. CI leaves the env var
+// unset → falls back to 3001 (the canonical pinned port).
+const PORT = process.env.ATLAS_WEB_PORT ?? "3001";
+const BASE_URL = `http://localhost:${PORT}`;
+
 export default defineConfig({
   testDir: "./tests/e2e",
   // Tests run in parallel across files. Per-file is sequential — the
@@ -35,7 +42,7 @@ export default defineConfig({
     ? [["list"], ["html", { open: "never", outputFolder: "playwright-report" }]]
     : "list",
   use: {
-    baseURL: "http://localhost:3001",
+    baseURL: BASE_URL,
     trace: "on-first-retry",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
@@ -59,8 +66,8 @@ export default defineConfig({
     // Production build, not dev. Mirrors playground.atlas-trust.dev
     // shape (next start, no HMR client). CI runs `pnpm build` in a
     // prior step so this just starts the server.
-    command: "pnpm exec next start -p 3001",
-    url: "http://localhost:3001",
+    command: `pnpm exec next start -p ${PORT}`,
+    url: BASE_URL,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     // ATLAS_DEV_MASTER_SEED=1 mirrors the smoke.ts V1.12-Scope-B2 gate
@@ -70,6 +77,12 @@ export default defineConfig({
     // shell-level export.
     env: {
       ATLAS_DEV_MASTER_SEED: "1",
+      // W20c — enables the `x-atlas-test-force-*` header overrides on
+      // /api/atlas/system/health so Playwright specs can force a
+      // specific signer/embedder/backend value without mutating the
+      // server's actual env. Production deploys do NOT set this var,
+      // so attacker-controlled headers are ignored by construction.
+      ATLAS_E2E_TEST_HOOKS: "1",
     },
     stdout: "pipe",
     stderr: "pipe",

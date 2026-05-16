@@ -28,12 +28,16 @@ import { join } from "node:path";
 const {
   readdirMock,
   statMock,
+  rmMock,
+  renameMock,
   dataDirMock,
   derivePubkeyMock,
   ensureWorkspaceDirMock,
 } = vi.hoisted(() => ({
   readdirMock: vi.fn(),
   statMock: vi.fn(),
+  rmMock: vi.fn(),
+  renameMock: vi.fn(),
   dataDirMock: vi.fn(() => "/tmp/atlas-data"),
   derivePubkeyMock: vi.fn(),
   ensureWorkspaceDirMock: vi.fn(),
@@ -49,12 +53,23 @@ vi.mock("node:fs", async () => {
   // error branches (WorkspacePathError, EACCES) without polluting other
   // tests.
   statMock.mockImplementation((p: string) => actual.promises.stat(p));
+  // W20c — rm and rename default to real-impl delegation so rollback
+  // and rename success paths exercise the real filesystem. Tests that
+  // need synthetic error branches reassign via `mockRejectedValueOnce`.
+  rmMock.mockImplementation((p: string, opts?: object) =>
+    actual.promises.rm(p, opts as unknown as Parameters<typeof actual.promises.rm>[1]),
+  );
+  renameMock.mockImplementation((oldP: string, newP: string) =>
+    actual.promises.rename(oldP, newP),
+  );
   return {
     ...actual,
     promises: {
       ...actual.promises,
       readdir: readdirMock,
       stat: statMock,
+      rm: rmMock,
+      rename: renameMock,
     },
   };
 });
@@ -82,7 +97,7 @@ vi.mock("@atlas/bridge", async () => {
   };
 });
 
-import { GET, POST } from "./route";
+import { GET, POST, PATCH, DELETE } from "./route";
 
 interface Dirent {
   name: string;
@@ -94,6 +109,19 @@ const file = (name: string): Dirent => ({ name, isDirectory: () => false });
 
 beforeEach(async () => {
   readdirMock.mockReset();
+  // W20c — readdir defaults to real-impl delegation so PATCH/DELETE
+  // tests (which exercise the workspace-count gate) can run against
+  // real tmpdir contents. GET-route tests explicitly reassign
+  // readdirMock for their own fixtures.
+  const actualFsForReaddir =
+    await vi.importActual<typeof import("node:fs")>("node:fs");
+  readdirMock.mockImplementation(
+    (p: string, opts?: object) =>
+      actualFsForReaddir.promises.readdir(
+        p,
+        opts as unknown as Parameters<typeof actualFsForReaddir.promises.readdir>[1],
+      ) as unknown as Promise<string[]>,
+  );
   dataDirMock.mockReset();
   dataDirMock.mockReturnValue("/tmp/atlas-data");
   derivePubkeyMock.mockReset();
@@ -104,6 +132,17 @@ beforeEach(async () => {
   const actualFs = await vi.importActual<typeof import("node:fs")>("node:fs");
   statMock.mockReset();
   statMock.mockImplementation((p: string) => actualFs.promises.stat(p));
+  rmMock.mockReset();
+  rmMock.mockImplementation((p: string, opts?: object) =>
+    actualFs.promises.rm(
+      p,
+      opts as unknown as Parameters<typeof actualFs.promises.rm>[1],
+    ),
+  );
+  renameMock.mockReset();
+  renameMock.mockImplementation((oldP: string, newP: string) =>
+    actualFs.promises.rename(oldP, newP),
+  );
   const actualBridge =
     await vi.importActual<typeof import("@atlas/bridge")>("@atlas/bridge");
   ensureWorkspaceDirMock.mockReset();
@@ -444,5 +483,295 @@ describe("POST /api/atlas/workspaces", () => {
     // The attacker-supplied key name MUST NOT have been echoed.
     expect(body.error).not.toContain("<script>");
     expect(derivePubkeyMock).not.toHaveBeenCalled();
+  });
+
+  // ───────── W20c (DA-1): signer-failure triggers atomic rollback ─────────
+
+  it("rolls back the freshly-created workspace dir when the signer fails", async () => {
+    // Setup: signer fails AFTER mkdir. The route must `fs.rm` the
+    // freshly-created dir before returning 500 — eliminating the
+    // orphan "unconfigured" workspace UX that ba4e27f introduced and
+    // security-reviewer flagged in PR #113.
+    const { SignerError } =
+      await vi.importActual<typeof import("@atlas/bridge")>("@atlas/bridge");
+    derivePubkeyMock.mockRejectedValue(
+      new SignerError("ATLAS_DEV_MASTER_SEED unset"),
+    );
+    const res = await POST(post({ workspace_id: "ws-orphan-test" }));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toMatch(/^signer:/);
+    // The freshly-mkdir'd directory must no longer exist on disk.
+    await expect(
+      realFs.stat(join(tmpRoot, "ws-orphan-test")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("returns 500 partial_rollback when fs.rm fails after signer failure", async () => {
+    // The rare case: signer failed, but `fs.rm` also failed (e.g.
+    // concurrent process held a handle on Windows). Surface a typed
+    // `partial_rollback:` prefix so operators can clean up.
+    const { SignerError } =
+      await vi.importActual<typeof import("@atlas/bridge")>("@atlas/bridge");
+    derivePubkeyMock.mockRejectedValue(
+      new SignerError("ATLAS_DEV_MASTER_SEED unset"),
+    );
+    rmMock.mockRejectedValueOnce(
+      Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" }),
+    );
+    const res = await POST(post({ workspace_id: "ws-rm-fails" }));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toMatch(/^partial_rollback:/);
+    expect(body.error).toMatch(/signer failed/);
+  });
+
+  it("does NOT roll back when ensureWorkspaceDir fails (dir was never created)", async () => {
+    // If mkdir fails, there's nothing to roll back. The route must NOT
+    // call `fs.rm` (no orphan can exist).
+    const { StorageError } =
+      await vi.importActual<typeof import("@atlas/bridge")>("@atlas/bridge");
+    ensureWorkspaceDirMock.mockRejectedValueOnce(
+      new StorageError("storage failed"),
+    );
+    rmMock.mockRejectedValue(new Error("rm should not have been called"));
+    const res = await POST(post({ workspace_id: "ws-mkdir-fails" }));
+    expect(res.status).toBe(500);
+    expect(rmMock).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────── PATCH /api/atlas/workspaces ───────────────────
+
+describe("PATCH /api/atlas/workspaces", () => {
+  let tmpRoot: string;
+  let originalDataDirEnv: string | undefined;
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "atlas-ws-patch-test-"));
+    dataDirMock.mockReturnValue(tmpRoot);
+    originalDataDirEnv = process.env.ATLAS_DATA_DIR;
+    process.env.ATLAS_DATA_DIR = tmpRoot;
+  });
+
+  afterEach(() => {
+    if (originalDataDirEnv === undefined) {
+      delete process.env.ATLAS_DATA_DIR;
+    } else {
+      process.env.ATLAS_DATA_DIR = originalDataDirEnv;
+    }
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  const patch = (body: unknown): Request =>
+    new Request("http://localhost/api/atlas/workspaces", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  it("returns 400 when the old id fails the regex", async () => {
+    const res = await PATCH(
+      patch({ workspace_id: "bad space", new_workspace_id: "ws-new" }),
+    );
+    expect(res.status).toBe(400);
+    expect(derivePubkeyMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when the new id fails the regex", async () => {
+    const res = await PATCH(
+      patch({ workspace_id: "ws-old", new_workspace_id: "bad space" }),
+    );
+    expect(res.status).toBe(400);
+    expect(derivePubkeyMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when old and new ids are identical", async () => {
+    const res = await PATCH(
+      patch({ workspace_id: "ws-same", new_workspace_id: "ws-same" }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/must differ/);
+  });
+
+  it("returns 404 when the source workspace does not exist", async () => {
+    const res = await PATCH(
+      patch({ workspace_id: "ws-missing", new_workspace_id: "ws-new" }),
+    );
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe("workspace not found");
+  });
+
+  it("returns 409 when the target id already exists", async () => {
+    await realFs.mkdir(join(tmpRoot, "ws-src"));
+    await realFs.mkdir(join(tmpRoot, "ws-target"));
+    const res = await PATCH(
+      patch({ workspace_id: "ws-src", new_workspace_id: "ws-target" }),
+    );
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toBe("workspace already exists");
+  });
+
+  it("renames the directory and returns the new kid + pubkey on success", async () => {
+    await realFs.mkdir(join(tmpRoot, "ws-old"));
+    derivePubkeyMock.mockResolvedValue({
+      kid: "WRONG-kid-from-signer",
+      pubkey_b64url: "renamed-pubkey",
+    });
+    const res = await PATCH(
+      patch({ workspace_id: "ws-old", new_workspace_id: "ws-renamed" }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.workspace_id).toBe("ws-renamed");
+    expect(body.kid).toBe("atlas-anchor:ws-renamed");
+    expect(body.kid).not.toBe("WRONG-kid-from-signer");
+    expect(body.pubkey_b64url).toBe("renamed-pubkey");
+    // Old dir gone; new dir present.
+    await expect(realFs.stat(join(tmpRoot, "ws-old"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const newStat = await realFs.stat(join(tmpRoot, "ws-renamed"));
+    expect(newStat.isDirectory()).toBe(true);
+    expect(derivePubkeyMock).toHaveBeenCalledWith("ws-renamed");
+  });
+
+  it("returns 500 cross_mount_rename_unsupported on EXDEV", async () => {
+    await realFs.mkdir(join(tmpRoot, "ws-src"));
+    renameMock.mockRejectedValueOnce(
+      Object.assign(new Error("EXDEV: cross-device link"), { code: "EXDEV" }),
+    );
+    const res = await PATCH(
+      patch({ workspace_id: "ws-src", new_workspace_id: "ws-new" }),
+    );
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toMatch(/cross_mount_rename_unsupported/);
+  });
+
+  it("returns 413 on oversized Content-Length", async () => {
+    const oversized = (4 * 1024 + 1).toString();
+    const req = new Request("http://localhost/api/atlas/workspaces", {
+      method: "PATCH",
+      headers: {
+        "content-type": "application/json",
+        "content-length": oversized,
+      },
+      body: JSON.stringify({ workspace_id: "a", new_workspace_id: "b" }),
+    });
+    const res = await PATCH(req);
+    expect(res.status).toBe(413);
+  });
+
+  it("returns 400 sanitized message on unrecognized keys", async () => {
+    const res = await PATCH(
+      patch({
+        workspace_id: "ws-x",
+        new_workspace_id: "ws-y",
+        "<script>": "x",
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("invalid input: body contains unexpected keys");
+  });
+});
+
+// ─────────────────── DELETE /api/atlas/workspaces ───────────────────
+
+describe("DELETE /api/atlas/workspaces", () => {
+  let tmpRoot: string;
+  let originalDataDirEnv: string | undefined;
+
+  beforeEach(() => {
+    tmpRoot = mkdtempSync(join(tmpdir(), "atlas-ws-delete-test-"));
+    dataDirMock.mockReturnValue(tmpRoot);
+    originalDataDirEnv = process.env.ATLAS_DATA_DIR;
+    process.env.ATLAS_DATA_DIR = tmpRoot;
+  });
+
+  afterEach(() => {
+    if (originalDataDirEnv === undefined) {
+      delete process.env.ATLAS_DATA_DIR;
+    } else {
+      process.env.ATLAS_DATA_DIR = originalDataDirEnv;
+    }
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  const del = (body: unknown): Request =>
+    new Request("http://localhost/api/atlas/workspaces", {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  it("returns 400 when the id fails the regex", async () => {
+    const res = await DELETE(del({ workspace_id: "bad space" }));
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 404 when the workspace does not exist", async () => {
+    // Mkdir a second workspace so the last-workspace gate would not
+    // even apply to the deleted (non-existent) one.
+    await realFs.mkdir(join(tmpRoot, "ws-other"));
+    const res = await DELETE(del({ workspace_id: "ws-missing" }));
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toBe("workspace not found");
+  });
+
+  it("refuses to delete the last user-facing workspace (409)", async () => {
+    await realFs.mkdir(join(tmpRoot, "ws-only"));
+    const res = await DELETE(del({ workspace_id: "ws-only" }));
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toBe("cannot delete last workspace");
+    // Dir must still exist — the 409 is a hard refusal.
+    const stat = await realFs.stat(join(tmpRoot, "ws-only"));
+    expect(stat.isDirectory()).toBe(true);
+  });
+
+  it("deletes the workspace directory when 2+ exist", async () => {
+    await realFs.mkdir(join(tmpRoot, "ws-keep"));
+    await realFs.mkdir(join(tmpRoot, "ws-delete"));
+    const res = await DELETE(del({ workspace_id: "ws-delete" }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.workspace_id).toBe("ws-delete");
+    await expect(
+      realFs.stat(join(tmpRoot, "ws-delete")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    // Other workspace untouched.
+    const kept = await realFs.stat(join(tmpRoot, "ws-keep"));
+    expect(kept.isDirectory()).toBe(true);
+  });
+
+  it("returns 413 on oversized Content-Length", async () => {
+    const oversized = (4 * 1024 + 1).toString();
+    const req = new Request("http://localhost/api/atlas/workspaces", {
+      method: "DELETE",
+      headers: {
+        "content-type": "application/json",
+        "content-length": oversized,
+      },
+      body: JSON.stringify({ workspace_id: "a" }),
+    });
+    const res = await DELETE(req);
+    expect(res.status).toBe(413);
+  });
+
+  it("returns 400 sanitized message on unrecognized keys", async () => {
+    const res = await DELETE(
+      del({ workspace_id: "ok", "<script>": "x" }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe("invalid input: body contains unexpected keys");
   });
 });
