@@ -40,8 +40,12 @@ const REPO_ROOT = resolve(BRIDGE_ROOT, "..", "..");
  * and in audit-log identifiers. Restricting to `[a-zA-Z0-9_-]{1,128}` makes
  * path-traversal attacks (`../..`) and shell-metacharacter surprises
  * structurally impossible.
+ *
+ * Exported for the atlas-web client-side mirror's parity test
+ * (`apps/atlas-web/src/lib/workspace-context.test.ts`) so drift between
+ * the two copies trips CI instead of silently shipping.
  */
-const WORKSPACE_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
+export const WORKSPACE_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
 
 export function isValidWorkspaceId(id: string): boolean {
   return WORKSPACE_ID_RE.test(id);

@@ -53,12 +53,18 @@ export function KnowledgeGraphView() {
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 1000, h: 560 });
   const [trace, setTrace] = useState<RawTrace | null>(null);
   const [selectedHash, setSelectedHash] = useState<string | null>(null);
+  // Surface fetch failures (network error, !r.ok envelope, JSON parse
+  // failure) so the user sees a real error message instead of a blank
+  // canvas. Mirrors `LiveVerifierPanel`'s error pattern; see the
+  // `verifier-error` testid contract in that file.
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (workspace === null) {
       // Workspace context still resolving — drop any prior trace and
       // wait for the next workspace event to refetch.
       setTrace(null);
+      setError(null);
       return;
     }
     let cancelled = false;
@@ -66,12 +72,30 @@ export function KnowledgeGraphView() {
     // briefly stay on screen while the new fetch lands.
     setTrace(null);
     setSelectedHash(null);
+    setError(null);
     fetch(`/api/atlas/trace?workspace=${encodeURIComponent(workspace)}`)
-      .then((r) => r.json())
+      .then(async (r) => {
+        if (!r.ok) {
+          // Try to surface the structured error envelope; fall back to
+          // the HTTP status when the body isn't parseable JSON.
+          let detail = `HTTP ${r.status}`;
+          try {
+            const body = (await r.json()) as { error?: string };
+            if (typeof body.error === "string") detail = body.error;
+          } catch {
+            // body wasn't JSON — keep the HTTP-status fallback
+          }
+          throw new Error(`could not load trace: ${detail}`);
+        }
+        return (await r.json()) as RawTrace;
+      })
       .then((j: RawTrace) => {
         if (!cancelled) setTrace(j);
       })
-      .catch(() => undefined);
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : String(e));
+      });
     return () => {
       cancelled = true;
     };
@@ -127,6 +151,22 @@ export function KnowledgeGraphView() {
 
     return { nodes, links, selectedEvent };
   }, [trace, selectedHash]);
+
+  // Fetch-error contract: render a visible, accessible error block so
+  // the user can distinguish "trace endpoint failed" from "workspace
+  // is legitimately empty". Mirrors LiveVerifierPanel's
+  // `verifier-error` testid + role="alert" pattern.
+  if (error !== null) {
+    return (
+      <div
+        data-testid="graph-error"
+        role="alert"
+        className="border border-[var(--accent-danger)] rounded-lg p-4 text-[13px] text-[var(--accent-danger)] bg-[var(--bg-subtle)]"
+      >
+        {error}
+      </div>
+    );
+  }
 
   // W20a empty-state contract: when the trace has resolved with zero
   // events, render a call-to-action instead of an empty force-graph

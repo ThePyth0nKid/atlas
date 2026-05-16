@@ -83,7 +83,12 @@ export async function GET(): Promise<NextResponse> {
     .map((e) => e.name)
     .filter((name) => isValidWorkspaceId(name))
     .filter((name) => !CI_ARTIFACT_PATTERN.test(name))
-    .sort();
+    // toSorted (ES2023 / Node 20+) returns a new array — respects the
+    // repo's immutability standing rule. The preceding .filter/.map
+    // chain already produces a fresh array, so the practical effect is
+    // identical; this keeps the pattern consistent with the rest of
+    // the codebase.
+    .toSorted();
 
   const defaultWorkspace = workspaces.length > 0 ? workspaces[0] : null;
 
