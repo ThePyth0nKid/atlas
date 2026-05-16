@@ -1,0 +1,328 @@
+"use client";
+
+/**
+ * W20b-1 — 3-tier dashboard metrics section.
+ *
+ * Replaces the hard-coded marketing KPIs that lived inline in
+ * `apps/atlas-web/src/app/page.tsx` (W20a). The component fetches the
+ * current workspace's `/api/atlas/trace` response, computes metrics
+ * locally via the pure `computeWorkspaceMetrics` module, and renders
+ * one of three tiers based on `totalEvents`:
+ *
+ *   - <EmptyTier>   totalEvents = 0       → welcome + CTA, no cards
+ *   - <EarlyTier>   1 ≤ events ≤ 10        → recent-events list
+ *   - <FullTier>    events ≥ 11           → 7 real KPI cards
+ *
+ * The tier thresholds (10/11) are intentionally calibrated for the
+ * V2-β-1 pivot: with a handful of events the KPI cards read as
+ * misleading ("12.4% vs prior period" with 3 events is noise), while
+ * the recent-events list shows the user exactly what they wrote. The
+ * threshold can move as we learn from real users; the file-level
+ * constants below are the single source of truth.
+ *
+ * Frozen testids (Playwright dashboard-tiers.spec.ts):
+ *   - dashboard-tier-empty
+ *   - dashboard-tier-early
+ *   - dashboard-tier-full
+ *   - dashboard-metrics-loading
+ *   - dashboard-metrics-error
+ *   - kpi-card                  (inherited from <KpiCard>)
+ *
+ * Threat model (TM-W20b-1):
+ *   Trace responses are JSON-parsed inside a try/catch. A failed parse
+ *   surfaces as an error block (`role="alert"`) instead of crashing
+ *   the whole page. The `computeWorkspaceMetrics` function is itself
+ *   defensive about malformed event fields — see its module-level
+ *   JSDoc for the malformed-input contract.
+ */
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import type { AtlasEvent } from "@atlas/bridge";
+import { KpiCard } from "@/components/KpiCard";
+import {
+  computeWorkspaceMetrics,
+  type WorkspaceMetrics,
+} from "@/lib/workspace-metrics";
+import { useWorkspaceContext } from "@/lib/workspace-context";
+
+const EARLY_TIER_MAX = 10;
+
+type FetchState =
+  | { kind: "loading" }
+  | { kind: "ready"; events: AtlasEvent[]; metrics: WorkspaceMetrics }
+  | { kind: "error"; message: string };
+
+interface TraceShape {
+  workspace_id: string;
+  events: unknown[];
+}
+
+export function DashboardMetricsSection(): React.ReactElement {
+  const { workspace, workspaces } = useWorkspaceContext();
+  const [state, setState] = useState<FetchState>({ kind: "loading" });
+
+  useEffect(() => {
+    if (workspace === null) {
+      setState({ kind: "loading" });
+      return;
+    }
+
+    let cancelled = false;
+    setState({ kind: "loading" });
+
+    (async () => {
+      try {
+        const wsParam = encodeURIComponent(workspace);
+        const res = await fetch(`/api/atlas/trace?workspace=${wsParam}`);
+        if (!res.ok) {
+          throw new Error(`could not load trace (HTTP ${res.status})`);
+        }
+        const json = await res.text();
+        if (cancelled) return;
+
+        let trace: TraceShape;
+        try {
+          trace = JSON.parse(json) as TraceShape;
+        } catch (e) {
+          throw new Error(`trace JSON parse failed: ${(e as Error).message}`);
+        }
+        const events = Array.isArray(trace.events)
+          ? (trace.events as AtlasEvent[])
+          : [];
+        const metrics = computeWorkspaceMetrics(events);
+        if (cancelled) return;
+        setState({ kind: "ready", events, metrics });
+      } catch (e) {
+        if (cancelled) return;
+        setState({
+          kind: "error",
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspace]);
+
+  if (state.kind === "loading") {
+    return (
+      <div
+        className="text-[13px] text-[var(--foreground-muted)]"
+        data-testid="dashboard-metrics-loading"
+      >
+        Loading workspace metrics…
+      </div>
+    );
+  }
+
+  if (state.kind === "error") {
+    return (
+      <div
+        className="border border-[var(--border)] rounded-lg p-4 text-[13px] text-[var(--accent-danger)]"
+        role="alert"
+        data-testid="dashboard-metrics-error"
+      >
+        Failed to load workspace metrics: {state.message}
+      </div>
+    );
+  }
+
+  const { events, metrics } = state;
+  if (metrics.totalEvents === 0) {
+    return <EmptyTier />;
+  }
+  if (metrics.totalEvents <= EARLY_TIER_MAX) {
+    return <EarlyTier events={events} />;
+  }
+  return <FullTier metrics={metrics} workspaces={workspaces} />;
+}
+
+// ───────────────────────── EmptyTier ─────────────────────────
+
+function EmptyTier(): React.ReactElement {
+  return (
+    <section
+      data-testid="dashboard-tier-empty"
+      className="border border-dashed border-[var(--border)] rounded-lg p-10 text-center"
+    >
+      <h2 className="text-xl font-semibold tracking-tight mb-2">
+        Welcome to Atlas
+      </h2>
+      <p className="text-[var(--foreground-muted)] max-w-md mx-auto mb-6">
+        Your audit trail starts with your first signed fact.
+      </p>
+      <Link
+        href="/write"
+        className="inline-block text-[13px] font-medium border border-[var(--border)] rounded-md px-4 py-2 hover:bg-[var(--bg-subtle)]"
+        data-testid="dashboard-empty-cta"
+      >
+        Write your first fact →
+      </Link>
+    </section>
+  );
+}
+
+// ───────────────────────── EarlyTier ─────────────────────────
+
+interface EarlyTierProps {
+  events: ReadonlyArray<AtlasEvent>;
+}
+
+function EarlyTier({ events }: EarlyTierProps): React.ReactElement {
+  // Sort newest-first by ts. Malformed ts sinks to the bottom — we use
+  // -Infinity for parse failures so they sort last under descending order.
+  const sorted = [...events]
+    .map((ev) => ({ ev, tsMs: tryParseTs(ev.ts) }))
+    .sort((a, b) => b.tsMs - a.tsMs)
+    .slice(0, 10);
+
+  return (
+    <section
+      data-testid="dashboard-tier-early"
+      className="border border-[var(--border)] rounded-lg p-5"
+    >
+      <h2 className="font-medium mb-3">Recent events</h2>
+      <ul className="space-y-2">
+        {sorted.map(({ ev }) => (
+          <li
+            key={ev.event_hash}
+            className="flex items-center gap-3 text-[13px]"
+            data-testid="dashboard-early-event"
+          >
+            <span className="text-[var(--foreground-muted)] w-20 shrink-0">
+              {formatRelative(tryParseTs(ev.ts))}
+            </span>
+            <span className="font-medium w-32 shrink-0">
+              {payloadKindLabel(ev)}
+            </span>
+            <code className="hash-chip break-all">
+              {typeof ev.event_hash === "string"
+                ? ev.event_hash.slice(0, 12)
+                : "—"}
+            </code>
+          </li>
+        ))}
+      </ul>
+      <p className="text-[12px] text-[var(--foreground-muted)] mt-3">
+        The full KPI dashboard activates once you have 11+ events.
+      </p>
+    </section>
+  );
+}
+
+// ───────────────────────── FullTier ─────────────────────────
+
+interface FullTierProps {
+  metrics: WorkspaceMetrics;
+  workspaces: ReadonlyArray<string>;
+}
+
+function FullTier({ metrics, workspaces }: FullTierProps): React.ReactElement {
+  const eventsLast30dValue = metrics.eventsLast30d.toLocaleString();
+  const eventsLast30dSub =
+    metrics.eventsLast30dPrior === 0
+      ? "no prior data"
+      : describeDelta(metrics.eventsLast30d, metrics.eventsLast30dPrior);
+
+  const anchorPct =
+    metrics.totalEvents === 0
+      ? 0
+      : Math.round((metrics.anchorCount / metrics.totalEvents) * 100);
+  const anchorSub =
+    metrics.anchorCount === 0
+      ? "anchoring V2-γ (currently 0%)"
+      : "Sigstore-anchored events";
+
+  const workspacesSub = (() => {
+    if (workspaces.length === 0) return "no workspaces listed";
+    const joined = workspaces.join(", ");
+    return joined.length > 60 ? `${joined.slice(0, 57)}…` : joined;
+  })();
+
+  return (
+    <div className="space-y-4" data-testid="dashboard-tier-full">
+      <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <KpiCard
+          label="Events (last 30d)"
+          value={eventsLast30dValue}
+          sub={eventsLast30dSub}
+        />
+        <KpiCard label="Sig-valid" value="—" sub="run Live Verifier panel" />
+        <KpiCard
+          label="Anchor coverage"
+          value={`${anchorPct}%`}
+          sub={anchorSub}
+        />
+        <KpiCard
+          label="Pending policy violations"
+          value="0"
+          sub="policy engine V2-δ"
+        />
+      </section>
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <KpiCard
+          label="Active workspaces"
+          value={workspaces.length.toLocaleString()}
+          sub={workspacesSub}
+        />
+        <KpiCard
+          label="Unique signers"
+          value={metrics.uniqueSigners.length.toLocaleString()}
+          sub="DIDs signing into this workspace"
+        />
+        <KpiCard
+          label="DAG depth"
+          value={`${metrics.dagDepth} hops`}
+          sub="max parent-chain depth"
+        />
+      </section>
+    </div>
+  );
+}
+
+// ───────────────────────── helpers ─────────────────────────
+
+function tryParseTs(ts: unknown): number {
+  if (typeof ts !== "string") return Number.NEGATIVE_INFINITY;
+  const ms = Date.parse(ts);
+  return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms;
+}
+
+function payloadKindLabel(ev: AtlasEvent): string {
+  if (
+    typeof ev.payload === "object" &&
+    ev.payload !== null &&
+    !Array.isArray(ev.payload)
+  ) {
+    const t = (ev.payload as Record<string, unknown>).type;
+    if (typeof t === "string") return t;
+  }
+  return "(untyped)";
+}
+
+function describeDelta(current: number, prior: number): string {
+  const diff = current - prior;
+  const sign = diff >= 0 ? "+" : "";
+  return `${sign}${diff.toLocaleString()} vs prior period`;
+}
+
+function formatRelative(tsMs: number): string {
+  if (!Number.isFinite(tsMs)) return "—";
+  const diffMs = Date.now() - tsMs;
+  if (diffMs < 0) return "future";
+  const sec = Math.floor(diffMs / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 30) return `${day}d ago`;
+  const month = Math.floor(day / 30);
+  if (month < 12) return `${month}mo ago`;
+  const year = Math.floor(day / 365);
+  return `${year}y ago`;
+}

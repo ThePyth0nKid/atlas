@@ -34,6 +34,7 @@
  * the same PR turns the atlas-web-playwright CI lane red.
  */
 
+import Link from "next/link";
 import { useState } from "react";
 
 type Status = "idle" | "submitting" | "success" | "error";
@@ -176,6 +177,11 @@ export function WriteNodeForm() {
               </option>
             ))}
           </select>
+          <p className={hintClass}>
+            dataset / model / inference / document / other — selects the
+            payload schema. Every node lands in the same DAG; the kind is
+            a tag, not a separate namespace.
+          </p>
         </Field>
 
         <Field label="Node ID" htmlFor="id">
@@ -192,6 +198,11 @@ export function WriteNodeForm() {
             autoComplete="off"
             data-testid="write-node-id"
           />
+          <p className={hintClass}>
+            A stable caller-chosen identifier for this fact. Used to
+            de-duplicate and to link related events; prefer a path-like
+            shape (<code className="hash-chip">kind/short-name</code>).
+          </p>
         </Field>
 
         <Field label="Attributes (JSON object)" htmlFor="attrs">
@@ -265,6 +276,15 @@ function SuccessCard({ result }: { result: SuccessResult }): React.ReactElement 
         <code className="hash-chip">atlas-verify-cli</code> against the
         workspace's exported bundle, or open the home-page Live Verifier panel
         once you've exported a fresh trace.
+      </p>
+      <p className="text-[12px] mt-2">
+        <Link
+          href="/graph"
+          className="underline hover:text-[var(--foreground)]"
+          data-testid="write-success-view-in-graph"
+        >
+          View in graph →
+        </Link>
       </p>
     </div>
   );
