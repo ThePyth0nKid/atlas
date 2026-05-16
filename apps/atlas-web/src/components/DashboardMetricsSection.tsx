@@ -46,8 +46,21 @@ import {
 } from "@/lib/workspace-metrics";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { isAtlasEventShape } from "@/lib/atlas-event-guard";
+import type { LayerStatus } from "@/lib/system-health";
 
 const EARLY_TIER_MAX = 10;
+
+/**
+ * W20c props.
+ *
+ * `layerStatus` is provided by the parent (`<HomeContent>`) so the
+ * fetch is shared across LayerStatusPanel + DashboardMetricsSection.
+ * `null` means "probe not yet resolved" — in that state we defer to
+ * the event-count-only tier choice (DA-4).
+ */
+export interface DashboardMetricsSectionProps {
+  layerStatus?: LayerStatus | null;
+}
 
 type FetchState =
   | { kind: "loading" }
@@ -59,7 +72,9 @@ interface TraceShape {
   events: unknown[];
 }
 
-export function DashboardMetricsSection(): React.ReactElement {
+export function DashboardMetricsSection({
+  layerStatus = null,
+}: DashboardMetricsSectionProps = {}): React.ReactElement {
   const { workspace, workspaces } = useWorkspaceContext();
   const [state, setState] = useState<FetchState>({ kind: "loading" });
 
@@ -143,8 +158,26 @@ export function DashboardMetricsSection(): React.ReactElement {
   }
 
   const { events, metrics } = state;
+
+  // W20c (DA-4) — honest tier resolution. The effective tier is the
+  // minimum of event-count tier and layer-readiness tier. A workspace
+  // with 200 events but `signer=unconfigured` renders Empty (with the
+  // signer-not-ready banner) because the dashboard would be lying:
+  // the user cannot sign new events even though stale ones exist.
+  //
+  // Layer-status `null` means the health probe is still in flight or
+  // failed; in that state we DO NOT degrade — the operator gets the
+  // event-count tier they would have seen pre-W20c, and the separate
+  // <LayerStatusPanel> surfaces the loading/error state. This avoids
+  // a flash of Empty during the brief health-probe RTT.
+  const signerUnconfigured =
+    layerStatus !== null && layerStatus.signer !== "operational";
+
   if (metrics.totalEvents === 0) {
-    return <EmptyTier />;
+    return <EmptyTier degraded={signerUnconfigured} />;
+  }
+  if (signerUnconfigured) {
+    return <EmptyTier degraded={true} />;
   }
   if (metrics.totalEvents <= EARLY_TIER_MAX) {
     return <EarlyTier events={events} />;
@@ -154,12 +187,41 @@ export function DashboardMetricsSection(): React.ReactElement {
 
 // ───────────────────────── EmptyTier ─────────────────────────
 
-function EmptyTier(): React.ReactElement {
+interface EmptyTierProps {
+  /**
+   * W20c (DA-4) — true when the tier was downgraded from Full/Early
+   * to Empty because `signer !== 'operational'`. In that case we add
+   * a banner explaining the degradation and pointing to /settings.
+   */
+  degraded?: boolean;
+}
+
+function EmptyTier({ degraded = false }: EmptyTierProps): React.ReactElement {
   return (
     <section
       data-testid="dashboard-tier-empty"
       className="border border-dashed border-[var(--border)] rounded-lg p-10 text-center"
     >
+      {degraded ? (
+        <div
+          className="mb-4 mx-auto max-w-md text-[12px] border rounded-md px-3 py-2"
+          style={{
+            background: "color-mix(in srgb, var(--accent-warn) 15%, transparent)",
+            // W20c — amber-900 for AA on the 15%-mix banner bg.
+            color: "var(--accent-warn-on-mix)",
+            borderColor: "var(--accent-warn)",
+          }}
+          data-testid="dashboard-layer-not-ready"
+          role="alert"
+        >
+          Layer 3 signer is unconfigured. Configure{" "}
+          <code className="font-mono">ATLAS_DEV_MASTER_SEED</code> and revisit{" "}
+          <Link href="/settings" className="underline">
+            Settings
+          </Link>{" "}
+          to re-check status.
+        </div>
+      ) : null}
       <h2 className="text-xl font-semibold tracking-tight mb-2">
         Welcome to Atlas
       </h2>

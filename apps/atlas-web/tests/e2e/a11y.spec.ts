@@ -34,6 +34,31 @@ test.describe("A11y — WCAG 2.1 AA", () => {
     // Wait for the verifier panel to mount so we audit the full
     // rendered tree, not the loading skeleton.
     await expect(page.getByTestId("live-verifier-panel")).toBeVisible();
+    // W20c Lesson #26 — anchor assertion. LayerStatusPanel mounts on
+    // the dashboard tree in this commit; ensure it's part of the
+    // audited DOM so a11y violations on the new panel are caught.
+    await expect(page.getByTestId("layer-status-panel")).toBeVisible();
+
+    const results = await new AxeBuilder({ page })
+      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+      .analyze();
+
+    expect.soft(results.violations, axeMessage(results.violations)).toEqual([]);
+  });
+
+  test("settings page passes axe WCAG 2.1 AA on initial render", async ({
+    page,
+    workspace,
+  }) => {
+    // W20c — new /settings route. Seeded so the workspace-list panel
+    // is non-empty and all four panels render.
+    await provisionAndSelect(page, workspace);
+    await page.goto("/settings");
+    await expect(page.getByTestId("settings-content")).toBeVisible();
+    // Wait for the data-bound panels to settle so axe audits the
+    // ready DOM, not the loading skeleton.
+    await expect(page.getByTestId("settings-workspace-list")).toBeVisible();
+    await expect(page.getByTestId("settings-supply-chain-pins")).toBeVisible();
 
     const results = await new AxeBuilder({ page })
       .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])

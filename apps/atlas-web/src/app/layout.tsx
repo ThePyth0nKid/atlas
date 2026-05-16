@@ -33,6 +33,11 @@ const NAV: ReadonlyArray<NavItem> = [
   { kind: "link", href: "/", label: "Audit Readiness" },
   { kind: "link", href: "/graph", label: "Knowledge Graph" },
   { kind: "link", href: "/write", label: "Write" },
+  // W20c — new /settings route lit up here. Sits between core
+  // surfaces and coming-soon roadmap entries so operator-side
+  // controls are findable without lurking next to the bank-demo
+  // showcase chip.
+  { kind: "link", href: "/settings", label: "Settings" },
   {
     kind: "soon",
     label: "Compliance Lens",

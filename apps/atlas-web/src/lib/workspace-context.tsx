@@ -84,6 +84,25 @@ export interface WorkspaceContextValue {
   createWorkspace: (
     id: string,
   ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * W20c — rename an existing workspace via PATCH. Validates both ids
+   * client-side BEFORE hitting the network. On success, updates the
+   * workspaces list (immutable splice), re-pins `localStorage` if the
+   * renamed workspace was active, and re-selects it under the new id.
+   */
+  renameWorkspace: (
+    oldId: string,
+    newId: string,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * W20c — delete a workspace via DELETE. Refuses the call client-side
+   * if it would be the last workspace (defence-in-depth; the server
+   * also returns 409). On success, drops the workspace from the list
+   * and clears `localStorage` if it was the active selection.
+   */
+  deleteWorkspace: (
+    id: string,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
 }
 
 /**
@@ -144,6 +163,99 @@ export async function requestCreateWorkspace(
         typeof body.error === "string" && body.error.length > 0
           ? body.error
           : "create failed",
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * W20c — pure helper for PATCH /api/atlas/workspaces (rename).
+ * Validates both ids client-side BEFORE the network round-trip.
+ */
+export async function requestRenameWorkspace(
+  oldId: string,
+  newId: string,
+  fetchFn: typeof fetch,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!WORKSPACE_ID_RE.test(oldId)) {
+    return {
+      ok: false,
+      error: `invalid workspace id: ${oldId} — must match [a-zA-Z0-9_-]{1,128}`,
+    };
+  }
+  if (!WORKSPACE_ID_RE.test(newId)) {
+    return {
+      ok: false,
+      error: `invalid new workspace id: ${newId} — must match [a-zA-Z0-9_-]{1,128}`,
+    };
+  }
+  if (oldId === newId) {
+    return { ok: false, error: "new workspace id must differ from current id" };
+  }
+  let res: Response;
+  try {
+    res = await fetchFn("/api/atlas/workspaces", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace_id: oldId, new_workspace_id: newId }),
+    });
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+  let body: CreateWorkspaceServerResponse;
+  try {
+    body = (await res.json()) as CreateWorkspaceServerResponse;
+  } catch {
+    return { ok: false, error: `rename failed: HTTP ${res.status}` };
+  }
+  if (!res.ok || body.ok !== true) {
+    return {
+      ok: false,
+      error:
+        typeof body.error === "string" && body.error.length > 0
+          ? body.error
+          : "rename failed",
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * W20c — pure helper for DELETE /api/atlas/workspaces.
+ */
+export async function requestDeleteWorkspace(
+  id: string,
+  fetchFn: typeof fetch,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!WORKSPACE_ID_RE.test(id)) {
+    return {
+      ok: false,
+      error: `invalid workspace id: ${id} — must match [a-zA-Z0-9_-]{1,128}`,
+    };
+  }
+  let res: Response;
+  try {
+    res = await fetchFn("/api/atlas/workspaces", {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workspace_id: id }),
+    });
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+  let body: CreateWorkspaceServerResponse;
+  try {
+    body = (await res.json()) as CreateWorkspaceServerResponse;
+  } catch {
+    return { ok: false, error: `delete failed: HTTP ${res.status}` };
+  }
+  if (!res.ok || body.ok !== true) {
+    return {
+      ok: false,
+      error:
+        typeof body.error === "string" && body.error.length > 0
+          ? body.error
+          : "delete failed",
     };
   }
   return { ok: true };
@@ -314,6 +426,67 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
     [],
   );
 
+  /**
+   * W20c — rename via PATCH. On success, immutably swaps the old id
+   * for the new in the workspaces list, re-pins localStorage if the
+   * renamed workspace was the active one, and selects the new id.
+   */
+  const renameWorkspace = useCallback(
+    async (
+      oldId: string,
+      newId: string,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const result = await requestRenameWorkspace(oldId, newId, fetch);
+      if (!result.ok) return result;
+      setError(null);
+      setWorkspaces((prev) =>
+        prev
+          .filter((id) => id !== oldId)
+          .concat(prev.includes(oldId) ? [newId] : [])
+          .toSorted(),
+      );
+      // If the renamed workspace was the active selection, re-pin to
+      // the new id. Otherwise leave the active workspace untouched.
+      setWorkspaceState((current) => {
+        if (current !== oldId) return current;
+        try {
+          window.localStorage.setItem(LOCAL_STORAGE_KEY, newId);
+        } catch {
+          // soft failure — see read-side comment
+        }
+        return newId;
+      });
+      return { ok: true };
+    },
+    [],
+  );
+
+  /**
+   * W20c — delete via DELETE. On success, drops the workspace from
+   * the list and clears localStorage if it was the active one. The
+   * "last workspace" gate lives on the server (409) — the client
+   * surfaces that error inline.
+   */
+  const deleteWorkspace = useCallback(
+    async (id: string): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const result = await requestDeleteWorkspace(id, fetch);
+      if (!result.ok) return result;
+      setError(null);
+      setWorkspaces((prev) => prev.filter((w) => w !== id));
+      setWorkspaceState((current) => {
+        if (current !== id) return current;
+        try {
+          window.localStorage.removeItem(LOCAL_STORAGE_KEY);
+        } catch {
+          // soft failure — see read-side comment
+        }
+        return null;
+      });
+      return { ok: true };
+    },
+    [],
+  );
+
   const value = useMemo<WorkspaceContextValue>(
     () => ({
       workspace,
@@ -322,8 +495,19 @@ export function WorkspaceProvider({ children }: WorkspaceProviderProps) {
       loading,
       error,
       createWorkspace,
+      renameWorkspace,
+      deleteWorkspace,
     }),
-    [workspace, setWorkspace, workspaces, loading, error, createWorkspace],
+    [
+      workspace,
+      setWorkspace,
+      workspaces,
+      loading,
+      error,
+      createWorkspace,
+      renameWorkspace,
+      deleteWorkspace,
+    ],
   );
 
   return (
