@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType } from "react";
 import dynamic from "next/dynamic";
+import { useWorkspaceContext } from "@/lib/workspace-context";
 
 // react-force-graph imports d3 ESM and reads window — must be client-only.
 // We type loosely because the upstream typings for the dynamic-import path
@@ -47,14 +48,25 @@ type RawTrace = {
 };
 
 export function KnowledgeGraphView() {
+  const { workspace } = useWorkspaceContext();
   const containerRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 1000, h: 560 });
   const [trace, setTrace] = useState<RawTrace | null>(null);
   const [selectedHash, setSelectedHash] = useState<string | null>(null);
 
   useEffect(() => {
+    if (workspace === null) {
+      // Workspace context still resolving — drop any prior trace and
+      // wait for the next workspace event to refetch.
+      setTrace(null);
+      return;
+    }
     let cancelled = false;
-    fetch("/api/golden/bank-trace")
+    // Reset prior trace so the previous workspace's nodes don't
+    // briefly stay on screen while the new fetch lands.
+    setTrace(null);
+    setSelectedHash(null);
+    fetch(`/api/atlas/trace?workspace=${encodeURIComponent(workspace)}`)
       .then((r) => r.json())
       .then((j: RawTrace) => {
         if (!cancelled) setTrace(j);
@@ -63,7 +75,7 @@ export function KnowledgeGraphView() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [workspace]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -115,6 +127,30 @@ export function KnowledgeGraphView() {
 
     return { nodes, links, selectedEvent };
   }, [trace, selectedHash]);
+
+  // W20a empty-state contract: when the trace has resolved with zero
+  // events, render a call-to-action instead of an empty force-graph
+  // canvas. The test seam (`graph-empty-state`) is pinned by the
+  // workspace-selector Playwright spec.
+  if (trace !== null && trace.events.length === 0) {
+    return (
+      <div
+        data-testid="graph-empty-state"
+        className="border border-dashed border-[var(--border)] rounded-lg p-8 text-center bg-[var(--bg-subtle)]"
+      >
+        <h3 className="font-medium mb-2">Your knowledge graph is empty</h3>
+        <p className="text-[13px] text-[var(--foreground-muted)]">
+          <a
+            href="/write"
+            className="underline hover:text-[var(--foreground)]"
+          >
+            Write a fact at /write →
+          </a>{" "}
+          to materialise your first node.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[1fr_360px] gap-4">
