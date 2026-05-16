@@ -21,7 +21,7 @@
  *   doesn't exist — exactly the shape the empty tier renders for.
  */
 
-import { test, expect } from "./fixtures";
+import { test, expect, provisionAndSelect } from "./fixtures";
 import type { Page } from "@playwright/test";
 
 async function pinWorkspace(page: Page, workspace: string): Promise<void> {
@@ -136,7 +136,13 @@ test.describe("Nav — coming-soon disabled entries", () => {
 });
 
 test.describe("Home — Status disclosure footer", () => {
-  test("status footer renders on the home page", async ({ page }) => {
+  test("status footer renders on the home page", async ({ page, workspace }) => {
+    // W20b-2: the StatusDisclosureFooter lives inside HomeContent's
+    // dashboard branch. Without seeding, HomeContent renders the
+    // FirstRunWizard and the footer is absent. Seed first so the
+    // dashboard tree (including the footer) mounts. Introduced by
+    // 70ead19, not addressed by 8dc0ec5, fixed by this commit.
+    await provisionAndSelect(page, workspace);
     await page.goto("/");
     const footer = page.getByTestId("status-disclosure-footer");
     await expect(footer).toBeVisible();

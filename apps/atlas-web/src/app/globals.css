@@ -98,3 +98,12 @@ body {
   background: color-mix(in srgb, var(--accent-danger) 15%, transparent);
   color: var(--accent-danger);
 }
+
+/* W20b-2 — native <dialog> backdrop. Used by <WorkspaceSelector>'s
+ * "+ New" dialog (and any future modal that uses showModal()). The
+ * dialog element itself styles via Tailwind classes; only the
+ * pseudo-element needs hand-rolled CSS because Tailwind 4 doesn't
+ * generate `::backdrop` utilities by default. */
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.4);
+}

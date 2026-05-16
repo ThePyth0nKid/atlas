@@ -32,43 +32,18 @@
  * + single-tip is a valid DAG shape).
  */
 
-import { test, expect } from "./fixtures";
-
-/**
- * Helper: provision a workspace with one Genesis event and pin it as
- * the active workspace via localStorage for the WorkspaceProvider.
- * Returns once the provider is observed in `ready` state with the
- * given workspace selected.
- */
-async function provisionAndSelect(
-  page: import("@playwright/test").Page,
-  workspace: string,
-): Promise<void> {
-  // Provision via the existing write-node route. One node.create
-  // event with kind="dataset" is sufficient for a valid trace; the
-  // verifier exercises all V1.0 checks on it.
-  const writeRes = await page.request.post("/api/atlas/write-node", {
-    data: {
-      workspace_id: workspace,
-      kind: "dataset",
-      id: "home-spec-genesis",
-      attributes: {},
-    },
-  });
-  expect(writeRes.ok()).toBe(true);
-
-  // Seed localStorage BEFORE navigation. Next.js layout mounts the
-  // WorkspaceProvider on first render; the provider reads localStorage
-  // synchronously in its effect.
-  await page.addInitScript((ws: string) => {
-    window.localStorage.setItem("atlas:active-workspace", ws);
-  }, workspace);
-}
+import { test, expect, provisionAndSelect } from "./fixtures";
 
 test.describe("Home — Live Verifier panel", () => {
   test("page renders Audit Readiness heading and verifier panel mounts", async ({
     page,
+    workspace,
   }) => {
+    // W20b-2: HomeContent branches on workspaces.length === 0 →
+    // FirstRunWizard. Seed a workspace so the dashboard tree (with
+    // the LiveVerifierPanel) renders. Introduced by 70ead19, not
+    // addressed by 8dc0ec5, fixed by this commit.
+    await provisionAndSelect(page, workspace);
     await page.goto("/");
     await expect(
       page.getByRole("heading", { level: 1, name: "Audit Readiness" }),

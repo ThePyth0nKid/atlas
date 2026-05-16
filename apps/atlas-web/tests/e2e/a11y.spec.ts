@@ -16,14 +16,85 @@
  */
 
 import AxeBuilder from "@axe-core/playwright";
-import { test, expect } from "./fixtures";
+import { test, expect, provisionAndSelect } from "./fixtures";
 
 test.describe("A11y — WCAG 2.1 AA", () => {
-  test("home page passes axe WCAG 2.1 AA on initial render", async ({ page }) => {
+  // W20b-2 — split decision (Option B): the home `/` route renders one
+  // of two trees depending on whether any workspace exists. Both
+  // states are reachable by real users; auditing only one would lie
+  // about coverage. The original test is renamed to make the seeded
+  // path explicit, and a sibling test pins the wizard path. Introduced
+  // by 70ead19, not addressed by 8dc0ec5, fixed by this commit.
+  test("home page (dashboard state) passes axe WCAG 2.1 AA on initial render", async ({
+    page,
+    workspace,
+  }) => {
+    await provisionAndSelect(page, workspace);
     await page.goto("/");
     // Wait for the verifier panel to mount so we audit the full
     // rendered tree, not the loading skeleton.
     await expect(page.getByTestId("live-verifier-panel")).toBeVisible();
+
+    const results = await new AxeBuilder({ page })
+      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+      .analyze();
+
+    expect.soft(results.violations, axeMessage(results.violations)).toEqual([]);
+  });
+
+  test("home page (first-run wizard state) passes axe WCAG 2.1 AA", async ({
+    page,
+  }) => {
+    // No seed: when the user-facing workspaces list is empty the
+    // FirstRunWizard replaces the dashboard tree. Skip when the data
+    // root already has user-facing workspaces (same gate as
+    // first-run-wizard.spec.ts) so the assertion is honest about what
+    // it audits.
+    //
+    // Race: parallel first-run-wizard tests create user-facing
+    // workspaces mid-run; the pre-goto probe can read 0 but the
+    // render-time HomeContent fetch reads >0 and swaps to the
+    // dashboard tree. We probe BEFORE goto for the obvious skip case,
+    // and re-detect post-goto by polling for the wizard root with a
+    // short budget; if it never appears within 3s and a dashboard
+    // tier marker does, skip rather than fail — both signals are
+    // legitimate; the wizard-axe assertion only makes sense in the
+    // empty-state.
+    const res = await page.request.get("/api/atlas/workspaces");
+    const count = res.ok()
+      ? ((await res.json()) as { workspaces: string[] }).workspaces.length
+      : -1;
+    test.skip(
+      count > 0,
+      `data root has ${count} user workspaces — wizard state untestable`,
+    );
+    await page.addInitScript(() => {
+      window.localStorage.removeItem("atlas:active-workspace");
+    });
+    await page.goto("/");
+    // Post-goto race detection: if HomeContent picks dashboard
+    // because a sibling test landed a workspace between probe and
+    // navigation, skip without failing.
+    const wizardVisible = await page
+      .getByTestId("first-run-wizard")
+      .isVisible({ timeout: 3_000 })
+      .catch(() => false);
+    if (!wizardVisible) {
+      const dashboardVisible = await page
+        .getByTestId("dashboard-tier-empty")
+        .or(page.getByTestId("dashboard-tier-early"))
+        .or(page.getByTestId("dashboard-tier-full"))
+        .first()
+        .isVisible()
+        .catch(() => false);
+      test.skip(
+        dashboardVisible,
+        "race with first-run-wizard.spec.ts: workspace appeared between probe and goto",
+      );
+    }
+    await expect(page.getByTestId("first-run-wizard")).toBeVisible({
+      timeout: 15_000,
+    });
 
     const results = await new AxeBuilder({ page })
       .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
