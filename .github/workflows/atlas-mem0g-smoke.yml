@@ -19,11 +19,57 @@
 #         BEFORE bumping the dependency. See plan-doc Phase C
 #         Implementation Notes.
 #
+# W20a-meta — aggregator gate restructure:
+#   Previously this workflow was path-gated at the `on:` level, so it
+#   skipped entirely for atlas-web-only PRs. Combined with the master
+#   ruleset requiring `mem0g-smoke (<os>)` per OS leg, that produced a
+#   recurring deadlock: atlas-web PRs could never satisfy the required
+#   checks (workflow never triggered → check never reported).
+#
+#   New shape (Path D, "aggregator pattern"):
+#     1. `detect-paths` job ALWAYS runs on PR/push to master/main.
+#        It uses dorny/paths-filter to compute whether any mem0g-
+#        relevant file actually changed. Output: should-run = "true"/"false".
+#     2. `mem0g-smoke` matrix job runs IFF should-run == "true".
+#        Existing benchmark capture, cache, byte-pin, etc. are byte-
+#        identical to the prior structure when it actually runs.
+#     3. `mem0g-smoke-required` aggregator job ALWAYS runs and reports:
+#          - SUCCESS when should-run == "false" (no relevant changes →
+#            matrix correctly skipped)
+#          - SUCCESS when should-run == "true" AND every matrix leg
+#            succeeded
+#          - FAILURE when should-run == "true" AND any matrix leg
+#            failed/was cancelled
+#        The ruleset requires ONLY this single name. A real Layer 3
+#        regression still blocks merge (aggregator fails), but
+#        atlas-web-only PRs see skip-success.
+#
+#   THREAT MODEL (TM-M1 .. TM-M5):
+#     TM-M1 (gate bypass via spoofed path): the aggregator reads
+#           `needs.mem0g-smoke.result` which reflects the matrix outcome
+#           verbatim. There is no path through which "matrix failed"
+#           maps to "aggregator success" — see the shell `if` below.
+#     TM-M2 (path-filter divergence): the dorny/paths-filter spec in
+#           the `detect-paths` job MUST stay in sync with the prior
+#           `on.pull_request.paths` list. The source of truth is the
+#           `mem0g` filter below; the old `paths:` block is removed
+#           from `on:` so there is now exactly one list. Cross-
+#           reference also embedded in the filter spec comment.
+#     TM-M3 (GHA expression injection): shell steps use direct
+#           `${{ needs.<job>.outputs.<x> }}` interpolation only for
+#           internal, workflow-controlled values. No PR-author-
+#           controlled string is interpolated into a shell step.
+#     TM-M4 (SHA pin hygiene): dorny/paths-filter is SHA-pinned to the
+#           upstream v3.0.2 release tag (SHA de90cc6...). Both the tag
+#           name and the SHA are in the action ref + comment.
+#     TM-M5 (ruleset edit audit): out of scope for this YAML; handled
+#           in the PR description with the gh api PUT command and
+#           before/after JSON snippet.
+#
 # Conventions per Atlas Standing Protocol (mirrors
 # `.github/workflows/atlas-arcadedb-smoke.yml`):
 #   - SHA-pinned actions
 #   - `permissions: { contents: read }` (narrowest blast radius)
-#   - paths-gated trigger (limits CI fan-out)
 #   - cancel-in-progress concurrency
 #   - 3-OS matrix: ubuntu-latest + windows-latest + macos-latest
 #     (W18c Phase C; was Linux-only in W18b)
@@ -39,26 +85,10 @@ on:
     branches:
       - master
       - main
-    paths:
-      - 'crates/atlas-mem0g/**'
-      - 'crates/atlas-projector/src/upsert.rs'
-      - 'crates/atlas-projector/src/state.rs'
-      - 'crates/atlas-projector/src/canonical.rs'
-      - 'Cargo.lock'
-      - 'Cargo.toml'
-      - '.github/workflows/atlas-mem0g-smoke.yml'
   push:
     branches:
       - master
       - main
-    paths:
-      - 'crates/atlas-mem0g/**'
-      - 'crates/atlas-projector/src/upsert.rs'
-      - 'crates/atlas-projector/src/state.rs'
-      - 'crates/atlas-projector/src/canonical.rs'
-      - 'Cargo.lock'
-      - 'Cargo.toml'
-      - '.github/workflows/atlas-mem0g-smoke.yml'
 
 permissions:
   contents: read
@@ -68,8 +98,47 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # W20a-meta — always-on path detection. Replaces the workflow-level
+  # `on.<event>.paths` filter so the aggregator job below can ALWAYS
+  # report a status (satisfying the master-branch ruleset on every PR,
+  # regardless of whether atlas-mem0g files actually changed).
+  #
+  # Filter spec MUST stay in sync with the prior `paths:` list (TM-M2).
+  # Source-of-truth list:
+  #   - crates/atlas-mem0g/**
+  #   - crates/atlas-projector/src/upsert.rs
+  #   - crates/atlas-projector/src/state.rs
+  #   - crates/atlas-projector/src/canonical.rs
+  #   - Cargo.lock
+  #   - Cargo.toml
+  #   - .github/workflows/atlas-mem0g-smoke.yml
+  detect-paths:
+    name: detect-paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      should-run: ${{ steps.filter.outputs.mem0g }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Detect mem0g-relevant changes
+        id: filter
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
+        with:
+          filters: |
+            mem0g:
+              - 'crates/atlas-mem0g/**'
+              - 'crates/atlas-projector/src/upsert.rs'
+              - 'crates/atlas-projector/src/state.rs'
+              - 'crates/atlas-projector/src/canonical.rs'
+              - 'Cargo.lock'
+              - 'Cargo.toml'
+              - '.github/workflows/atlas-mem0g-smoke.yml'
+
   mem0g-smoke:
     name: mem0g-smoke (${{ matrix.os }})
+    needs: detect-paths
+    if: needs.detect-paths.outputs.should-run == 'true'
     runs-on: ${{ matrix.os }}
     # PR #107 fix-commit-4: bumped 15 → 25 min. Empirically:
     #   - ubuntu-latest: 7m16s end-to-end (well under 15)
@@ -296,3 +365,59 @@ jobs:
             target/mem0g-bench-${{ matrix.os }}.log
           if-no-files-found: warn
           retention-days: 30
+
+  # W20a-meta — aggregator gate. ALWAYS runs (via `if: always()`),
+  # depends on detect-paths + mem0g-smoke, reports a single SUCCESS or
+  # FAILURE that the master-branch ruleset can require on every PR.
+  #
+  # Skip-success contract:
+  #   - detect-paths says no relevant changes → matrix correctly
+  #     skipped → aggregator exits 0 with a clear log line.
+  #   - detect-paths says changes ARE relevant → mem0g-smoke matrix
+  #     ran → aggregator checks `needs.mem0g-smoke.result`:
+  #       * "success" → exit 0
+  #       * anything else (failure, cancelled, skipped) → exit 1
+  #
+  # NOTE on `needs.mem0g-smoke.result` when the matrix was skipped:
+  # if `should-run` is "false", `mem0g-smoke` evaluates the `if:`
+  # condition to false and the job's `.result` is "skipped". The
+  # short-circuit above (the `should-run != "true"` check) handles
+  # that case BEFORE we look at `mem0g-smoke.result`, so a legitimate
+  # skip never trips the failure branch.
+  mem0g-smoke-required:
+    name: mem0g-smoke-required
+    needs: [detect-paths, mem0g-smoke]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Evaluate gate result
+        shell: bash
+        env:
+          SHOULD_RUN: ${{ needs.detect-paths.outputs.should-run }}
+          MATRIX_RESULT: ${{ needs.mem0g-smoke.result }}
+          DETECT_RESULT: ${{ needs.detect-paths.result }}
+        run: |
+          set -euo pipefail
+          echo "detect-paths.result=${DETECT_RESULT}"
+          echo "detect-paths.outputs.should-run=${SHOULD_RUN}"
+          echo "mem0g-smoke.result=${MATRIX_RESULT}"
+
+          # Defensive: if detect-paths itself failed, fail the gate.
+          # We cannot trust SHOULD_RUN if the detector did not succeed.
+          if [[ "${DETECT_RESULT}" != "success" ]]; then
+            echo "::error::detect-paths job did not succeed (result: ${DETECT_RESULT}); refusing to pass gate"
+            exit 1
+          fi
+
+          if [[ "${SHOULD_RUN}" != "true" ]]; then
+            echo "No mem0g-relevant paths changed — gate passes by skip."
+            exit 0
+          fi
+
+          if [[ "${MATRIX_RESULT}" != "success" ]]; then
+            echo "::error::mem0g-smoke matrix did not all succeed (result: ${MATRIX_RESULT})"
+            exit 1
+          fi
+
+          echo "mem0g-smoke matrix passed on all OS legs."
