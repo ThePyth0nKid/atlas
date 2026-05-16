@@ -76,11 +76,20 @@ export default function RootLayout({
                   );
                 }
                 if (item.kind === "showcase") {
+                  // W20b-1 fix-commit (CRIT a11y): removed `opacity-70`
+                  // (+ paired `hover:opacity-100`) that previously made
+                  // the inherited `--foreground-muted` (#475569) compute
+                  // to 3.59:1 contrast on the white nav — below WCAG
+                  // 2.1 AA's 4.5:1 threshold. Visual de-emphasis is now
+                  // carried purely by `text-[12px] uppercase
+                  // tracking-wide`, which already reads as a marketing
+                  // showcase chip without dimming the foreground color
+                  // below AA.
                   return (
                     <Link
                       key={item.href}
                       href={item.href}
-                      className="text-[12px] uppercase tracking-wide opacity-70 hover:text-[var(--foreground)] hover:opacity-100 transition-all"
+                      className="text-[12px] uppercase tracking-wide hover:text-[var(--foreground)] transition-colors"
                       data-testid="nav-showcase-bank-demo"
                     >
                       {item.label}
@@ -88,11 +97,20 @@ export default function RootLayout({
                   );
                 }
                 // kind === "soon"
+                // W20b-1 fix-commit (HIGH a11y): added `role="button"`
+                // so screen-reader users see the disabled control. Bare
+                // `aria-disabled` on a non-interactive <span> would be
+                // silently dropped by AT trees. The roadmap copy is
+                // intentionally welle-agnostic (was "Coming in W20c–
+                // W30") so the public UI does not commit to internal
+                // codenames that may shift — see security-reviewer
+                // TM-W20b-7.
                 return (
                   <span
                     key={item.testid}
                     className="text-[var(--foreground-muted)] cursor-not-allowed opacity-60"
-                    title="Coming in W20c–W30 (atlas roadmap)"
+                    role="button"
+                    title="Coming soon — see Atlas roadmap"
                     aria-disabled="true"
                     data-testid={item.testid}
                   >

@@ -29,8 +29,16 @@
 import { useEffect, useState } from "react";
 import { runVerifier, type VerifyOutcome } from "@/lib/verifier-loader";
 
+/**
+ * W20b-1 fix-commit (code-reviewer MEDIUM): removed the unreachable
+ * `"loading-wasm"` status. The WASM module is loaded lazily inside
+ * `runVerifier()` (see `verifier-loader.ts::loadWasm`), so from the
+ * panel's perspective WASM loading is transparently folded into the
+ * `"verifying"` transition. `LiveVerifierPanel` follows the same
+ * convention, so removing the dead state here keeps both panels'
+ * status machines aligned without changing user-visible labels.
+ */
 type Status =
-  | "loading-wasm"
   | "fetching-trace"
   | "verifying"
   | "done"
@@ -175,7 +183,6 @@ function StatusBadge({
     );
   }
   const labels: Record<Status, string> = {
-    "loading-wasm": "loading wasm…",
     "fetching-trace": "fetching trace…",
     verifying: "verifying…",
     done: "",

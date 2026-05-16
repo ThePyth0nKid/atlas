@@ -45,6 +45,7 @@ import {
   type WorkspaceMetrics,
 } from "@/lib/workspace-metrics";
 import { useWorkspaceContext } from "@/lib/workspace-context";
+import { isAtlasEventShape } from "@/lib/atlas-event-guard";
 
 const EARLY_TIER_MAX = 10;
 
@@ -84,12 +85,23 @@ export function DashboardMetricsSection(): React.ReactElement {
         let trace: TraceShape;
         try {
           trace = JSON.parse(json) as TraceShape;
-        } catch (e) {
-          throw new Error(`trace JSON parse failed: ${(e as Error).message}`);
+        } catch {
+          // W20b-1 fix-commit (security-reviewer TM-W20b-8): do NOT
+          // surface the raw SyntaxError message to the DOM. If the
+          // proxy ever returns an HTML error page, JSON.parse's error
+          // text would include a snippet of that HTML, which would then
+          // be rendered inside the dashboard error block. A fixed
+          // message avoids leaking response-body content into the UI.
+          throw new Error("trace response was not valid JSON");
         }
-        const events = Array.isArray(trace.events)
-          ? (trace.events as AtlasEvent[])
-          : [];
+        const rawEvents = Array.isArray(trace.events) ? trace.events : [];
+        // W20b-1 fix-commit (code-reviewer HIGH): replace the unchecked
+        // `as AtlasEvent[]` cast with a runtime filter via the
+        // `isAtlasEventShape` guard. Malformed entries are silently
+        // dropped — `computeWorkspaceMetrics` already counts all
+        // accepted events, so any drop here is bounded to entries that
+        // could not have produced meaningful metrics anyway.
+        const events: AtlasEvent[] = rawEvents.filter(isAtlasEventShape);
         const metrics = computeWorkspaceMetrics(events);
         if (cancelled) return;
         setState({ kind: "ready", events, metrics });
@@ -186,14 +198,21 @@ function EarlyTier({ events }: EarlyTierProps): React.ReactElement {
     >
       <h2 className="font-medium mb-3">Recent events</h2>
       <ul className="space-y-2">
-        {sorted.map(({ ev }) => (
+        {/*
+          W20b-1 fix-commit (code-reviewer MEDIUM): carry the parsed
+          `tsMs` value through from the sort step into the render
+          instead of re-parsing `ev.ts` per row. Previously each event
+          paid two `Date.parse` calls (sort + render); this halves
+          that.
+        */}
+        {sorted.map(({ ev, tsMs }) => (
           <li
             key={ev.event_hash}
             className="flex items-center gap-3 text-[13px]"
             data-testid="dashboard-early-event"
           >
             <span className="text-[var(--foreground-muted)] w-20 shrink-0">
-              {formatRelative(tryParseTs(ev.ts))}
+              {formatRelative(tsMs)}
             </span>
             <span className="font-medium w-32 shrink-0">
               {payloadKindLabel(ev)}
