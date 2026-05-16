@@ -25,21 +25,36 @@ import { promises as realFs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { readdirMock, dataDirMock, derivePubkeyMock } = vi.hoisted(() => ({
+const {
+  readdirMock,
+  statMock,
+  dataDirMock,
+  derivePubkeyMock,
+  ensureWorkspaceDirMock,
+} = vi.hoisted(() => ({
   readdirMock: vi.fn(),
+  statMock: vi.fn(),
   dataDirMock: vi.fn(() => "/tmp/atlas-data"),
   derivePubkeyMock: vi.fn(),
+  ensureWorkspaceDirMock: vi.fn(),
 }));
 
 vi.mock("@/lib/bootstrap", () => ({}));
 
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+  // W20b-2 fix-commit (tdd-guide HIGH): default `stat` delegates to the
+  // real implementation so the success / 409 paths keep exercising real
+  // filesystem state. Individual tests reassign `statMock` to inject
+  // error branches (WorkspacePathError, EACCES) without polluting other
+  // tests.
+  statMock.mockImplementation((p: string) => actual.promises.stat(p));
   return {
     ...actual,
     promises: {
       ...actual.promises,
       readdir: readdirMock,
+      stat: statMock,
     },
   };
 });
@@ -49,12 +64,21 @@ vi.mock("@atlas/bridge", async () => {
   // `WORKSPACE_ID_RE`, `perTenantKidFor`, `workspaceDir`, etc., but stub
   // `dataDir` so tests don't need a real fs root, and stub
   // `derivePubkeyViaSigner` so tests don't shell out to the Rust binary.
+  // W20b-2 fix-commit (tdd-guide HIGH): also expose
+  // `ensureWorkspaceDirMock` so error-branch tests can inject
+  // `WorkspacePathError` / `StorageError` rejections without spinning
+  // up a real broken disk. Default delegates to the real impl so the
+  // happy path keeps creating the dir on disk.
   const actual =
     await vi.importActual<typeof import("@atlas/bridge")>("@atlas/bridge");
+  ensureWorkspaceDirMock.mockImplementation((id: string) =>
+    actual.ensureWorkspaceDir(id),
+  );
   return {
     ...actual,
     dataDir: dataDirMock,
     derivePubkeyViaSigner: derivePubkeyMock,
+    ensureWorkspaceDir: ensureWorkspaceDirMock,
   };
 });
 
@@ -68,11 +92,24 @@ interface Dirent {
 const dir = (name: string): Dirent => ({ name, isDirectory: () => true });
 const file = (name: string): Dirent => ({ name, isDirectory: () => false });
 
-beforeEach(() => {
+beforeEach(async () => {
   readdirMock.mockReset();
   dataDirMock.mockReset();
   dataDirMock.mockReturnValue("/tmp/atlas-data");
   derivePubkeyMock.mockReset();
+  // W20b-2 fix-commit: re-hydrate the stat + ensureWorkspaceDir
+  // defaults so each test gets fresh real-impl delegation. Tests that
+  // need a synthetic error branch reassign these via
+  // `*Mock.mockImplementationOnce(...)` or `mockRejectedValueOnce`.
+  const actualFs = await vi.importActual<typeof import("node:fs")>("node:fs");
+  statMock.mockReset();
+  statMock.mockImplementation((p: string) => actualFs.promises.stat(p));
+  const actualBridge =
+    await vi.importActual<typeof import("@atlas/bridge")>("@atlas/bridge");
+  ensureWorkspaceDirMock.mockReset();
+  ensureWorkspaceDirMock.mockImplementation((id: string) =>
+    actualBridge.ensureWorkspaceDir(id),
+  );
 });
 
 describe("GET /api/atlas/workspaces", () => {
@@ -272,8 +309,15 @@ describe("POST /api/atlas/workspaces", () => {
   });
 
   it("creates the workspace and returns 200 with derived kid + pubkey", async () => {
+    // W20b-2 fix-commit (tdd-guide HIGH, finding #5): the mock returns
+    // a DIFFERENT kid than `perTenantKidFor("ws-fresh")` would compute,
+    // so the assertion below proves the route uses `perTenantKidFor`
+    // (the canonical source) rather than echoing `derived.kid`. Without
+    // this gap-closer the success test would pass even if a future
+    // refactor swapped the two sources, because both produced the same
+    // string in the original test setup.
     derivePubkeyMock.mockResolvedValue({
-      kid: "atlas-anchor:ws-fresh",
+      kid: "WRONG-kid-from-signer",
       pubkey_b64url: "abcd-base64url",
     });
     const res = await POST(post({ workspace_id: "ws-fresh" }));
@@ -282,6 +326,9 @@ describe("POST /api/atlas/workspaces", () => {
     expect(body.ok).toBe(true);
     expect(body.workspace_id).toBe("ws-fresh");
     expect(body.kid).toBe("atlas-anchor:ws-fresh");
+    // Intent-explicit: the route MUST NOT echo the signer's kid. The
+    // canonical kid is `perTenantKidFor(workspaceId)`.
+    expect(body.kid).not.toBe("WRONG-kid-from-signer");
     expect(body.pubkey_b64url).toBe("abcd-base64url");
     const stat = await realFs.stat(join(tmpRoot, "ws-fresh"));
     expect(stat.isDirectory()).toBe(true);
@@ -303,5 +350,99 @@ describe("POST /api/atlas/workspaces", () => {
     // redactPaths must have stripped the absolute path; the segment
     // should no longer carry the secrets dir verbatim.
     expect(body.error).not.toContain("/home/op/secrets/x");
+  });
+
+  // ───────── Error-branch coverage (W20b-2 fix-commit, tdd-guide HIGH) ─────────
+
+  it("returns 400 when fs.stat throws WorkspacePathError", async () => {
+    // Construct a synthetic WorkspacePathError from `fs.stat`. In
+    // production this could surface if a future bridge refactor
+    // delegated stat through a bridge-level path-validating helper;
+    // the route catch-block handles it generically. The mock injects
+    // the error directly to exercise that branch.
+    const { WorkspacePathError } =
+      await vi.importActual<typeof import("@atlas/bridge")>("@atlas/bridge");
+    statMock.mockRejectedValueOnce(
+      new WorkspacePathError("workspace_id resolves outside data root"),
+    );
+    const res = await POST(post({ workspace_id: "ws-stat-path-err" }));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toMatch(/workspace_id resolves outside data root/);
+    expect(derivePubkeyMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 with redacted path when fs.stat fails with non-ENOENT error", async () => {
+    // EACCES is a representative non-ENOENT errno — production
+    // operators see this when the data root is owned by another user
+    // and the Next.js process lacks read perms. The raw `fs.stat`
+    // error embeds the absolute path verbatim; the route MUST run it
+    // through `redactPaths` before serialising into the 500 response.
+    const eaccesErr = Object.assign(
+      new Error("EACCES: permission denied, stat '/sensitive/path/ws-x'"),
+      { code: "EACCES" },
+    );
+    statMock.mockRejectedValueOnce(eaccesErr);
+    const res = await POST(post({ workspace_id: "ws-stat-eacces" }));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toMatch(/^stat:/);
+    // Absolute path MUST have been stripped — operator filesystem
+    // layout is not a client-visible surface.
+    expect(body.error).not.toContain("/sensitive/path/ws-x");
+    expect(derivePubkeyMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 when ensureWorkspaceDir throws WorkspacePathError", async () => {
+    const { WorkspacePathError } =
+      await vi.importActual<typeof import("@atlas/bridge")>("@atlas/bridge");
+    ensureWorkspaceDirMock.mockRejectedValueOnce(
+      new WorkspacePathError("workspace_id resolves outside data root"),
+    );
+    const res = await POST(post({ workspace_id: "ws-mkdir-path-err" }));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toMatch(/workspace_id resolves outside data root/);
+    // The route bails BEFORE deriving the pubkey when the
+    // ensureWorkspaceDir step fails.
+    expect(derivePubkeyMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 with redacted path when ensureWorkspaceDir throws StorageError", async () => {
+    // Pairs with the redactPaths-on-StorageError defence-in-depth fix
+    // (finding #6). Without that fix the absolute path in the error
+    // message would have been echoed verbatim into the 500 response.
+    const { StorageError } =
+      await vi.importActual<typeof import("@atlas/bridge")>("@atlas/bridge");
+    ensureWorkspaceDirMock.mockRejectedValueOnce(
+      new StorageError("storage failed at /secret/path/x"),
+    );
+    const res = await POST(post({ workspace_id: "ws-mkdir-storage-err" }));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.error).toMatch(/^storage:/);
+    expect(body.error).not.toContain("/secret/path/x");
+    expect(derivePubkeyMock).not.toHaveBeenCalled();
+  });
+
+  it("returns 400 with sanitized message on unrecognized keys", async () => {
+    // W20b-2 fix-commit (security-reviewer MEDIUM, finding #9): the
+    // `.strict()` Zod schema rejects extra keys with a message that
+    // embeds attacker-controlled key names verbatim. The route MUST
+    // collapse that to a static message so a log-pipeline rendering
+    // attacker-controlled `<script>` content cannot trip up an
+    // unattended ingestor. The response is JSON-encoded (XSS-safe),
+    // but the static message is defence-in-depth at the log layer.
+    const res = await POST(
+      post({ workspace_id: "ok", "<script>alert(1)</script>": "x" }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toBe("invalid input: body contains unexpected keys");
+    // The attacker-supplied key name MUST NOT have been echoed.
+    expect(body.error).not.toContain("<script>");
+    expect(derivePubkeyMock).not.toHaveBeenCalled();
   });
 });

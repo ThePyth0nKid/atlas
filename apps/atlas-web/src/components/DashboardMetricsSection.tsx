@@ -204,33 +204,41 @@ function EarlyTier({ events }: EarlyTierProps): React.ReactElement {
           instead of re-parsing `ev.ts` per row. Previously each event
           paid two `Date.parse` calls (sort + render); this halves
           that.
+
+          W20b-2 fix-commit (code-reviewer MEDIUM): same pattern for
+          `payloadNodeIdLabel`. It was called twice per row (once for
+          `title`, once for the rendered text). Extract once per row
+          so the defensive narrowing chain runs N times instead of 2N.
         */}
-        {sorted.map(({ ev, tsMs }) => (
-          <li
-            key={ev.event_hash}
-            className="flex items-center gap-3 text-[13px]"
-            data-testid="dashboard-early-event"
-          >
-            <span className="text-[var(--foreground-muted)] w-20 shrink-0">
-              {formatRelative(tsMs)}
-            </span>
-            <span className="font-medium w-32 shrink-0">
-              {payloadKindLabel(ev)}
-            </span>
-            <span
-              data-testid="dashboard-early-event-id"
-              className="flex-1 truncate text-[var(--foreground-muted)]"
-              title={payloadNodeIdLabel(ev)}
+        {sorted.map(({ ev, tsMs }) => {
+          const nodeId = payloadNodeIdLabel(ev);
+          return (
+            <li
+              key={ev.event_hash}
+              className="flex items-center gap-3 text-[13px]"
+              data-testid="dashboard-early-event"
             >
-              {payloadNodeIdLabel(ev)}
-            </span>
-            <code className="hash-chip break-all">
-              {typeof ev.event_hash === "string"
-                ? ev.event_hash.slice(0, 12)
-                : "—"}
-            </code>
-          </li>
-        ))}
+              <span className="text-[var(--foreground-muted)] w-20 shrink-0">
+                {formatRelative(tsMs)}
+              </span>
+              <span className="font-medium w-32 shrink-0">
+                {payloadKindLabel(ev)}
+              </span>
+              <span
+                data-testid="dashboard-early-event-id"
+                className="flex-1 truncate text-[var(--foreground-muted)]"
+                title={nodeId}
+              >
+                {nodeId}
+              </span>
+              <code className="hash-chip break-all">
+                {typeof ev.event_hash === "string"
+                  ? ev.event_hash.slice(0, 12)
+                  : "—"}
+              </code>
+            </li>
+          );
+        })}
       </ul>
       <p className="text-[12px] text-[var(--foreground-muted)] mt-3">
         The full KPI dashboard activates once you have 11+ events.

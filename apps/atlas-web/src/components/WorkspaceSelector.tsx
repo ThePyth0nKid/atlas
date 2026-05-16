@@ -30,7 +30,7 @@
  * `apps/atlas-web/src/app/globals.css`.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import { useWorkspaceContext } from "@/lib/workspace-context";
 import { CreateWorkspaceForm } from "@/components/CreateWorkspaceForm";
@@ -40,6 +40,36 @@ export function WorkspaceSelector() {
     useWorkspaceContext();
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+
+  /**
+   * W20b-2 fix-commit (code-reviewer HIGH): register the `close`
+   * listener via a ref-callback so it attaches WHEN the dialog
+   * element actually mounts, not on first render of the component.
+   *
+   * The previous `useEffect` pattern ran once at first mount, when
+   * `loading === true` and the loading-branch returned early —
+   * `dialogRef.current` was therefore `null`, the effect's guard
+   * exited, and the listener never registered. After loading flipped
+   * to false the dialog mounted but no listener was ever attached,
+   * so Escape closed the native dialog while `dialogOpen` React state
+   * stayed `true` and the `data-open` attribute desynced.
+   *
+   * Ref-callback fires for every mount/unmount with the actual
+   * element, regardless of which branch rendered it. The listener
+   * lives for the element's lifetime; a re-mount gets a fresh
+   * listener. Returned-cleanup from a ref-callback is React-19+ only,
+   * so we don't rely on it — but the single-dialog single-component
+   * lifecycle here makes leak avoidance straightforward.
+   */
+  const dialogRefCallback = useCallback(
+    (el: HTMLDialogElement | null): void => {
+      dialogRef.current = el;
+      if (el === null) return;
+      const onClose = (): void => setDialogOpen(false);
+      el.addEventListener("close", onClose);
+    },
+    [],
+  );
 
   const openDialog = useCallback((): void => {
     const el = dialogRef.current;
@@ -60,17 +90,6 @@ export function WorkspaceSelector() {
     if (el === null) return;
     if (el.open) el.close();
     setDialogOpen(false);
-  }, []);
-
-  // Sync React state with native close (Escape key, ::backdrop click).
-  useEffect(() => {
-    const el = dialogRef.current;
-    if (el === null) return;
-    const onClose = (): void => setDialogOpen(false);
-    el.addEventListener("close", onClose);
-    return () => {
-      el.removeEventListener("close", onClose);
-    };
   }, []);
 
   if (loading) {
@@ -111,7 +130,7 @@ export function WorkspaceSelector() {
 
   const dialog = (
     <dialog
-      ref={dialogRef}
+      ref={dialogRefCallback}
       data-testid="workspace-selector-new-dialog"
       data-open={dialogOpen ? "true" : "false"}
       aria-labelledby="workspace-selector-new-title"

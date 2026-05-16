@@ -201,6 +201,23 @@ export async function POST(req: Request): Promise<NextResponse> {
 
   const parsed = CreateWorkspaceSchema.safeParse(body);
   if (!parsed.success) {
+    // W20b-2 fix-commit (security-reviewer MEDIUM): distinguish the
+    // `.strict()` unrecognized-keys path from other Zod failures. The
+    // unrecognized-keys message embeds attacker-controlled key names
+    // verbatim (e.g. `"Unrecognized key(s) in object: '<script>'"`),
+    // which is JSON-encoded in the response (XSS-safe) but can still
+    // cause log-pipeline rendering issues if an unattended log
+    // ingestor tries to highlight or display the error string. A
+    // static message for this case removes that risk entirely. Other
+    // failures (regex mismatch, missing key) carry the original
+    // `parsed.error.message` because it includes the helpful
+    // `WORKSPACE_ID_RE` description that the client can surface.
+    const hasUnrecognizedKeys = parsed.error.issues.some(
+      (issue) => issue.code === "unrecognized_keys",
+    );
+    if (hasUnrecognizedKeys) {
+      return jsonError(400, "invalid input: body contains unexpected keys");
+    }
     return jsonError(400, `invalid input: ${parsed.error.message}`);
   }
   const workspaceId = parsed.data.workspace_id;
@@ -219,8 +236,12 @@ export async function POST(req: Request): Promise<NextResponse> {
     const code = (e as NodeJS.ErrnoException).code;
     if (code !== "ENOENT") {
       // Surface ANY unexpected stat error rather than swallowing it.
+      // W20b-2 fix-commit (security-reviewer MEDIUM, defence-in-depth):
+      // wrap with `redactPaths` even though `WorkspacePathError.message`
+      // does not contain absolute paths today — matches the discipline
+      // in `_lib/http.ts:handleStoreError`. Closes drift before it ships.
       if (e instanceof WorkspacePathError) {
-        return jsonError(400, e.message);
+        return jsonError(400, redactPaths(e.message));
       }
       const msg = e instanceof Error ? e.message : String(e);
       return jsonError(500, `stat: ${redactPaths(msg)}`);
@@ -238,14 +259,20 @@ export async function POST(req: Request): Promise<NextResponse> {
       pubkey_b64url: derived.pubkey_b64url,
     });
   } catch (e) {
+    // W20b-2 fix-commit (security-reviewer MEDIUM, defence-in-depth):
+    // route every error message through `redactPaths`, matching
+    // `_lib/http.ts:handleStoreError`. None of these messages contain
+    // absolute paths today — but the bridge's error surface evolves
+    // independently of this route, and a one-line wrap closes that
+    // drift permanently.
     if (e instanceof WorkspacePathError) {
-      return jsonError(400, e.message);
+      return jsonError(400, redactPaths(e.message));
     }
     if (e instanceof SignerError) {
       return jsonError(500, `signer: ${redactPaths(e.message)}`);
     }
     if (e instanceof StorageError) {
-      return jsonError(500, `storage: ${e.message}`);
+      return jsonError(500, `storage: ${redactPaths(e.message)}`);
     }
     const msg = e instanceof Error ? e.message : String(e);
     return jsonError(500, `unexpected: ${redactPaths(msg)}`);
