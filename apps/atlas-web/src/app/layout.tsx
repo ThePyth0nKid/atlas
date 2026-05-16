@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import "./globals.css";
+import { WorkspaceProvider } from "@/lib/workspace-context";
+import { WorkspaceSelector } from "@/components/WorkspaceSelector";
 
 export const metadata: Metadata = {
   title: "Atlas — Verifiable Knowledge Graphs",
@@ -23,32 +25,36 @@ export default function RootLayout({
   return (
     <html lang="en" className="h-full">
       <body className="min-h-full bg-[var(--background)] text-[var(--foreground)]">
-        <header className="h-12 border-b border-[var(--border)] flex items-center px-6 gap-6">
-          <Link href="/" className="font-semibold tracking-tight">
-            Atlas
-          </Link>
-          <nav className="flex items-center gap-5 text-[13px] text-[var(--foreground-muted)]">
-            {NAV.map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                className="hover:text-[var(--foreground)] transition-colors"
-              >
-                {item.label}
-              </Link>
-            ))}
-          </nav>
-          {/*
-            V1.19 Welle 1: removed the hardcoded "ws-bankhaus-hagedorn"
-            chip and fake "last anchor 47s ago" indicator. They were
-            a static demo affordance that misrepresented system state
-            on every page (the chip has no relation to the workspace
-            actually being viewed; the timestamp ticked nothing). A
-            future welle wires a real workspace-selector + last-anchor
-            ticker driven by the verifier output. Until then, omit.
-          */}
-        </header>
-        <main className="max-w-[1280px] mx-auto px-8 py-8">{children}</main>
+        <WorkspaceProvider>
+          <header className="h-12 border-b border-[var(--border)] flex items-center px-6 gap-6">
+            <Link href="/" className="font-semibold tracking-tight">
+              Atlas
+            </Link>
+            <nav className="flex items-center gap-5 text-[13px] text-[var(--foreground-muted)]">
+              {NAV.map((item) => (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className="hover:text-[var(--foreground)] transition-colors"
+                >
+                  {item.label}
+                </Link>
+              ))}
+            </nav>
+            {/*
+              W20a: real workspace selector (replaces V1.19 Welle 1's
+              omission of the hardcoded "ws-bankhaus-hagedorn" chip).
+              The selector reads from `WorkspaceProvider` and drives
+              `LiveVerifierPanel` + `KnowledgeGraphView` to fetch the
+              currently-selected workspace's trace instead of the
+              golden bank-demo fixture.
+            */}
+            <div className="ml-auto">
+              <WorkspaceSelector />
+            </div>
+          </header>
+          <main className="max-w-[1280px] mx-auto px-8 py-8">{children}</main>
+        </WorkspaceProvider>
       </body>
     </html>
   );

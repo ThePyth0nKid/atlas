@@ -35,6 +35,7 @@ export {
 
 // ---------- Path resolution & data-root configuration ----------
 export {
+  WORKSPACE_ID_RE,
   isValidWorkspaceId,
   WorkspacePathError,
   setDefaultDataDir,

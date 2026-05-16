@@ -1,57 +1,122 @@
 "use client";
 
 /**
- * V1.19 Welle 11 — frozen `data-testid` test seam.
+ * V1.19 Welle 11 — frozen `data-testid` test seam (preserved across W20a).
  * The following data-testid identifiers are pinned by the Playwright
- * E2E suite in `apps/atlas-web/tests/e2e/home.spec.ts`. They MUST
- * remain present and semantically equivalent across refactors:
+ * E2E suite in `apps/atlas-web/tests/e2e/home.spec.ts` and
+ * `tests/e2e/workspace-selector.spec.ts`. They MUST remain present
+ * and semantically equivalent across refactors:
  *   - live-verifier-panel    : the outer section
  *   - verifier-status-badge  : the StatusBadge element
  *   - verifier-version       : the verifier_version chip (when present)
  *   - verifier-trace-meta    : workspace + events count line
  *   - verifier-evidence      : the evidence <ul>
  *   - verifier-error         : error message (when present)
- * Renaming or removing any of these without updating the spec file in
+ *
+ * W20a additions (also pinned by tests):
+ *   - verifier-empty-state   : rendered when the active workspace has
+ *                              zero events (replaces the evidence list
+ *                              and the VALID/INVALID badge with a
+ *                              friendly call-to-action).
+ *   - verifier-loading-workspace : rendered while the workspace context
+ *                              is still resolving (no workspace set).
+ *
+ * Renaming or removing any of these without updating the spec files in
  * the same PR turns the atlas-web-playwright CI lane red.
  */
 
 import { useEffect, useState } from "react";
 import { runVerifier, type VerifyOutcome } from "@/lib/verifier-loader";
+import { useWorkspaceContext } from "@/lib/workspace-context";
 
-type Status = "loading-wasm" | "fetching-trace" | "verifying" | "done" | "error";
+type Status =
+  | "waiting-workspace"
+  | "loading-wasm"
+  | "fetching-trace"
+  | "verifying"
+  | "empty"
+  | "done"
+  | "error";
+
+interface TraceShape {
+  workspace_id: string;
+  events: unknown[];
+}
 
 export function LiveVerifierPanel() {
-  const [status, setStatus] = useState<Status>("loading-wasm");
+  const { workspace } = useWorkspaceContext();
+  const [status, setStatus] = useState<Status>("waiting-workspace");
   const [error, setError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<VerifyOutcome | null>(null);
   const [verifierVersion, setVerifierVersion] = useState<string | null>(null);
   const [traceMeta, setTraceMeta] = useState<{ workspace: string; events: number } | null>(null);
 
   useEffect(() => {
+    if (workspace === null) {
+      // Context still loading — clear any prior state and wait.
+      setStatus("waiting-workspace");
+      setError(null);
+      setOutcome(null);
+      setVerifierVersion(null);
+      setTraceMeta(null);
+      return;
+    }
+
     let cancelled = false;
+
+    // Reset prior outcome on workspace change so the previous
+    // workspace's evidence doesn't briefly flash next to the new
+    // workspace's metadata.
+    setError(null);
+    setOutcome(null);
+    setVerifierVersion(null);
+    setTraceMeta(null);
+
     (async () => {
       try {
         setStatus("fetching-trace");
+        const wsParam = encodeURIComponent(workspace);
         const [traceRes, bundleRes] = await Promise.all([
-          fetch("/api/golden/bank-trace"),
-          fetch("/api/golden/bank-bundle"),
+          fetch(`/api/atlas/trace?workspace=${wsParam}`),
+          fetch(`/api/atlas/pubkey-bundle?workspace=${wsParam}`),
         ]);
         if (!traceRes.ok || !bundleRes.ok) {
-          throw new Error("could not load golden trace fixture");
+          throw new Error(
+            `could not load trace/bundle (trace: ${traceRes.status}, bundle: ${bundleRes.status})`,
+          );
         }
         const traceJson = await traceRes.text();
         const bundleJson = await bundleRes.text();
 
         if (cancelled) return;
-        setStatus("verifying");
 
+        // Parse minimally to inspect the events count — full parsing
+        // is the WASM verifier's job.
+        let trace: TraceShape;
+        try {
+          trace = JSON.parse(traceJson) as TraceShape;
+        } catch (e) {
+          throw new Error(`trace JSON parse failed: ${(e as Error).message}`);
+        }
+        const eventsCount = Array.isArray(trace.events) ? trace.events.length : 0;
+        setTraceMeta({ workspace: trace.workspace_id, events: eventsCount });
+
+        if (eventsCount === 0) {
+          // Empty workspace — skip the verifier (it would correctly
+          // pass on an empty event set, but rendering a "VALID" badge
+          // with zero evidence rows is misleading UX). Show a
+          // call-to-action instead.
+          if (cancelled) return;
+          setStatus("empty");
+          return;
+        }
+
+        setStatus("verifying");
         const result = await runVerifier(traceJson, bundleJson);
         if (cancelled) return;
-        const trace = JSON.parse(traceJson);
 
         setVerifierVersion(result.verifierVersion);
         setOutcome(result.outcome);
-        setTraceMeta({ workspace: trace.workspace_id, events: trace.events.length });
         setStatus("done");
       } catch (e) {
         if (cancelled) return;
@@ -62,7 +127,7 @@ export function LiveVerifierPanel() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [workspace]);
 
   return (
     <section
@@ -87,6 +152,15 @@ export function LiveVerifierPanel() {
         )}
       </div>
 
+      {status === "waiting-workspace" && (
+        <div
+          className="mt-3 text-[13px] text-[var(--foreground-muted)]"
+          data-testid="verifier-loading-workspace"
+        >
+          Loading workspace…
+        </div>
+      )}
+
       {traceMeta && (
         <div
           className="mt-3 text-[13px] text-[var(--foreground-muted)]"
@@ -94,6 +168,21 @@ export function LiveVerifierPanel() {
         >
           Workspace <code className="hash-chip">{traceMeta.workspace}</code>{" "}
           · {traceMeta.events} events
+        </div>
+      )}
+
+      {status === "empty" && (
+        <div
+          className="mt-4 border border-dashed border-[var(--border)] rounded-md p-4 text-[13px] text-[var(--foreground-muted)]"
+          data-testid="verifier-empty-state"
+        >
+          This workspace has no events yet.{" "}
+          <a
+            href="/write"
+            className="underline hover:text-[var(--foreground)]"
+          >
+            Write your first fact at /write →
+          </a>
         </div>
       )}
 
@@ -165,10 +254,34 @@ function StatusBadge({
       </span>
     );
   }
+  if (status === "empty") {
+    return (
+      <span
+        data-testid="verifier-status-badge"
+        data-status="empty"
+        className="text-[11px] px-2 py-0.5 rounded-full bg-[var(--bg-muted)] text-[var(--foreground-muted)]"
+      >
+        EMPTY
+      </span>
+    );
+  }
+  if (status === "waiting-workspace") {
+    return (
+      <span
+        data-testid="verifier-status-badge"
+        data-status="waiting-workspace"
+        className="text-[11px] px-2 py-0.5 rounded-full bg-[var(--bg-muted)] text-[var(--foreground-muted)]"
+      >
+        waiting…
+      </span>
+    );
+  }
   const labels: Record<Status, string> = {
+    "waiting-workspace": "waiting…",
     "loading-wasm": "loading wasm…",
     "fetching-trace": "fetching trace…",
     verifying: "verifying…",
+    empty: "",
     done: "",
     error: "",
   };
