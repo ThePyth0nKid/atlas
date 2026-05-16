@@ -1,30 +1,43 @@
+/**
+ * W20b-1 — home page (Audit Readiness).
+ *
+ * The page now renders real workspace state via
+ * `<DashboardMetricsSection>`, replacing the hard-coded marketing
+ * KPIs that lived inline in W20a. The page header copy is updated
+ * accordingly — the "illustrative values" disclaimer has been
+ * removed because every number on the page below is computed from
+ * the active workspace's signed events.
+ *
+ * Structure:
+ *   - heading + accurate sub-copy
+ *   - <DashboardMetricsSection>   (3-tier metrics: empty / early / full)
+ *   - <LiveVerifierPanel>         (unchanged from W20a — frozen contract)
+ *   - "regulator" CTA section     (unchanged — points at /audit-export,
+ *                                  which is now nav-disabled but the
+ *                                  CTA itself remains so users can find
+ *                                  the W20c roadmap entry)
+ *   - <StatusDisclosureFooter>    (W20b-1 — roadmap status)
+ */
+
 import Link from "next/link";
+import { DashboardMetricsSection } from "@/components/DashboardMetricsSection";
 import { LiveVerifierPanel } from "@/components/LiveVerifierPanel";
+import { StatusDisclosureFooter } from "@/components/StatusDisclosureFooter";
 
 export default function Page() {
   return (
     <div className="space-y-8">
       <section>
-        <h1 className="text-2xl font-semibold tracking-tight mb-1">Audit Readiness</h1>
+        <h1 className="text-2xl font-semibold tracking-tight mb-1">
+          Audit Readiness
+        </h1>
         <p className="text-[var(--foreground-muted)]">
-          Workspace state at a glance. The cards below are illustrative dashboard
-          values — the only cryptographic verification on this page runs in the
-          Live Verifier Panel further down.
+          Workspace state at a glance. All numbers below are computed from
+          your actual signed events.
         </p>
       </section>
 
-      <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <KpiCard label="Events (last 30d)" value="47,291" sub="+12.4% vs prior period" />
-        <KpiCard label="Sig-valid" value="—" sub="run Live Verifier panel" />
-        <KpiCard label="Anchor coverage" value="98.7%" sub="dashboard preview" />
-        <KpiCard label="Pending policy violations" value="0" sub="dashboard preview" />
-      </section>
-
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <KpiCard label="Active workspaces" value="3" sub="Bank prod / dev / sandbox" />
-        <KpiCard label="Human verifiers" value="12" sub="SPIFFE-bound identities" />
-        <KpiCard label="Data lineage depth" value="7 hops" sub="max DAG path observed" />
-      </section>
+      <DashboardMetricsSection />
 
       <LiveVerifierPanel />
 
@@ -45,32 +58,8 @@ export default function Page() {
           </Link>
         </div>
       </section>
-    </div>
-  );
-}
 
-function KpiCard({
-  label,
-  value,
-  sub,
-  trust,
-}: {
-  label: string;
-  value: string;
-  sub: string;
-  trust?: "ok" | "fail";
-}) {
-  return (
-    <div className="border border-[var(--border)] rounded-lg p-4 bg-[var(--background)]">
-      <div className="flex items-center gap-2">
-        <span className="text-[12px] uppercase tracking-wide text-[var(--foreground-muted)]">
-          {label}
-        </span>
-        {trust === "ok" && <span className="trust-tick trust-tick--ok">✓</span>}
-        {trust === "fail" && <span className="trust-tick trust-tick--fail">✗</span>}
-      </div>
-      <div className="mt-2 text-2xl font-semibold tracking-tight">{value}</div>
-      <div className="mt-1 text-[12px] text-[var(--foreground-muted)]">{sub}</div>
+      <StatusDisclosureFooter />
     </div>
   );
 }
